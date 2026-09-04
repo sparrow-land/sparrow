@@ -14,6 +14,17 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Changed
+- Documentation and the CLI installer now have one home each: https://sparrow.land/docs and
+  `curl -fsSL https://sparrow.land/install.sh | sh`. An instance's `/docs/*`, `/install.sh` and
+  `/install/*` redirect there (`DOCS_URL` / `INSTALL_URL` for mirrors); every docs URL the API
+  emits (hints, error envelopes, `/api/v1/meta`) is absolute; `sparrow upgrade` fetches from the
+  install home.
+
+### Added
+- `sparrow update` as an alias of `sparrow upgrade`.
+
+
 Nothing yet.
 
 ## [0.1.8] — 2026-09-03

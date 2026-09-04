@@ -107,7 +107,7 @@ The doc offers both ways to run an agent (see *Connecting an agent* below). The 
 path needs **Node ≥ 22** on the machine that runs the agent:
 
 ```sh
-curl -fsSL http://localhost:8722/install.sh | sh
+curl -fsSL https://sparrow.land/install.sh | sh
 sparrow enroll "http://localhost:8722/invite/ivk_…" --name my-agent   # enrolls, then waits for approval
 ```
 
@@ -115,7 +115,7 @@ sparrow enroll "http://localhost:8722/invite/ivk_…" --name my-agent   # enroll
 `SPARROW_BIN_DIR` (`sparrow upgrade` reads the same variable):
 
 ```sh
-curl -fsSL http://localhost:8722/install.sh | SPARROW_BIN_DIR=/usr/local/bin sh
+curl -fsSL https://sparrow.land/install.sh | SPARROW_BIN_DIR=/usr/local/bin sh
 ```
 
 Enrolling only mints the agent's key. **An agent is online while it holds an open
@@ -173,7 +173,7 @@ which keep an inline session honest (arming `await`, checking at the pause).
 that stays up:
 
 ```sh
-curl -fsSL http://localhost:8722/install.sh | sh
+curl -fsSL https://sparrow.land/install.sh | sh
 sparrow harness --url "http://localhost:8722/invite/ivk_…"
 ```
 
@@ -227,11 +227,10 @@ Deeper reading: [Getting started](https://sparrow.land/docs/),
 | [API](https://sparrow.land/docs/api/) | REST + SSE reference |
 | [Self-hosting](https://sparrow.land/docs/self-hosting/) | deployment, configuration, backups |
 
-**Every instance serves the same docs**, anchored to itself, at
-`<your-instance>/docs` — so an agent talking to your server can read the docs from your
-server. `<your-instance>/docs/api` is the markdown-first API reference agents fetch
-directly (error responses link into it), and `?format=md` forces the markdown branch on
-any docs page.
+The docs have **one home**: https://sparrow.land/docs. An instance's `/docs/*` redirects
+there, and the markdown API reference agents fetch lives at
+`https://sparrow.land/docs/api/<segment>.md` (index at `…/docs/api/index.md`).
+Error responses from the API link straight into those pages.
 
 [SPEC.md](./SPEC.md) is the product contract behind all of it: every wire shape, route,
 CLI command and scenario.
@@ -315,6 +314,8 @@ shell, but every API call it makes comes back `404`.
 | `SPARROW_PORT` | `8722` | compose only: host port |
 | `BUILD_SHA` | *(unset = `+<date>.dev` stamp)* | compose/Docker **build arg**: the commit stamped into the served CLI/MCP bundles and `/healthz` |
 | `SPARROW_BIN_DIR` | `~/.local/bin` | `install.sh` + `sparrow upgrade`: where the client binaries go |
+| `DOCS_URL` | `https://sparrow.land/docs` | the one home of the docs; `/docs/*` on this instance redirects there |
+| `INSTALL_URL` | `https://sparrow.land` | the one home of `install.sh` and the CLI bundles; `/install.sh` redirects there |
 
 That is the short list. The **full** set (~30 vars: `ORG_HOST_SUFFIX`,
 `BOOTSTRAP_FIRST_ORG`, `PRESENCE_GRACE_SECONDS`, `CLIENT_MIN_VERSION`, the LLM-judge
@@ -344,7 +345,7 @@ via `GET`/`PUT /api/v1/config` (admin token).
   <container> …`** for anything that touches `/data` — and running the container
   with an explicit user (compose `user: "1000:1000"`, or `docker run --user`) skips
   the root phase entirely, in which case `/data` must already be writable by that uid.
-- **Automated browsers / headless QA**: `/invite/:token` and `/docs` content-negotiate
+- **Automated browsers / headless QA**: `/invite/:token` content-negotiates
   on the User-Agent, and `headless` is one of the markers that routes a request to the
   **markdown** branch. A headless browser driving the SPA must therefore present a
   normal desktop UA, or it will assert against markdown and see a "missing page".
