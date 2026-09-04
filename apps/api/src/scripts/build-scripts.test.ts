@@ -4,6 +4,7 @@
  * so what the website build writes is pinned to what the server's own render
  * functions produce (SPEC "Canonical public homes" / "Docs by convention").
  */
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_EXAMPLE_BASE, dumpDocs } from './dump-docs.js';
 import { installScriptFor } from './render-install-script.js';
@@ -104,4 +105,82 @@ describe('render-install-script', () => {
       'BASE_URL="https://mirror.example.com/sparrow"',
     );
   });
+});
+
+/**
+ * Cache busting (#edge-cache): Cloudflare's edge has been observed serving
+ * `/install/sparrow.js` from cache with a `max-age` far longer than the
+ * `_headers` policy asks for, so a fresh `curl … | sh` could install the
+ * PREVIOUS bundle for hours after a release. The deterministic fix is to never
+ * request a URL that can be stale: the website build stamps the bundle build
+ * version into the two download URLs as `?v=<stamp>`.
+ */
+describe('render-install-script — cache busting', () => {
+  const TOKEN = '0.1.9+20260904.c0f0bff';
+  const ENCODED = encodeURIComponent(TOKEN); // `+` must not survive as a space
+
+  it('has no query at all without --cache-bust', () => {
+    const body = installScriptFor('https://sparrow.land');
+    expect(body).toContain('download "${BASE_URL}/install/sparrow.js" "${BIN_DIR}/sparrow.mjs"');
+    expect(body).toContain('download "${BASE_URL}/install/sparrow-mcp.js" "${BIN_DIR}/sparrow-mcp.mjs"');
+    expect(body).not.toContain('?v=');
+  });
+
+  it('stamps ?v=<token> on BOTH bundle URLs, url-encoded, and nowhere else', () => {
+    const body = installScriptFor('https://sparrow.land', TOKEN);
+    expect(body).toContain(`download "\${BASE_URL}/install/sparrow.js?v=${ENCODED}" "\${BIN_DIR}/sparrow.mjs"`);
+    expect(body).toContain(
+      `download "\${BASE_URL}/install/sparrow-mcp.js?v=${ENCODED}" "\${BIN_DIR}/sparrow-mcp.mjs"`,
+    );
+    // Exactly two occurrences — the installer's own URL, the PATH hint and the
+    // header comment must stay clean.
+    expect(body.match(/\?v=/g)).toHaveLength(2);
+    expect(body).not.toContain(`?v=${TOKEN}`); // raw `+` never reaches the URL
+  });
+
+  it('is exactly renderInstallScript(base, token), and otherwise the same installer', () => {
+    expect(installScriptFor('https://sparrow.land', TOKEN)).toBe(
+      renderInstallScript('https://sparrow.land', TOKEN),
+    );
+    // Byte-identical to the un-stamped script apart from the two query strings.
+    const stamped = installScriptFor('https://sparrow.land', TOKEN);
+    expect(stamped.split(`?v=${ENCODED}`).join('')).toBe(installScriptFor('https://sparrow.land'));
+  });
+
+  it('treats a blank token as no token', () => {
+    expect(installScriptFor('https://sparrow.land', '')).toBe(installScriptFor('https://sparrow.land'));
+  });
+
+  it('the script CLI takes --cache-bust <token>', () => {
+    const args = parseArgs(['--base', 'https://sparrow.land', '--cache-bust', TOKEN]);
+    expect(optionalString(args, 'cache-bust')).toBe(TOKEN);
+  });
+});
+
+/**
+ * The website build shells out to `render-install-script`, so the flag wiring —
+ * not just the pure function — is what publishes a cache-busted installer.
+ */
+describe('render-install-script — as the website build invokes it', () => {
+  it('writes an executable installer whose bundle URLs carry --cache-bust', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const dir = mkdtempSync(path.join(tmpdir(), 'sparrow-render-'));
+    const out = path.join(dir, 'install.sh');
+    try {
+      const r = spawnSync(
+        'pnpm',
+        ['exec', 'tsx', 'src/scripts/render-install-script.ts', '--base', 'https://sparrow.land',
+         '--out', out, '--cache-bust', '0.1.9+20260904.c0f0bff'],
+        { cwd: process.cwd(), encoding: 'utf8' },
+      );
+      expect(r.status, r.stderr).toBe(0);
+      const body = readFileSync(out, 'utf8');
+      expect(body).toContain('/install/sparrow.js?v=0.1.9%2B20260904.c0f0bff"');
+      expect(body).toContain('/install/sparrow-mcp.js?v=0.1.9%2B20260904.c0f0bff"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

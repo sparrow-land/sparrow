@@ -69,6 +69,25 @@ describe('canonical homes: /install.sh and /install/* redirect', () => {
     expect(res.headers.location).toBe('https://sparrow.land/install.sh');
   });
 
+  /**
+   * `sparrow upgrade` and the published installer cache-bust the bundle URLs
+   * (`?v=<stamp>`) so a CDN in front of the install home can never hand back the
+   * previous release. If this redirect dropped the query, an instance-mirrored
+   * upgrade would land on the cacheable bare URL and lose that guarantee.
+   */
+  it('carries the cache-busting query through to the install home', async () => {
+    ts = await makeTestServer();
+    const cli = await ts.app.inject({
+      method: 'GET',
+      url: '/install/sparrow.js?v=0.1.9%2B20260904.abc1234',
+      headers: AGENT,
+    });
+    expect(cli.statusCode).toBe(302);
+    expect(cli.headers.location).toBe('https://sparrow.land/install/sparrow.js?v=0.1.9%2B20260904.abc1234');
+    const sh = await ts.app.inject({ method: 'GET', url: '/install.sh?v=123', headers: AGENT });
+    expect(sh.headers.location).toBe('https://sparrow.land/install.sh?v=123');
+  });
+
   it('never caches the redirect (the home may move; the artifacts change per deploy)', async () => {
     ts = await makeTestServer();
     for (const url of ['/install.sh', '/install/sparrow.js']) {

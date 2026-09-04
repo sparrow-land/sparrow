@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ErrorResponse } from '@sparrow/common-types';
 import { sha256Hex } from '@sparrow/common-types/identity';
 import type { AppContext } from '../context.js';
@@ -183,16 +183,22 @@ export function registerOnboardingRoutes(
   // target is an operator setting that may move (and a CDN default-caching
   // `/install/*.js` by extension is exactly how a stale bundle survived a deploy
   // on 2026-09-01).
-  const installRedirect = (reply: FastifyReply, file: string): FastifyReply =>
-    reply
+  // The query string rides along: the published installer and `sparrow upgrade`
+  // cache-bust the bundle URLs with `?v=<stamp>`, and dropping it here would put
+  // an instance-mirrored upgrade back on the cacheable bare URL.
+  const installRedirect = (request: FastifyRequest, reply: FastifyReply, file: string): FastifyReply => {
+    const q = (request.raw.url ?? '').indexOf('?');
+    const query = q >= 0 ? (request.raw.url ?? '').slice(q) : '';
+    return reply
       .header('cache-control', 'no-store')
-      .redirect(installArtifactUrl(installHome(ctx.config), file), 302);
+      .redirect(installArtifactUrl(installHome(ctx.config), file) + query, 302);
+  };
 
-  app.get('/install.sh', (_request, reply) => installRedirect(reply, 'install.sh'));
+  app.get('/install.sh', (request, reply) => installRedirect(request, reply, 'install.sh'));
 
   app.get<{ Params: { '*': string } }>('/install/*', (request, reply) => {
     const file = (request.params['*'] ?? '').replace(/^\/+/, '');
-    return installRedirect(reply, `install/${file}`);
+    return installRedirect(request, reply, `install/${file}`);
   });
 
   app.get<{ Params: { token: string }; Querystring: { format?: string } }>(

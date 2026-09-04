@@ -58,9 +58,20 @@ function normalizeBaseUrl(baseUrl: string): string {
  * invocation. The bundles are published at `<base>/install/sparrow.js` and
  * `<base>/install/sparrow-mcp.js` — the canonical install home; the `.mjs` is
  * only the local filename.
+ *
+ * `cacheBust` (the bundle build stamp, passed by the website build) is appended
+ * to the two bundle URLs as `?v=<token>`. Cloudflare's edge has been observed
+ * serving `/install/sparrow.js` with a `max-age` far longer than the site's
+ * `_headers` policy asks for, which would install the PREVIOUS bundle for hours
+ * after a release; a URL that changes with every release can never be stale.
+ * Nothing else about the installer changes, and without a token no query is
+ * emitted at all.
  */
-export function renderInstallScript(baseUrl: string): string {
+export function renderInstallScript(baseUrl: string, cacheBust?: string): string {
   const base = normalizeBaseUrl(baseUrl);
+  // URL-encoded: build stamps contain `+` (`0.1.9+20260904.abc1234`), which is
+  // a literal space in a query string if left raw.
+  const v = cacheBust ? `?v=${encodeURIComponent(cacheBust)}` : '';
   return `#!/bin/sh
 # sparrow installer — fetched from ${base}/install.sh
 # Installs the sparrow CLI (\`sparrow\`) and MCP server (\`sparrow-mcp\`) into
@@ -113,8 +124,8 @@ download() { # <url> <dest>
 # without a package.json (no MODULE_TYPELESS_PACKAGE_JSON warning). The server
 # still serves them at the .js paths — only the local filename differs.
 echo "sparrow: downloading CLI + MCP bundles from \${BASE_URL} ..."
-download "\${BASE_URL}/install/sparrow.js" "\${BIN_DIR}/sparrow.mjs"
-download "\${BASE_URL}/install/sparrow-mcp.js" "\${BIN_DIR}/sparrow-mcp.mjs"
+download "\${BASE_URL}/install/sparrow.js${v}" "\${BIN_DIR}/sparrow.mjs"
+download "\${BASE_URL}/install/sparrow-mcp.js${v}" "\${BIN_DIR}/sparrow-mcp.mjs"
 
 # --- wrapper scripts -------------------------------------------------------
 write_wrapper() { # <name> <bundle>

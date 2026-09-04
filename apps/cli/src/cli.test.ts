@@ -4262,6 +4262,9 @@ describe('sparrow CLI — client versioning', () => {
     expect(installBaseUrl({ SPARROW_SERVER: 'https://instance.test' })).toBe('https://sparrow.land');
   });
 
+  /** The request path without the cache-busting `?v=<ms>` the CLI appends. */
+  const stripV = (u: string): string => u.replace(/\?v=\d+$/, '');
+
   /** A stub install home serving (or redirecting to) the two bundles. */
   async function installHome(opts?: { redirect?: boolean }): Promise<{
     url: string;
@@ -4321,7 +4324,9 @@ describe('sparrow CLI — client versioning', () => {
     expect(cap.out()).toContain('9.9.9+new');
     expect(fs.readFileSync(cliPath, 'utf8')).toBe(stub.body);
     expect(fs.existsSync(path.join(binDir, 'sparrow-mcp.mjs'))).toBe(true);
-    expect(stub.hits()).toEqual(['/install/sparrow.js', '/install/sparrow-mcp.js']);
+    // Cache-busted: every upgrade must reach origin, never a stale edge copy.
+    expect(stub.hits().map(stripV)).toEqual(['/install/sparrow.js', '/install/sparrow-mcp.js']);
+    for (const hit of stub.hits()) expect(hit).toMatch(/\?v=\d+$/);
 
     stub.close();
     fs.rmSync(home, { recursive: true, force: true });
@@ -4334,7 +4339,35 @@ describe('sparrow CLI — client versioning', () => {
     const code = await runCli(['upgrade'], { ...env, HOME: home, SPARROW_INSTALL_URL: stub.url }, cap.io);
     expect(code).toBe(0);
     expect(fs.readFileSync(cliPath, 'utf8')).toBe(stub.body);
-    expect(stub.hits()).toContain('/bundles/sparrow.js');
+    expect(stub.hits().map(stripV)).toContain('/bundles/sparrow.js');
+
+    stub.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  /**
+   * Edge caches have been observed serving `/install/sparrow.js` well past the
+   * `max-age` the origin asks for, so an upgrade could re-install the bundle it
+   * already had. A per-run `?v=<Date.now()>` makes every upgrade a cache miss.
+   */
+  it('upgrade cache-busts both bundle URLs with a fresh timestamp', async () => {
+    const stub = await installHome();
+    const { home } = installedHome();
+    const before = Date.now();
+    const cap = capture();
+    const code = await runCli(['upgrade'], { ...env, HOME: home, SPARROW_INSTALL_URL: stub.url }, cap.io);
+    expect(code).toBe(0);
+    const hits = stub.hits();
+    expect(hits).toHaveLength(2);
+    for (const hit of hits) {
+      const q = new URL(hit, 'http://x').searchParams.get('v');
+      expect(q, hit).toMatch(/^\d+$/);
+      // A real clock reading from THIS run, not a constant baked into the build.
+      expect(Number(q)).toBeGreaterThanOrEqual(before);
+      expect(Number(q)).toBeLessThanOrEqual(Date.now());
+    }
+    // Both bundles, each stamped.
+    expect(hits.map((h) => h.split('?')[0])).toEqual(['/install/sparrow.js', '/install/sparrow-mcp.js']);
 
     stub.close();
     fs.rmSync(home, { recursive: true, force: true });
@@ -4348,7 +4381,7 @@ describe('sparrow CLI — client versioning', () => {
     expect(code).toBe(0);
     expect(cap.out()).toContain('9.9.9+new');
     expect(fs.readFileSync(cliPath, 'utf8')).toBe(stub.body);
-    expect(stub.hits()).toEqual(['/install/sparrow.js', '/install/sparrow-mcp.js']);
+    expect(stub.hits().map(stripV)).toEqual(['/install/sparrow.js', '/install/sparrow-mcp.js']);
     // The alias is discoverable in help, not a hidden synonym.
     const help = capture();
     await runCli(['--help'], env, help.io);

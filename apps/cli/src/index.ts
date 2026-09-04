@@ -3548,8 +3548,14 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()), { mode: 0o755 });
         };
 
-        await download(`${base}/install/sparrow.js`, cliPath);
-        await download(`${base}/install/sparrow-mcp.js`, mcpPath);
+        // Cache-bust: edge caches in front of the install home have been seen
+        // serving the bundles well past the `max-age` the origin asks for, so a
+        // plain URL can hand `upgrade` the release it already has. A per-run
+        // timestamp makes every upgrade reach origin (the bundles are ~1.5 MB —
+        // once per explicit upgrade, that is fine).
+        const v = `?v=${Date.now()}`;
+        await download(`${base}/install/sparrow.js${v}`, cliPath);
+        await download(`${base}/install/sparrow-mcp.js${v}`, mcpPath);
         const newVersion = readVersion(cliPath);
         print(
           { old: oldVersion ?? null, new: newVersion ?? null, installUrl: base, cli: cliPath, mcp: mcpPath },
