@@ -341,6 +341,15 @@ describe('HandsFreeOverlay shell', () => {
  * ================================================================== */
 
 describe('HandsFreeOverlay listening (streaming STT)', () => {
+  it('puts Cancel on the left and Send on the right (Jake, first live session)', async () => {
+    renderOverlay();
+    await startListening();
+    const cancel = screen.getByRole('button', { name: /cancel/i });
+    const send = screen.getByRole('button', { name: /^send$/i });
+    // DOM order is visual order in the flex row: Cancel must precede Send.
+    expect(cancel.compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('ready → listening: meter, timer, and the two big buttons', async () => {
     renderOverlay();
     await startListening();

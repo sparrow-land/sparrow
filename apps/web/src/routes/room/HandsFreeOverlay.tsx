@@ -856,7 +856,16 @@ export function HandsFreeOverlay({
             >
               {formatElapsed(seconds)}
             </span>
+            {/* Cancel left, Send right — the primary action under the thumb
+                that usually holds the phone (Jake, first live session). */}
             <div className="flex w-full items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={cancelListening}
+                className="flex-1 rounded-lg border border-[var(--sparrow-border-strong)] px-6 py-4 text-lg font-semibold text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)]"
+              >
+                Cancel
+              </button>
               {capture === 'recording' ? (
                 <button
                   type="button"
@@ -888,13 +897,6 @@ export function HandsFreeOverlay({
                   <Send size={18} aria-hidden="true" /> Send
                 </button>
               )}
-              <button
-                type="button"
-                onClick={cancelListening}
-                className="flex-1 rounded-lg border border-[var(--sparrow-border-strong)] px-6 py-4 text-lg font-semibold text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)]"
-              >
-                Cancel
-              </button>
             </div>
           </>
         )}

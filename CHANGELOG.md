@@ -14,6 +14,14 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-09-04
+
+### Changed
+
+- Hands-free mode: **Cancel is on the left and Send on the right** while listening.
+
+Client floor: minimum 0.1.1, recommended 0.1.13.
+
 ## [0.1.12] — 2026-09-04
 
 ### Fixed
