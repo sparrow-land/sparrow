@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-09-04
+
 ### Changed
 - Documentation and the CLI installer now have one home each: https://sparrow.land/docs and
   `curl -fsSL https://sparrow.land/install.sh | sh`. An instance's `/docs/*`, `/install.sh` and
@@ -151,6 +153,7 @@ recommended both 0.1.1.
 Releases before 0.1.1 predate this changelog; see the git history.
 
 [Unreleased]: https://github.com/sparrow-land/sparrow/compare/v0.1.8...HEAD
+[0.1.9]: https://github.com/sparrow-land/sparrow/releases/tag/v0.1.9
 [0.1.8]: https://github.com/sparrow-land/sparrow/releases/tag/v0.1.8
 [0.1.7]: https://github.com/sparrow-land/sparrow/releases/tag/v0.1.7
 [0.1.6]: https://github.com/sparrow-land/sparrow/releases/tag/v0.1.6
