@@ -33,15 +33,28 @@ ct_force="$(curl -s -o /dev/null -w '%{content_type}' \
   "$SERVER/invite/$token?format=md")"
 assert_contains "$ct_force" 'text/markdown' 'format=md overrides UA/Accept'
 
-# install.sh is served and templated with this server's origin.
-installer="$(curl -fsS "$SERVER/install.sh")"
-assert_contains "$installer" "$SERVER" 'install.sh carries BASE_URL'
-assert_contains "$installer" 'sparrow' 'install.sh installs sparrow'
-
-# The bundled CLI is served and is a working single-file program.
-curl -fsS "$SERVER/install/sparrow.js" -o "$SPARROW_TMPROOT/sparrow.js"
-ver="$(node "$SPARROW_TMPROOT/sparrow.js" --version)"
-assert_contains "$ver" '.' 'bundled CLI reports a version'
+# The installer and the bundles have ONE home (INSTALL_URL, default
+# https://sparrow.land): the instance never serves them, it redirects — so old
+# links and `sparrow upgrade` on old clients keep working while every document
+# says `curl -fsSL https://sparrow.land/install.sh | sh`.
+redir() { curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "$1"; }
+assert_eq "302 https://sparrow.land/install.sh" "$(redir "$SERVER/install.sh")" \
+  'install.sh redirects to the canonical install home'
+assert_eq "302 https://sparrow.land/install/sparrow.js" "$(redir "$SERVER/install/sparrow.js")" \
+  'the CLI bundle redirects to the canonical install home'
+# Docs have one home too (DOCS_URL, default https://sparrow.land/docs): a
+# non-browser caller is sent to the markdown page, a browser to the reference page.
+assert_eq "302 https://sparrow.land/docs/api/index.md" "$(redir "$SERVER/docs/api")" \
+  'docs index redirects agents to the markdown home'
+assert_eq "302 https://sparrow.land/docs/api/me/inbox.md" "$(redir "$SERVER/docs/api/me/inbox")" \
+  'a docs page redirects agents to its markdown twin'
+assert_eq "302 https://sparrow.land/docs/api/" \
+  "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -A 'Mozilla/5.0' -H 'accept: text/html' "$SERVER/docs/api/me/inbox")" \
+  'a browser is sent to the one REST reference page'
+# The invite doc itself still tells the agent the canonical install line.
+md_doc="$(curl -fsS "$SERVER/invite/$token?format=md")"
+assert_contains "$md_doc" 'curl -fsSL https://sparrow.land/install.sh | sh' \
+  'the invite doc quotes the canonical installer'
 
 # Raw-API enroll + poll exactly as the doc's Option A prescribes.
 enr_resp="$(curl -sS -X POST "$SERVER/api/v1/invite/$token/enroll" \
@@ -55,4 +68,4 @@ poll="$(curl -sS "$SERVER/api/v1/invite/$token/enrollments/$eid" -H "authorizati
 assert_json "$poll" '.status' 'approved' 'poll reports approved'
 assert_json "$poll" '(.key // "") | startswith("agk_")' 'true' 'key delivered per the doc'
 
-pass "invite doc negotiation, install.sh + bundled CLI, and raw enroll/poll all verified"
+pass "invite doc negotiation, canonical install/docs redirects, and raw enroll/poll all verified"
