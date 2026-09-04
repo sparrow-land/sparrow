@@ -1,0 +1,33 @@
+{
+  "name": "@sparrow/client",
+  "version": "0.1.1",
+  "description": "Typed, dependency-light HTTP + SSE client for sparrow (node & browser).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sparrow/common-types": "workspace:*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@sparrow/api": "workspace:*",
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

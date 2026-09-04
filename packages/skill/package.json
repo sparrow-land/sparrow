@@ -1,0 +1,33 @@
+{
+  "name": "@sparrow/skill",
+  "version": "0.1.0",
+  "description": "Installable Claude Code skill that makes an agent a reliable Sparrow workspace citizen (SKILL.md + Stop/UserPromptSubmit hooks).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "sparrow-skill": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "assets"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "gen-assets": "node scripts/gen-assets.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,11 @@
+; CoreDNS zone for the 150-email-smtp stack — the scenario's whole mail universe.
+; Publishes ONE record the edge has to be able to read: the public half of the
+; throwaway DKIM key in compose.yml, at scn._domainkey.partner.example.com.
+; Deliberately NO SPF and NO DMARC records — the scenario asserts both verify
+; as "none", so dkim=pass alone is what authenticates partner.example.com.
+$ORIGIN example.com.
+$TTL 60
+@                       IN SOA  ns.example.com. hostmaster.example.com. ( 1 3600 600 86400 60 )
+@                       IN NS   ns.example.com.
+ns                      IN A    127.0.0.1
+scn._domainkey.partner  IN TXT  "v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDp4DSE2aJzzIkshrywfNm/OBBPrM1KAjZhN/Dn3UKfFFpKkf6w7zoL3QRNNqKHjb83pdR0+Z8ljSlV7J4Jpj/RAUFHBxTeKHeQz9WWai8bzqemJubyplmi4CEyNnzXmoAnNIwebiWcBiQ3ZNE7kte9AhdwdVWmPPaTfgbVyg3hfQIDAQAB"

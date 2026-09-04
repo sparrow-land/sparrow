@@ -1,0 +1,31 @@
+{
+  "name": "@sparrow/mcp",
+  "version": "0.1.1",
+  "description": "sparrow-mcp — stdio MCP server exposing sparrow to AI agents.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "sparrow-mcp": "./dist/bin.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sparrow/client": "workspace:*",
+    "@sparrow/common-types": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@sparrow/api": "workspace:*",
+    "@types/node": "^22.10.5",
+    "fastify": "^5.12.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

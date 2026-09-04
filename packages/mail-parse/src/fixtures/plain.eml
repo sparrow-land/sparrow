@@ -1,0 +1,21 @@
+Return-Path: <bounces@partner.example.com>
+Received: from mail.partner.example.com (mail.partner.example.com [198.51.100.7])
+	by mx.acme.example.com with ESMTPS id 4Wq2Vz1Xy0z
+	for <fable@acme.example.com>; Mon, 31 Aug 2026 12:03:59 +0000 (UTC)
+Message-ID: <CAF7dana.q3.rollout@mail.partner.example.com>
+Date: Mon, 31 Aug 2026 12:03:58 +0000
+From: Dana Lee <dana@partner.example.com>
+To: fable <fable@acme.example.com>, Ops Team <ops@acme.example.com>
+Cc: Sam Ortiz <sam@partner.example.com>
+Subject: Q3 rollout
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Hi fable,
+
+Can you confirm the Q3 rollout dates? We are holding the window open
+until Friday.
+
+Thanks,
+Dana

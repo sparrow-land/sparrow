@@ -1,0 +1,17 @@
+# CoreDNS for the 150-email-smtp stack.
+#
+# The gateway verifies SPF/DKIM/DMARC with `mailauth`, which does REAL DNS
+# lookups — so a scenario that wants "the agent pops it with PASSING
+# verification" has to publish a DKIM key somewhere the gateway can read it.
+# This is that somewhere: authoritative for `example.com` (the scenario's whole
+# mail universe), forwarding everything else — compose service names included —
+# to docker's embedded resolver.
+example.com:53 {
+    file /etc/coredns/example.com.db
+    errors
+}
+
+.:53 {
+    forward . 127.0.0.11
+    errors
+}

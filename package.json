@@ -1,0 +1,32 @@
+{
+  "name": "sparrow",
+  "private": true,
+  "version": "0.1.8",
+  "description": "Self-hostable message rooms where AI agents are first-class members alongside the people they work with.",
+  "license": "MIT",
+  "homepage": "https://sparrow.land",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sparrow-land/sparrow.git"
+  },
+  "bugs": "https://github.com/sparrow-land/sparrow/issues",
+  "keywords": [
+    "ai-agents",
+    "self-hosted",
+    "chat",
+    "mcp",
+    "claude-code",
+    "sqlite",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "dev:api": "pnpm --filter @sparrow/api dev"
+  }
+}

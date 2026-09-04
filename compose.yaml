@@ -1,0 +1,79 @@
+# Pin the compose project name so the data volume stays `sparrow_sparrow-data`
+# regardless of the checkout directory's name.
+#
+# Running a SECOND instance: the pin above means `SPARROW_PORT=… docker compose up`
+# from another directory would rebind THIS instance and THIS volume. Give the second
+# instance its own project name, port, and BASE_URL:
+#
+#   docker compose -p sparrow2 up -d          # with SPARROW_PORT/BASE_URL set, e.g.
+#   SPARROW_PORT=8798 BASE_URL=http://localhost:8798 docker compose -p sparrow2 up -d
+#
+# Each project name gets its own `<project>_sparrow-data` volume and its own container.
+name: sparrow
+
+services:
+  sparrow:
+    # Local builds are tagged `sparrow-core:local` so they never shadow the
+    # published registry image. To run the official image instead of building:
+    #   SPARROW_IMAGE=ghcr.io/sparrow-land/sparrow:latest docker compose up -d
+    image: ${SPARROW_IMAGE:-sparrow-core:local}
+    build:
+      context: .
+      args:
+        # `.git` is not in the build context, so the version stamp baked into the
+        # served CLI/MCP bundles comes from this arg. Without it the bundles are
+        # stamped `<version>+<date>.dev`. Build a stamped image with:
+        #   BUILD_SHA=$(git rev-parse --short HEAD) docker compose build
+        BUILD_SHA: "${BUILD_SHA:-}"
+    # Host port defaults to 8722; override with SPARROW_PORT to run on a different
+    # port or a second instance. The container always listens on 8722 internally.
+    # BASE_URL drives every minted invite/API URL and defaults to the host port
+    # below, so `SPARROW_PORT=9104 docker compose up` is self-consistent. Set it
+    # explicitly whenever clients reach the instance at some other URL (a LAN
+    # address, a reverse proxy, a public hostname).
+    ports:
+      - "${SPARROW_PORT:-8722}:8722"
+    volumes:
+      - sparrow-data:/data
+    environment:
+      BASE_URL: ${BASE_URL:-http://localhost:${SPARROW_PORT:-8722}}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      OPEN_ORG_CREATION: ${OPEN_ORG_CREATION:-true}
+      # --- signup lockdown (both optional; unset = the open defaults) ---------
+      # AUTH_ALLOW_SIGNUP=false closes self-registration entirely; leave it empty
+      # (the default below) to keep the five-minute demo working. Empty means
+      # "unset", so an untouched compose file never overrides the shipped default.
+      AUTH_ALLOW_SIGNUP: ${AUTH_ALLOW_SIGNUP:-}
+      # Comma-separated globs an address must match to register, e.g.
+      # `*@yourcompany.com,*@sub.yourcompany.com` (only `*` is special;
+      # case-insensitive). Empty = anyone may sign up.
+      AUTH_ALLOWED_EMAIL_PATTERNS: ${AUTH_ALLOWED_EMAIL_PATTERNS:-}
+      # Server log level: fatal | error | warn | info | debug | trace, or one of
+      # off/silent/none/false/0 to disable logging entirely. Empty (the default
+      # below) means "unset" → `info`.
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      # Comma-separated exact origins allowed on /api/v1/*. Empty (the default
+      # below) means "unset" → reflect any origin. Documented in the README, but
+      # this line is what makes it reachable on the compose path at all.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      VOICE_PROVIDER: ${VOICE_PROVIDER:-}
+      # --- email medium (all optional; unset = medium off) --------------------
+      # The medium turns on when EMAIL_ORG_SUFFIX is set AND a provider registers.
+      #   EMAIL_ORG_SUFFIX    accepted address suffix, e.g. `.example.com`
+      #                       (an agent is <name>@<org-slug><suffix>)
+      #   EMAIL_PROVIDER      `fake` (in-process loopback, for local testing) or
+      #                       `webhook` (requires EMAIL_WEBHOOK_URL)
+      #   EMAIL_INBOUND_TOKEN bearer the mail gateway presents to POST inbound mail;
+      #                       unset = that route 404s even with the medium on
+      #   EMAIL_WEBHOOK_URL   where outbound mail is POSTed (provider `webhook`)
+      #   EMAIL_WEBHOOK_TOKEN bearer this server presents on that webhook
+      # A runnable SMTP gateway example: scenarios/150-email-smtp/compose.yml
+      EMAIL_ORG_SUFFIX: ${EMAIL_ORG_SUFFIX:-}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-}
+      EMAIL_INBOUND_TOKEN: ${EMAIL_INBOUND_TOKEN:-}
+      EMAIL_WEBHOOK_URL: ${EMAIL_WEBHOOK_URL:-}
+      EMAIL_WEBHOOK_TOKEN: ${EMAIL_WEBHOOK_TOKEN:-}
+
+volumes:
+  sparrow-data:

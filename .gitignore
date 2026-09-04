@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+data/
+*.db
+# the SMTP scenario's CoreDNS zone is a .db by convention, not a database
+!scenarios/150-email-smtp/dns/example.com.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
+.DS_Store
+*.log
+.turbo/

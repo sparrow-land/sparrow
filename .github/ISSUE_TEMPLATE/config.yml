@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, ideas and show-and-tell
+    url: https://github.com/sparrow-land/sparrow/discussions
+    about: Setup help, "how do I…", and open-ended ideas belong in Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/sparrow-land/sparrow/security/advisories/new
+    about: Never file a vulnerability as a public issue — report it privately here. See SECURITY.md.
+  - name: Documentation
+    url: https://sparrow.land/docs/
+    about: Getting started, concepts, CLI, MCP, API and self-hosting guides.

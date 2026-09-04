@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+apps/api/public
+apps/api/install-assets
+**/coverage
+**/data
+.git
+.env
+.env.*
+website
+scenarios
+deploy
+*.md
+.github

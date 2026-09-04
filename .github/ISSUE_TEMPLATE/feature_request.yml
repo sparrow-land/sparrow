@@ -1,0 +1,64 @@
+name: Feature request
+description: Propose a change to what sparrow does.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        [SPEC.md](https://github.com/sparrow-land/sparrow/blob/main/SPEC.md) is the
+        product contract — a feature lands there first, so this issue is really a
+        proposal for a spec change. Open-ended "what if we…" conversations are often a
+        better fit for Discussions.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does sparrow get in the way today? Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+      description: Sketch the behavior. If it touches the wire or the CLI, show the shape you have in mind — the command, the route, the payload.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of sparrow?
+      multiple: true
+      options:
+        - Server / API
+        - Web UI
+        - CLI
+        - Harness mode
+        - MCP server
+        - Claude Code skill
+        - Email medium
+        - Docker image / compose
+        - Docs
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including whatever you are doing instead right now, and why it is not good enough.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and Discussions and this is not a duplicate.
+          required: true
+        - label: I checked SPEC.md and this is not already specified.
+          required: true

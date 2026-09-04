@@ -1,0 +1,103 @@
+# Publish the sparrow-core container image to GHCR.
+#
+# Triggers on a published GitHub release (the normal path) and on manual dispatch.
+# It never runs on a plain push, so it stays inert until the repo is public and a
+# release is cut.
+#
+# The image is stamped: `.git` is excluded from the Docker build context, so the
+# version baked into the served CLI/MCP bundles comes from the BUILD_SHA build
+# arg. Without it the Dockerfile stamps `<version>+<date>.dev` bundles, which it
+# says never to ship — so this workflow always passes a real short SHA.
+#
+# ONE-TIME SETTING: after the first successful publish, the GHCR package
+# `sparrow-core` must be flipped to Public (GitHub → Packages → sparrow-core →
+# Package settings → Change visibility). Until that is done
+# `docker pull ghcr.io/sparrow-land/sparrow` returns 403 for anonymous users
+# even though the workflow succeeded.
+name: Publish image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to publish as (e.g. v0.1.8). Defaults to the ref name.'
+        required: false
+        type: string
+
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tags
+        id: meta
+        run: |
+          set -eu
+          IMAGE="ghcr.io/${{ github.repository }}"
+          # Lowercase — GHCR rejects uppercase in a repository name.
+          IMAGE="$(printf '%s' "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          VERSION="${{ inputs.tag }}"
+          if [ -z "$VERSION" ]; then VERSION="${GITHUB_REF_NAME}"; fi
+          # Strip a leading `v` so the image tag matches the package version.
+          VERSION="${VERSION#v}"
+          BUILD_SHA="$(git rev-parse --short HEAD)"
+          {
+            echo "image=$IMAGE"
+            echo "version=$VERSION"
+            echo "build_sha=$BUILD_SHA"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing $IMAGE:$VERSION (+ :latest) from $BUILD_SHA"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # The Dockerfile FAILS the build if BUILD_SHA is set but the bundles
+          # come out unstamped, so a green run here proves the stamp landed.
+          build-args: |
+            BUILD_SHA=${{ steps.meta.outputs.build_sha }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.build_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the published image reports the stamp
+        run: |
+          set -eu
+          IMAGE="${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}"
+          docker run -d --name verify -p 8722:8722 "$IMAGE"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8722/healthz >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8722/healthz
+          # The served CLI bundle must carry the build stamp, not `.dev`.
+          curl -fsS http://127.0.0.1:8722/install/sparrow.js \
+            | grep -q "${{ steps.meta.outputs.build_sha }}" \
+            || { echo "FATAL: published bundle is not stamped"; exit 1; }
+          # The server process itself (pid 1) must not be root. `docker exec`
+          # would report the image's default user, so read pid 1 directly.
+          test "$(docker exec verify sh -c 'cat /proc/1/status | awk "/^Uid:/{print \$2}"')" != "0"
+          docker rm -f verify

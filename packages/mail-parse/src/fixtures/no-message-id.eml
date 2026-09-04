@@ -1,0 +1,8 @@
+Date: Mon, 31 Aug 2026 16:45:00 +0000
+From: alerts@monitor.example.io
+Bcc: fable@acme.example.com
+Subject: Disk usage 91%
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+host db-1 is at 91% on /var.

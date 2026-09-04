@@ -1,0 +1,33 @@
+{
+  "name": "@sparrow/cli",
+  "version": "0.1.8",
+  "description": "sparrow — command-line client for sparrow.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "sparrow": "./dist/bin.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sparrow/client": "workspace:*",
+    "@sparrow/common-types": "workspace:*",
+    "@sparrow/skill": "workspace:*",
+    "commander": "^13.0.0",
+    "picocolors": "^1.1.1",
+    "undici": "^8.10.0"
+  },
+  "devDependencies": {
+    "@sparrow/api": "workspace:*",
+    "@types/node": "^22.10.5",
+    "fastify": "^5.12.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

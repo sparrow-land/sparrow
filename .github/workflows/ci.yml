@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  scenarios:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run e2e scenarios
+        run: |
+          if [ -x scenarios/run-all.sh ]; then
+            scenarios/run-all.sh
+          else
+            echo "no scenarios yet — skipping"
+          fi
+
+  # Main-branch builds publish MOVING tags only (`main`, `sha-<short>`).
+  # The `latest` and version tags are owned exclusively by
+  # .github/workflows/publish-image.yml, which runs on a published release —
+  # otherwise every merge to main would silently become `:latest` for everyone
+  # who followed the README's pull command.
+  docker:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test, scenarios]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push image
+        run: |
+          set -eu
+          if [ ! -f Dockerfile ]; then echo "no Dockerfile yet — skipping"; exit 0; fi
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          IMAGE="$(printf 'ghcr.io/%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          # `.git` is not in the build context: BUILD_SHA is the only way the
+          # served CLI/MCP bundles get a real version stamp instead of `.dev`.
+          docker build --build-arg "BUILD_SHA=$SHORT_SHA" \
+            -t "$IMAGE:main" -t "$IMAGE:sha-$SHORT_SHA" .
+          docker push "$IMAGE:main"
+          docker push "$IMAGE:sha-$SHORT_SHA"

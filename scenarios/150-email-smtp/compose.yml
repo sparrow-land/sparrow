@@ -1,0 +1,105 @@
+# 150-email-smtp — the only compose scenario in the suite.
+#
+# core (the shared scenario image) + apps/mail-gateway + mailpit (the sink),
+# plus a CoreDNS sidecar publishing the one DKIM key the edge has to be able to
+# look up. `scenarios/lib.sh scenario_compose_start` brings this up under a
+# per-run project name (`-p sparrow-scn-$$`) with host ports it allocated from
+# the same `_ac_free_port` helper every other scenario uses, and takes it down
+# with `down -v` in the EXIT trap.
+services:
+  # Authoritative for example.com; everything else forwards to docker's embedded
+  # resolver, so `core`/`mailpit` still resolve for the gateway.
+  dns:
+    image: coredns/coredns:1.11.3
+    command: ['-conf', '/etc/coredns/Corefile']
+    volumes:
+      - ./dns:/etc/coredns:ro
+    networks:
+      scn:
+        ipv4_address: ${DNS_IP}
+
+  # The API. `image:` is pinned to the tag run-all.sh already built — this
+  # scenario never builds core.
+  core:
+    image: ${SPARROW_SCENARIO_IMAGE}
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      BASE_URL: http://127.0.0.1:${SPARROW_PORT}
+      # The medium is ON: a suffix plus a provider that registers. `webhook`
+      # (not `fake`) — this scenario relays real mail.
+      EMAIL_ORG_SUFFIX: .example.com
+      EMAIL_PROVIDER: webhook
+      EMAIL_WEBHOOK_URL: http://gateway:2526/relay
+      EMAIL_WEBHOOK_TOKEN: scenario-webhook
+      EMAIL_INBOUND_TOKEN: scenario-inbound
+    ports:
+      - '127.0.0.1:${SPARROW_PORT}:8722'
+    networks: [scn]
+
+  # The OSS mail edge: SMTP in → mailauth → POST /email/inbound; outbound
+  # webhook in → DKIM-signed MIME → smarthost (mailpit).
+  gateway:
+    # A stable tag (rather than compose's per-project default) so repeated runs
+    # reuse one image instead of accumulating one per project name.
+    image: sparrow-mail-gateway:scenarios
+    build:
+      context: ../..
+      dockerfile: apps/mail-gateway/Dockerfile
+    environment:
+      MAIL_INBOUND_URL: http://core:8722/api/v1/email/inbound
+      EMAIL_INBOUND_TOKEN: scenario-inbound
+      EMAIL_ORG_SUFFIX: .example.com
+      EMAIL_WEBHOOK_TOKEN: scenario-webhook
+      MAIL_SMTP_PORT: 2525
+      MAIL_OUTBOUND_PORT: 2526
+      MAIL_HELO_NAME: gateway.example.com
+      # Sign outbound mail so the sink can see a DKIM-Signature header. `d=` is
+      # the parent of every agent address (`<agent>@<slug>.example.com`), which
+      # is DMARC-aligned in relaxed mode and org-slug independent.
+      MAIL_DKIM_DOMAIN: example.com
+      MAIL_DKIM_SELECTOR: scn
+      # NOTE: throwaway TEST-ONLY key, checked in intentionally — it signs mail
+      # to the local test sink for the DKIM scenario and protects nothing.
+      MAIL_DKIM_PRIVATE_KEY: |
+        -----BEGIN PRIVATE KEY-----
+        MIICdwIBADANBgkqhkiG9w0BAQEFAASCAmEwggJdAgEAAoGBAOngNITZonPMiSyG
+        vLB82b84EE+szUoCNmE38OfdQp8UWkqR/rDvOgvdBE02ooeNvzel1HT5nyWNKVXs
+        ngmmP9EBQUcHFN4od5DP1ZZqLxvOp6Ym5vKmWaLgITI2fNeagCc0jB5uJZwGJDdk
+        0TuS170CF3B1VaY89pN+BtXKDeF9AgMBAAECgYEAqvb+7W661rPaQvZr0QgzlRlC
+        szu7BjL/1amzLYwNO4UBTCnVaTo30JxMnLUnsrfn5KIQ4UHpGOZMJUfHb35cfuMD
+        JwWaCxPLrr6RplL0oqSeH2Qy+LXrEE/LBq7uOBcDLN+x46c4gWgJszWYfqxXHCd3
+        qtiZyYA9NfCym+azeXECQQD5HIXZpNNbpy5EjuBOvhZsnXUrKVF8zh10yB/0qaar
+        lHW0ttdiTV19yGC+DSrVoPm/YwdA+JtjXVEP5wYEom2jAkEA8FfUDAYg/4U9nlyC
+        JJ3bE5ePmFD1Lg5iVC6F8h2JREWuBXjLXl66X1ii6HNgPz7h4ExkKKWeR3K1wXWw
+        uosmXwJAbHyUeiVC+q5DAw5p90DnSSQFi+dxmnW09E/XQtjDQgPkgvABusjQh1/F
+        ad8YIXL6cPPyi8P4//v6un806r3GGwJBANKYEryKbkWXKXvmkT6mdvz+05ribUNy
+        5SPgNAwHZ2zEJYyz4HcLSAEduHk4B4DDh8YzCZw4Kq1uTOZ8SmPaY78CQDMBIkvd
+        c8huj35TCNuKl+PKA2yf+b4n5lDQM2CX50Ga4GdsUH+25X0m9AKlP1r9Fj82R7nL
+        PxRTozQ/FGKEkD8=
+        -----END PRIVATE KEY-----
+      MAIL_SMARTHOST_HOST: mailpit
+      MAIL_SMARTHOST_PORT: '1025'
+    dns:
+      - ${DNS_IP}
+    ports:
+      - '127.0.0.1:${SMTP_PORT}:2525'
+      - '127.0.0.1:${GATEWAY_PORT}:2526'
+    depends_on: [core, dns, mailpit]
+    networks: [scn]
+
+  # The sink: everything the gateway relays lands here, readable over its API.
+  mailpit:
+    image: axllent/mailpit:v1.31
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: '1'
+      MP_SMTP_AUTH_ALLOW_INSECURE: '1'
+    ports:
+      - '127.0.0.1:${MAILPIT_PORT}:8025'
+    networks: [scn]
+
+networks:
+  scn:
+    ipam:
+      config:
+        # Randomized per run by run.sh, so concurrent runs never collide.
+        - subnet: ${DNS_SUBNET}

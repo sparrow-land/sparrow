@@ -1,0 +1,47 @@
+Message-ID: <attach-0001@mail.partner.example.com>
+Date: Mon, 31 Aug 2026 14:20:00 +0000
+From: Dana Lee <dana@partner.example.com>
+To: fable@acme.example.com
+Subject: Plan attached
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=_mixed_1"
+
+--=_mixed_1
+Content-Type: multipart/alternative; boundary="=_alt_2"
+
+--=_alt_2
+Content-Type: text/plain; charset=utf-8
+
+Plan attached. Logo inline.
+
+--=_alt_2
+Content-Type: text/html; charset=utf-8
+
+<p>Plan attached. Logo <img src="cid:logo-1"> inline.</p>
+
+--=_alt_2--
+
+--=_mixed_1
+Content-Type: application/pdf; name="plan.pdf"
+Content-Disposition: attachment; filename="plan.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJcOkw7zDtsOfCjEgMCBvYmoKPDwvVHlwZS9DYXRhbG9nPj4KZW5kb2Jq
+CnRyYWlsZXIKPDwvUm9vdCAxIDAgUj4+CiUlRU9GCg==
+
+--=_mixed_1
+Content-Type: image/png
+Content-Disposition: inline; filename="logo.png"
+Content-ID: <logo-1>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmM
+IQAAAABJRU5ErkJggg==
+
+--=_mixed_1
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment
+
+unnamed note body
+
+--=_mixed_1--

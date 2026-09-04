@@ -1,0 +1,12 @@
+packages:
+  - apps/*
+  - packages/*
+
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild
+
+# Pinned in lockstep with the private root workspace; 5.12.0 pulls a day-old
+# find-my-way that trips pnpm's minimum-release-age policy in docker builds.
+overrides:
+  fastify: 5.11.3

@@ -1,0 +1,25 @@
+Message-ID: <alt-0001@mail.partner.example.com>
+In-Reply-To: <eml_a1b2c3d4e5f6@acme.example.com>
+References: <eml_root0000@acme.example.com>
+	<eml_a1b2c3d4e5f6@acme.example.com>
+Date: Mon, 31 Aug 2026 13:10:00 +0000
+From: "Lee, Dana" <dana@PARTNER.Example.COM>
+To: fable@acme.example.com
+Subject: Re: Q3 rollout
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="=_alt_boundary_1"
+
+--=_alt_boundary_1
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+The dates work for us =E2=80=94 locking them in.
+
+--=_alt_boundary_1
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<div><p>The dates work for us =E2=80=94 <b>locking them in</b>.</p>
+<script>alert(1)</script></div>
+
+--=_alt_boundary_1--

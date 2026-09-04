@@ -1,0 +1,44 @@
+{
+  "name": "@sparrow/mail-gateway",
+  "version": "0.1.0",
+  "description": "OSS SMTP sidecar: SMTP in -> POST /email/inbound; outbound webhook -> DKIM-signed MIME relay.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/gateway.js",
+  "types": "./dist/gateway.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/gateway.d.ts",
+      "import": "./dist/gateway.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "sparrow-mail-gateway": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@sparrow/common-types": "workspace:*",
+    "@sparrow/mail-parse": "workspace:*",
+    "mailauth": "^5.0.2",
+    "nodemailer": "^9.1.0",
+    "smtp-server": "^3.19.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/nodemailer": "^8.0.1",
+    "@types/smtp-server": "^3.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

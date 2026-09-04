@@ -1,0 +1,10 @@
+Message-ID: <broken-0001@spam.example.org>
+Date: not a real date
+From: Chaos <chaos@spam.example.org>
+To: fable@acme.example.com
+Subject: broken tree
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=_never_appears"
+
+this preamble is all there is; the declared boundary never shows up and
+the message just stops mid-

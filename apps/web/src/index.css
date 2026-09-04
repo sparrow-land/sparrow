@@ -1,0 +1,502 @@
+@import 'tailwindcss';
+
+/*
+ * sparrow design system — "precision machinery"
+ * Dark-first, engineered, calm. Near-black slate surfaces, 1px hairline
+ * borders, a single warm copper/amber accent used sparingly.
+ *
+ * The `--sparrow-*` tokens are the long-standing names used across the app
+ * (Room view, CopyButton, etc.); every surface reads the palette through these
+ * tokens, so the WHOLE app themes off this one mechanism — nothing keys off a
+ * `.dark` class or a raw `@media` query of its own.
+ *
+ * Theme resolution (see lib/theme.ts + the pre-paint snippet in index.html):
+ *   - DARK is the default palette (`:root`) and the explicit-dark override
+ *     (`:root[data-theme='dark']`). Explicit dark needs no separate rule — with
+ *     the attribute present, the light media query below no longer matches, so
+ *     the base dark tokens simply stand.
+ *   - LIGHT applies when the choice is `auto` AND the OS prefers light
+ *     (`@media (prefers-color-scheme: light)` on a root WITHOUT the attribute),
+ *     OR the choice is explicit light (`:root[data-theme='light']`). The light
+ *     tokens are declared once per selector; a root override wins in BOTH
+ *     directions without any per-rule duplication because every rule reads
+ *     `var(--sparrow-*)`.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces — near-black slate, not pure black. */
+  --sparrow-bg: #0a0c0f;
+  --sparrow-panel: #101317;
+  --sparrow-panel-2: #171b21;
+  --sparrow-border: #23282f;
+  --sparrow-border-strong: #2e343d;
+
+  /* Ink. */
+  --sparrow-text: #e7eaef;
+  --sparrow-muted: #8b93a0;
+  --sparrow-faint: #616976;
+
+  /* Single accent: warm copper / machinery brass. */
+  --sparrow-accent: #d3924b;
+  --sparrow-accent-2: #a96f31;
+  --sparrow-accent-soft: rgba(211, 146, 75, 0.12);
+  --sparrow-accent-glow: rgba(211, 146, 75, 0.22);
+
+  /* Semantic (used by read receipts / presence / errors). */
+  --sparrow-good: #5bb98b;
+  --sparrow-danger: #e0555b;
+
+  /*
+   * Info-box type identity — one desaturated hue per register, applied to the
+   * leading glyph + type label of every non-chat box in the activity stream
+   * (Email / Voice / Hint / DM oversight). Deliberately NOT copper: copper
+   * stays "live / unread / actionable". Deliberately not the semantic
+   * good/danger greens/reds either, so a type label can never read as a
+   * disposition. The registry in components/MediumGlyph.tsx maps type → token;
+   * a new medium adds one token pair here and one registry line there.
+   */
+  --sparrow-type-email: #6ea8dc; /* correspondence blue */
+  --sparrow-type-voice: #d489a8; /* spoken rose */
+  --sparrow-type-hint: #4fbfae; /* system teal — sparrow itself speaking */
+  --sparrow-type-dm: #a894e6; /* agent↔agent violet */
+
+  /*
+   * Info-box container alphas — the "Tinted Etch" dials (see `.info-box`
+   * below). Per-theme: light paper needs slightly more of both for the plate
+   * to keep a perceivable boundary. Load-bearing: push the hatch much past
+   * ~16% and the type tones start to hum.
+   */
+  --sparrow-wash-a: 6%;
+  --sparrow-hatch-a: 13%;
+}
+
+/*
+ * LIGHT palette — warm paper surfaces, same machinery accent (darkened for
+ * contrast on light). Applied for "auto + system light" and for explicit light.
+ * Keep these two blocks in sync (CSS has no mixins; the values are identical).
+ */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+
+    --sparrow-bg: #f7f6f3;
+    --sparrow-panel: #ffffff;
+    --sparrow-panel-2: #f1efea;
+    --sparrow-border: #e3ded5;
+    --sparrow-border-strong: #d0c9bc;
+
+    --sparrow-text: #1b1e23;
+    --sparrow-muted: #5b626d;
+    --sparrow-faint: #8a909b;
+
+    --sparrow-accent: #b06f2b;
+    --sparrow-accent-2: #8a5620;
+    --sparrow-accent-soft: rgba(176, 111, 43, 0.12);
+    --sparrow-accent-glow: rgba(176, 111, 43, 0.2);
+
+    --sparrow-good: #2f8f5b;
+    --sparrow-danger: #c23c42;
+
+    --sparrow-type-email: #33689c;
+    --sparrow-type-voice: #a8517d;
+    --sparrow-type-hint: #177a6a;
+    --sparrow-type-dm: #6d55b8;
+
+    --sparrow-wash-a: 7%;
+    --sparrow-hatch-a: 16%;
+  }
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --sparrow-bg: #f7f6f3;
+  --sparrow-panel: #ffffff;
+  --sparrow-panel-2: #f1efea;
+  --sparrow-border: #e3ded5;
+  --sparrow-border-strong: #d0c9bc;
+
+  --sparrow-text: #1b1e23;
+  --sparrow-muted: #5b626d;
+  --sparrow-faint: #8a909b;
+
+  --sparrow-accent: #b06f2b;
+  --sparrow-accent-2: #8a5620;
+  --sparrow-accent-soft: rgba(176, 111, 43, 0.12);
+  --sparrow-accent-glow: rgba(176, 111, 43, 0.2);
+
+  --sparrow-good: #2f8f5b;
+  --sparrow-danger: #c23c42;
+
+  --sparrow-type-email: #33689c;
+  --sparrow-type-voice: #a8517d;
+  --sparrow-type-hint: #177a6a;
+  --sparrow-type-dm: #6d55b8;
+
+  --sparrow-wash-a: 7%;
+  --sparrow-hatch-a: 16%;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--sparrow-bg);
+  color: var(--sparrow-text);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica,
+    Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+code,
+pre,
+.mono {
+  font-family:
+    ui-monospace, 'SF Mono', 'JetBrains Mono', 'Fira Code', Menlo, Consolas,
+    monospace;
+}
+
+/*
+ * Mobile viewport sizing — the iOS Safari 100vh trap.
+ * `vh` units include the collapsing address-bar region, so a `100vh` shell is
+ * taller than what's actually visible: the top bar scrolls off-screen and
+ * content slides under the status bar. Size to the *dynamic* viewport instead
+ * (100dvh), with a 100vh fallback FIRST so engines without dvh still work and
+ * supporting browsers win with the later declaration.
+ *
+ * `viewport-fit=cover` (index.html) makes the layout viewport span the whole
+ * screen, under the notch/status bar, so `env(safe-area-inset-*)` is non-zero.
+ * The top bar pads past the status bar; `--app-header-h` keeps the fixed mobile
+ * drawer/backdrop aligned with the padded header's true bottom edge.
+ */
+@utility app-height {
+  height: 100vh;
+}
+/* Prefer the dynamic viewport where supported. Kept as a separate @supports
+ * rule so the minifier can't collapse it into the 100vh base and drop the
+ * fallback — engines without `dvh` keep 100vh; everyone else gets 100dvh. */
+@supports (height: 100dvh) {
+  .app-height {
+    height: 100dvh;
+  }
+}
+
+@utility app-header {
+  height: calc(var(--app-header-h) + env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
+}
+
+@utility top-app-header {
+  top: calc(var(--app-header-h) + env(safe-area-inset-top));
+}
+
+:root {
+  /* The app top-bar height (was Tailwind `h-12`). */
+  --app-header-h: 3rem;
+}
+
+/* Keyboard focus — a warm ring, honored everywhere. */
+:where(a, button, input, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--sparrow-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Selection. */
+::selection {
+  background: var(--sparrow-accent-glow);
+  color: var(--sparrow-text);
+}
+
+/* Thin, restrained scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sparrow-border-strong) transparent;
+}
+
+/* --- Info boxes: the Tinted Etch container -------------------------------- */
+/*
+ * Every NON-MESSAGE box on the activity rail (email / hint / DM oversight /
+ * collapsed runs) is a BORDERLESS plate: the ground is the box's own type tone
+ * at a whisper wash, engraved with a 1px-on-6px 45° hairline hatch drawn IN
+ * the same tone. The tone then carries the register in three places — mark,
+ * ground, grain — while the box shares no ingredient with a chat bubble
+ * (bubbles keep border + panel and never wear this class).
+ *
+ * `--info-tone` is set inline by the component from the type registry
+ * (components/MediumGlyph.tsx → infoBoxToneStyle), so a new medium's box gets
+ * its treatment from its tone automatically. The muted default keeps an
+ * unknown medium's box visible without inventing a color identity for it.
+ *
+ * The color-mix()es live in custom properties ON PURPOSE: written inline in
+ * `background`, the CSS minifier emits a legacy fallback that replaces each
+ * mix with the FULL-STRENGTH tone (a solid violet/teal slab) for browsers
+ * without color-mix. Routed through variables it emits nothing, and such a
+ * browser instead computes an invalid background → transparent, degrading the
+ * box to quiet borderless air rather than a saturated block.
+ */
+.info-box {
+  --info-tone: var(--sparrow-muted);
+  --info-wash: color-mix(in srgb, var(--info-tone) var(--sparrow-wash-a), transparent);
+  --info-hatch: color-mix(in srgb, var(--info-tone) var(--sparrow-hatch-a), transparent);
+  background:
+    repeating-linear-gradient(45deg, var(--info-hatch) 0 1px, transparent 1px 6px),
+    var(--info-wash);
+}
+
+/* --- Signature terminal block -------------------------------------------- */
+.terminal {
+  border: 1px solid var(--sparrow-border);
+  border-radius: 10px;
+  background: linear-gradient(180deg, var(--sparrow-panel-2), var(--sparrow-panel));
+  overflow: hidden;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
+}
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--sparrow-border);
+  background: rgba(255, 255, 255, 0.015);
+}
+.terminal-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.terminal-body {
+  margin: 0;
+  padding: 14px 16px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--sparrow-text);
+  white-space: pre;
+  tab-size: 2;
+}
+
+/*
+ * Opt-in soft wrap (see Terminal's `wrap`). Prose blocks — the invitation blob
+ * a human pastes to an agent — are read, not run, so a horizontal scrollbar
+ * would hide most of the text. Commands keep the default `pre`.
+ */
+.terminal-body.terminal-wrap {
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --- Prose for docs pages ------------------------------------------------- */
+.doc {
+  color: var(--sparrow-text);
+}
+.doc h1 {
+  font-size: 1.9rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.75rem;
+}
+.doc h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 2.25rem 0 0.75rem;
+  padding-top: 0.35rem;
+}
+.doc h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 1.6rem 0 0.5rem;
+  color: var(--sparrow-text);
+}
+/* Anchored sections (#50): the site header is sticky and the docs menu bar is
+   sticky under it on small screens, so a deep link has to stop short of both —
+   otherwise `#events-sse` lands with its own heading hidden behind the chrome. */
+.doc h2[id],
+.doc h3[id] {
+  scroll-margin-top: 6rem;
+}
+.doc p,
+.doc li {
+  color: var(--sparrow-muted);
+}
+.doc p {
+  margin: 0.75rem 0;
+}
+.doc a {
+  color: var(--sparrow-accent);
+  text-decoration: none;
+}
+.doc a:hover {
+  text-decoration: underline;
+}
+.doc ul,
+.doc ol {
+  margin: 0.75rem 0;
+  padding-left: 1.25rem;
+}
+.doc li {
+  margin: 0.35rem 0;
+}
+.doc ul {
+  list-style: none;
+  padding-left: 0;
+}
+.doc ul > li {
+  position: relative;
+  padding-left: 1.1rem;
+}
+.doc ul > li::before {
+  content: '';
+  position: absolute;
+  left: 0.15rem;
+  top: 0.62em;
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--sparrow-accent);
+  transform: rotate(45deg);
+}
+.doc strong {
+  color: var(--sparrow-text);
+  font-weight: 600;
+}
+.doc code {
+  font-size: 0.85em;
+  background: var(--sparrow-panel-2);
+  border: 1px solid var(--sparrow-border);
+  border-radius: 5px;
+  padding: 0.1em 0.4em;
+  color: var(--sparrow-text);
+  white-space: nowrap;
+}
+/* The rule above is for INLINE code in prose (a bordered chip that never wraps
+   mid-token). It also reaches the <code> inside a .terminal block, where nowrap
+   collapsed every multi-line example onto one line and the chip fought the
+   terminal's own styling — so terminals opt back out. */
+.doc .terminal code {
+  font-size: inherit;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  white-space: pre;
+}
+.doc-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--sparrow-border);
+  border-radius: 10px;
+  margin: 1rem 0;
+}
+.doc table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.doc th,
+.doc td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--sparrow-border);
+  vertical-align: top;
+}
+.doc thead th {
+  color: var(--sparrow-text);
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.02);
+  white-space: nowrap;
+}
+.doc tbody tr:last-child td {
+  border-bottom: none;
+}
+.doc td code {
+  white-space: nowrap;
+}
+
+/* --- Motion: gentle pulse for the loading/pending brand mark ------------- */
+@keyframes sparrow-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.sparrow-mark {
+  transform-origin: center;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .sparrow-mark {
+    animation: sparrow-pulse 1.8s ease-in-out infinite;
+  }
+}
+
+/* --- Voice: recording mic pulse (copper, only while live) ---------------- */
+@keyframes sparrow-recording-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--sparrow-accent-glow);
+  }
+  50% {
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .sparrow-recording {
+    animation: sparrow-recording-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+/* Subtle top-of-page grid texture for the hero — machined backdrop. */
+.ac-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* --- Email: the style-isolated body container ---------------------------- */
+/* A stored email body is sanitized HTML written by a stranger. It renders in a
+   bordered box that CONTAINS its own layout and paint (`contain`), scrolls
+   horizontally INSIDE ITSELF so wide mail never scrolls the page, and inherits
+   the app's typography rather than the mail's (no webfonts are loaded, ever). */
+.email-html {
+  contain: content;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.email-html * {
+  max-width: 100%;
+  font-family: inherit !important;
+}
+.email-html a {
+  color: var(--sparrow-accent);
+  text-decoration: underline;
+}
+.email-html blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--sparrow-border-strong);
+  color: var(--sparrow-muted);
+}
+.email-html table {
+  border-collapse: collapse;
+}
+.email-html td,
+.email-html th {
+  border: 1px solid var(--sparrow-border);
+  padding: 0.25rem 0.5rem;
+}

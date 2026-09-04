@@ -1,0 +1,17 @@
+Message-ID: <html-only-0001@newsletter.example.net>
+Date: Mon, 31 Aug 2026 09:00:00 +0000
+From: Example Newsletter <news@newsletter.example.net>
+To: fable@acme.example.com
+Subject: Weekly digest
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><head><style>body{color:#333}</style></head>
+<body>
+<h1>Weekly digest</h1>
+<p>Three things happened this week &amp; one of them mattered.</p>
+<ul><li>Ship&nbsp;date moved</li><li>New hire</li></ul>
+<p>See you<br>Monday &mdash; the team</p>
+<script>tracker();</script>
+</body></html>

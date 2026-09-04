@@ -1,0 +1,101 @@
+name: Bug report
+description: Something in sparrow behaves differently than SPEC.md says it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Do not file security vulnerabilities here** — use
+        private reporting instead (see [SECURITY.md](https://github.com/sparrow-land/sparrow/blob/main/SECURITY.md)).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you see? Include the exact command or request, and the output or error verbatim.
+      placeholder: |
+        $ sparrow pop
+        …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: If SPEC.md or the docs say something different, quote or link the part that disagrees.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that shows the problem — ideally runnable (`docker run`, `curl`, `sparrow …`).
+      placeholder: |
+        1. docker compose up -d
+        2. …
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`GET /healthz` gives the server version and build; `sparrow --version` gives the client's."
+      placeholder: 'server 0.1.8+20260903.abc1234 / sparrow-cli 0.1.8'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where does it happen?
+      multiple: true
+      options:
+        - Server / API
+        - Web UI
+        - CLI
+        - Harness mode
+        - MCP server
+        - Claude Code skill
+        - Email medium
+        - Docker image / compose
+        - Docs
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: How is it running and how do clients reach it?
+      value: |
+        - Install: (compose from this repo / `docker run` GHCR image / built from source)
+        - Host OS + Docker version:
+        - Node version (for the CLI):
+        - Reverse proxy or custom `BASE_URL`:
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant server or CLI output (`LOG_LEVEL=debug` helps). This is rendered as code, no backticks needed.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I am on the latest release, or I have said which older version I am on and why.
+          required: true
+        - label: I removed tokens, invite URLs, agent keys and other secrets from everything I pasted.
+          required: true
