@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { File as FileIcon, Mic, Paperclip, X } from 'lucide-react';
+import { File as FileIcon, Paperclip, X } from 'lucide-react';
 import type { SuggestedReply } from '@sparrow/common-types';
-import { MicButton } from './MicButton.js';
+import { MicButton, type HandsFreeWiring } from './MicButton.js';
 import { formatBytes, isImageAttachment, type PendingAttachment } from '../../lib/attachments.js';
 
 /** Pull `File`s out of a paste/drop DataTransfer (files list, else file items). */
@@ -103,8 +103,7 @@ export function Composer({
   sendError,
   placeholder,
   suggestions,
-  onTranscript,
-  voiceChip = false,
+  handsFree,
   attachments = [],
   onAddFiles,
   onRemoveAttachment,
@@ -124,10 +123,12 @@ export function Composer({
   sendError: string | null;
   placeholder: string;
   suggestions: { messageId: string; options: SuggestedReply[] } | null;
-  /** Receive a dictated transcript to fold into the composer (voice STT). */
-  onTranscript?: (text: string) => void;
-  /** Show the "voice" provenance chip (transcript is in the composer). */
-  voiceChip?: boolean;
+  /**
+   * Everything hands-free mode needs (voice v2). Present iff the room can host a
+   * spoken turn; the composer forwards it opaquely to the mic and is otherwise
+   * uninvolved — a voice turn never touches the draft or the staged files.
+   */
+  handsFree?: HandsFreeWiring;
   /** Files staged on the composer, awaiting send (rendered as removable chips). */
   attachments?: PendingAttachment[];
   /** Stage picked/pasted/dropped files (limit-checking lives in the owner). */
@@ -391,14 +392,6 @@ export function Composer({
               Enter to send · Shift+Enter for newline · {modKeyLabel()}+Enter to draft · Esc pulls
               back your last message
             </span>
-            {voiceChip && (
-              <span
-                aria-label="Composed by voice"
-                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--sparrow-accent-soft)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--sparrow-accent)]"
-              >
-                <Mic size={12} aria-hidden="true" /> voice
-              </span>
-            )}
             {draftCount > 0 && (
               <button
                 type="button"
@@ -420,8 +413,8 @@ export function Composer({
             >
               <Paperclip size={16} aria-hidden="true" />
             </button>
-            {onTranscript && (
-              <MicButton onTranscript={onTranscript} disabled={!canCompose || sending} />
+            {handsFree && (
+              <MicButton handsFree={handsFree} disabled={!canCompose || sending} />
             )}
             <button
               type="button"

@@ -10,6 +10,7 @@ import type {
   MemberRef,
   Member,
   MessageKind,
+  MessageOrigin,
   PresenceState,
   PrincipalKind,
   StatusState,
@@ -72,12 +73,22 @@ export function emitRoomUpdated(ctx: AppContext, room: RoomRow): void {
   );
 }
 
-/** `message.new` — to the message's recipients. */
+/**
+ * `message.new` — to the message's recipients. Carries the message's `origin`
+ * (`'voice'` | null) so an SSE-woken agent knows the sender's REGISTER before it
+ * pops: a voice sender is listening, not reading.
+ */
 export function emitMessageNew(
   ctx: AppContext,
   roomId: string,
   recipientMemberIds: string[],
-  payload: { messageId: string; from: MemberRef; preview: string; kind: MessageKind },
+  payload: {
+    messageId: string;
+    from: MemberRef;
+    preview: string;
+    kind: MessageKind;
+    origin: MessageOrigin | null;
+  },
 ): void {
   if (recipientMemberIds.length === 0) return;
   ctx.rooms.emitRoom(roomId, 'message.new', { ...payload }, recipientMemberIds);

@@ -3,6 +3,7 @@ import path from 'node:path';
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
+import fastifyWebsocket from '@fastify/websocket';
 import type { ErrorResponse } from '@sparrow/common-types';
 import {
   PRESENCE_GRACE_SECONDS,
@@ -257,6 +258,7 @@ export function buildServer(config: ServerConfig): FastifyInstance {
       voiceId: String(configStore.get('voice.ttsVoiceId') ?? ''),
       ttsModelId: String(configStore.get('voice.ttsModelId') ?? ''),
       sttModelId: String(configStore.get('voice.sttModelId') ?? ''),
+      sttRealtimeModelId: String(configStore.get('voice.sttRealtimeModelId') ?? ''),
     });
     voice.stt = provider;
     voice.tts = provider;
@@ -384,6 +386,12 @@ export function buildServer(config: ServerConfig): FastifyInstance {
   // `methods` must be stated: @fastify/cors defaults it to GET,HEAD,POST, so a
   // preflight for any of the documented PATCH/PUT/DELETE routes came back
   // advertising three verbs and the browser refused to send the real request.
+  // WebSocket upgrades (the hands-free streaming-transcription socket). The
+  // plugin runs `ws` in noServer mode and dispatches upgrades through the
+  // NORMAL fastify lifecycle, so a websocket route authenticates in
+  // `preValidation` like any other and a refusal is an honest HTTP status.
+  app.register(fastifyWebsocket);
+
   const corsAllowlist = config.corsAllowedOrigins?.length ? config.corsAllowedOrigins : undefined;
   const CORS_METHODS = ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'];
   app.register(cors, () => (request: { url: string }, done: (err: Error | null, options: Record<string, unknown>) => void) => {

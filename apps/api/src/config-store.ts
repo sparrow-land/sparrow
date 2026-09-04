@@ -144,6 +144,14 @@ export const CORE_DESCRIPTORS: ConfigDescriptor[] = [
     description: 'ElevenLabs STT model id.',
     default: 'scribe_v2',
   },
+  {
+    key: 'voice.sttRealtimeModelId',
+    type: 'string',
+    label: 'Realtime speech-to-text model',
+    description:
+      'ElevenLabs realtime STT model id, used by the streaming transcription socket (hands-free mode). Separate from the one-shot model: the two endpoints take different model families.',
+    default: 'scribe_v2_realtime',
+  },
 ];
 
 /**

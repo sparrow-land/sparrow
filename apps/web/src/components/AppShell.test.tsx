@@ -519,7 +519,7 @@ describe('AppShell — unified invite UX', () => {
   const noSwitcher: CapabilitiesResponse = {
     email: false,
     emailReviewer: false,
-    voice: { stt: false, tts: false },
+    voice: { stt: false, tts: false, sttStreaming: false },
     orgHostSuffix: null,
     workspaceSwitcher: null,
   };

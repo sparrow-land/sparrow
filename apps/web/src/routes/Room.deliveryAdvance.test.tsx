@@ -85,7 +85,7 @@ function stubRecipient(status: ReadStatus) {
     calls.push(full);
     const url = full.split('?')[0]!;
     const method = init?.method ?? 'GET';
-    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     // The inbox is the caller's OPEN delivery rows (unread + received); an

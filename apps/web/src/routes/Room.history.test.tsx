@@ -103,7 +103,7 @@ function stubRoom(opts: Opts = {}) {
     calls.push(full);
     const url = full.split('?')[0]!;
     const method = init?.method ?? 'GET';
-    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, OWNER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: server.inbox, nextCursor: null });

@@ -8,6 +8,7 @@ import {
   makeAgent,
   type TestServer,
 } from './test-helpers.js';
+import { VOICE_REGISTER_NOTE } from '@sparrow/common-types';
 import { DOC_PAGES, renderDocPage, renderDocsIndex } from './routes/docs-content.js';
 
 /**
@@ -139,6 +140,43 @@ describe('docs by convention: the rendered pages', () => {
     expect(body).toContain('per route, not blanket owner/admin');
     expect(body).toContain('invites.who');
     expect(body).toContain('rooms.create');
+  });
+
+  /**
+   * The `voice` segment — hands-free mode's agent-facing half. An agent that
+   * follows a `voice-is-a-different-register` hint's docs URL lands here, so the
+   * page must carry the whole medium: how to tell whether the instance has it,
+   * both transcription shapes, the speech route, and what `origin: 'voice'`
+   * obliges the reader to do.
+   */
+  it('renders a voice page covering capabilities, both STT routes, speech, and origin', () => {
+    const body = md('voice');
+    // Discovery, not 404-probing.
+    expect(body).toContain('/api/v1/capabilities');
+    expect(body).toContain('sttStreaming');
+    // One-shot transcription.
+    expect(body).toContain('POST /api/v1/voice/transcriptions');
+    // Streaming transcription — the WebSocket contract, in full.
+    expect(body).toContain('/api/v1/voice/transcriptions/stream');
+    expect(body).toMatch(/WebSocket/);
+    expect(body).toContain('PCM16');
+    expect(body).toContain('16 kHz');
+    expect(body).toContain('{"type":"commit"}');
+    expect(body).toContain('partial');
+    expect(body).toContain('committed');
+    // Speech-back.
+    expect(body).toContain('/api/v1/rooms/:roomId/messages/:id/speech');
+    // The marker, on both halves of the wire.
+    expect(body).toContain("origin: 'voice'");
+  });
+
+  it('the voice page carries the canonical register sentence verbatim', () => {
+    expect(md('voice')).toContain(VOICE_REGISTER_NOTE);
+  });
+
+  it('the voice page is listed on the index and reachable from rooms/messages', () => {
+    expect(renderDocsIndex(ORIGIN)).toContain('https://sparrow.land/docs/api/voice.md');
+    expect(md('rooms/messages')).toContain('https://sparrow.land/docs/api/voice.md');
   });
 
   it('the orgs page is listed on the index', () => {

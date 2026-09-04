@@ -71,7 +71,7 @@ function stubProjectRoom(statusItems: StatusItem[]) {
   ];
   useFetch(async (input) => {
     const url = String(input).split('?')[0]!;
-    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: members, nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });

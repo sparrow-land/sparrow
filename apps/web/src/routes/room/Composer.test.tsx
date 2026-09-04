@@ -342,25 +342,22 @@ describe('Composer autosize (DOM effect)', () => {
 });
 
 describe('Composer voice', () => {
-  it('shows no mic when onTranscript is not wired (capabilities off / no provider)', () => {
-    setup({ onTranscript: undefined });
-    expect(screen.queryByRole('button', { name: /record voice/i })).toBeNull();
+  const wiring = { roomId: 'room_1', onSend: vi.fn(async () => 'msg_1') };
+
+  it('shows no mic when hands-free is not wired (capabilities off / no provider)', () => {
+    setup({ handsFree: undefined });
+    expect(screen.queryByRole('button', { name: /hands-free/i })).toBeNull();
   });
 
-  it('renders the mic when onTranscript is wired (STT capable)', async () => {
+  it('mounts the mic when hands-free IS wired, still gated on the STT capability', () => {
     // With no CapabilitiesProvider, useCapabilities defaults to stt:false, so the
     // MicButton renders nothing even when wired — assert that gating holds.
-    setup({ onTranscript: vi.fn() });
-    expect(screen.queryByRole('button', { name: /record voice/i })).toBeNull();
+    setup({ handsFree: wiring });
+    expect(screen.queryByRole('button', { name: /hands-free/i })).toBeNull();
   });
 
-  it('renders the voice provenance chip when voiceChip is set', () => {
-    setup({ voiceChip: true });
-    expect(screen.getByLabelText(/composed by voice/i)).toBeInTheDocument();
-  });
-
-  it('hides the voice chip by default', () => {
-    setup();
+  it('carries no voice chip of its own — a spoken turn never touches the composer', () => {
+    setup({ handsFree: wiring });
     expect(screen.queryByLabelText(/composed by voice/i)).toBeNull();
   });
 });

@@ -96,7 +96,7 @@ function stubRoom() {
   useFetch(async (input, init) => {
     const url = String(input).split('?')[0]!;
     const method = init?.method ?? 'GET';
-    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });

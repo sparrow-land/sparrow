@@ -21,7 +21,7 @@ const OTHER_ORG = 'org_2';
 const EMAIL_ON: CapabilitiesResponse = {
   email: true,
   emailReviewer: false,
-  voice: { stt: false, tts: false },
+  voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,
   workspaceSwitcher: null,
 };

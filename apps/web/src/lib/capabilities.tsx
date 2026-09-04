@@ -24,16 +24,25 @@ import { api } from './client.js';
  * schema drift) leaves the safe default — every optional medium off, and no
  * reviewer — so the app always boots; controls simply stay hidden.
  */
-const DEFAULT_CAPABILITIES: CapabilitiesResponse = {
+/**
+ * The instance capabilities the web app reads. Aliased so voice v2's
+ * `voice.sttStreaming` has one name here even while the wire schema settles —
+ * use sites still read it as `voice.sttStreaming ?? false`, because a server
+ * that omits it (an older build) means "buffered one-shot STT", which is a
+ * working hands-free mode, just without live words.
+ */
+export type Capabilities = CapabilitiesResponse;
+
+const DEFAULT_CAPABILITIES: Capabilities = {
   email: false,
   emailReviewer: false,
-  voice: { stt: false, tts: false },
+  voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,
   workspaceSwitcher: null,
 };
 
 interface CapabilitiesState {
-  caps: CapabilitiesResponse;
+  caps: Capabilities;
   /** True once the `GET /capabilities` fetch has settled (success OR failure). */
   loaded: boolean;
 }
@@ -48,7 +57,7 @@ const CapabilitiesContext = createContext<CapabilitiesState>({
  * mounted (e.g. isolated component tests) — voice controls stay hidden rather
  * than throwing, so presentational components can render outside the provider.
  */
-export function useCapabilities(): CapabilitiesResponse {
+export function useCapabilities(): Capabilities {
   return useContext(CapabilitiesContext).caps;
 }
 
@@ -70,7 +79,7 @@ export function CapabilitiesProvider({
    * fetched them to resolve host scope). When provided, the provider seeds from
    * it and skips its own fetch — one `GET /capabilities` per load.
    */
-  initial?: CapabilitiesResponse;
+  initial?: Capabilities;
   children: ReactNode;
 }) {
   const [state, setState] = useState<CapabilitiesState>(

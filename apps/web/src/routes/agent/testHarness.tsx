@@ -24,7 +24,7 @@ import { AgentProfile } from '../AgentProfile.js';
 export const CAPS_OFF: CapabilitiesResponse = {
   email: false,
   emailReviewer: false,
-  voice: { stt: false, tts: false },
+  voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,
   workspaceSwitcher: null,
 };

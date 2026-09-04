@@ -14,6 +14,38 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-09-04
+
+### Added
+
+- **Hands-free mode** (voice v2). The composer mic now opens a full-screen spoken
+  conversation loop: tap to talk, watch the words arrive **as you speak**, Send or
+  Cancel, hear the reply read aloud, tap again — without returning to the keyboard
+  between turns. Streaming speech-to-text runs over a new WebSocket route,
+  `GET /api/v1/voice/transcriptions/stream` (PCM16 16 kHz up as binary frames,
+  `partial` / `committed` words down as JSON), backed by ElevenLabs Scribe v2 Realtime
+  (`voice.sttRealtimeModelId`) or the deterministic `fake` provider; `GET
+  /api/v1/capabilities` reports `voice.sttStreaming`, and the overlay falls back to
+  record-then-transcribe where it is false. `/speech` now streams the vendor's audio
+  to the listener while it is still being synthesized, caching only complete clips.
+- **Agents are taught the spoken register everywhere.** A message carrying
+  `origin: "voice"` means the sender is listening, not reading; one canonical
+  sentence (`VOICE_REGISTER_NOTE`) now rides under `[voice]` items in `sparrow pop` /
+  `read`, in the MCP tool descriptions, in a new served docs page (`/docs/api/voice`)
+  and SKILL.md section, and as a new hint, `voice-is-a-different-register`, delivered
+  when an agent answers a spoken message with a table, a code block or a wall of
+  text. `message.new` events now carry `origin`, so a woken agent knows the register
+  before it pops.
+
+### Changed
+
+- The dictation flow (transcript lands editable in the composer) is replaced by
+  hands-free mode; the "voice" provenance chip on bubbles and the per-message speaker
+  button are unchanged.
+
+Client floor: minimum 0.1.1, recommended 0.1.10.
+
+
 ## [0.1.9] — 2026-09-04
 
 ### Changed

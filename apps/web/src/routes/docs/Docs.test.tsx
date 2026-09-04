@@ -121,13 +121,15 @@ describe('docs anchors & table of contents', () => {
     });
   });
 
-  it('/docs/api: 16 top-level sections, including the #events-sse deep link', async () => {
+  it('/docs/api: 17 top-level sections, including the #events-sse deep link', async () => {
     const { container } = renderAt('/docs/api');
     await waitFor(() => expect(tocLinks(container).length).toBeGreaterThan(0));
     const h2Ids = Array.from(container.querySelectorAll<HTMLElement>('main h2')).map((h) => h.id);
-    expect(h2Ids.length).toBe(16);
+    expect(h2Ids.length).toBe(17);
     expect(h2Ids).toContain('events-sse');
     expect(h2Ids).toContain('rooms-members');
+    // Voice (hands-free) joined the page with the v2 voice work.
+    expect(h2Ids).toContain('voice-speech-in-speech-out');
     // The TOC link for it resolves to that exact heading.
     const link = tocLinks(container).find((a) => a.getAttribute('href') === '#events-sse');
     expect(link?.textContent).toBe('Events (SSE)');

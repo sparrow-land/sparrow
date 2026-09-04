@@ -38,7 +38,7 @@ const ACTIVE = 'room_1';
 const CAPS: CapabilitiesResponse = {
   email: false,
   emailReviewer: false,
-  voice: { stt: false, tts: false },
+  voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,
   workspaceSwitcher: null,
 };

@@ -29,15 +29,19 @@ const skillMd = fs.readFileSync(path.join(here, '..', 'assets', 'SKILL.md'), 'ut
  * paragraph VERBATIM rather than importing it — and this test reads the constant
  * straight out of the sibling package's source, so the copy cannot drift.
  */
-const REGISTER_NOTE = (() => {
+function constantFromCommonTypes(name: string): string {
   const src = fs.readFileSync(
     path.join(here, '..', '..', 'common-types', 'src', 'constants.ts'),
     'utf8',
   );
-  const m = src.match(/export const EMAIL_REGISTER_NOTE = `([\s\S]*?)`;/);
-  if (!m) throw new Error('EMAIL_REGISTER_NOTE not found in @sparrow/common-types');
+  const m = src.match(new RegExp(`export const ${name} = \`([\\s\\S]*?)\`;`));
+  if (!m) throw new Error(`${name} not found in @sparrow/common-types`);
   return m[1]!;
-})();
+}
+
+const REGISTER_NOTE = constantFromCommonTypes('EMAIL_REGISTER_NOTE');
+/** The voice half of the same rule — one sentence, reused by five surfaces. */
+const VOICE_REGISTER_NOTE = constantFromCommonTypes('VOICE_REGISTER_NOTE');
 
 describe('SKILL.md — typed work items', () => {
   it('tells the agent to switch on item.type and leave unknown types alone', () => {
@@ -136,6 +140,55 @@ describe('SKILL.md — the email medium', () => {
     expect(skillMd).toMatch(/held/);
     expect(skillMd).toMatch(/not a failure/i);
     expect(skillMd).toContain('email.resolved');
+  });
+});
+
+/**
+ * Voice / hands-free. A message carrying `origin: 'voice'` came out of the web
+ * client's hands-free mode: the human DICTATED it and is sitting there
+ * listening, so whatever the agent writes back is read aloud by a speech voice.
+ * The skill must gate the section on `capabilities.voice` (like email), say what
+ * the marker MEANS, carry the canonical sentence verbatim, and still insist the
+ * reply goes in-room with `inReplyTo` — voice owns no separate reply verb.
+ */
+describe('SKILL.md — voice / hands-free', () => {
+  const section = (() => {
+    const idx = skillMd.indexOf('## Voice / hands-free');
+    expect(idx).toBeGreaterThan(0);
+    return skillMd.slice(idx, skillMd.indexOf('\n## ', idx + 5));
+  })();
+
+  it('sits after the email section — both are register lessons, email first', () => {
+    expect(skillMd.indexOf('## Voice / hands-free')).toBeGreaterThan(
+      skillMd.indexOf('## Email (only when the instance has it)'),
+    );
+  });
+
+  it('gates the section on capabilities.voice, checked once per session', () => {
+    expect(section).toContain('/api/v1/capabilities');
+    expect(section).toMatch(/"?voice"?:/);
+    expect(section).toMatch(/once per session/i);
+  });
+
+  it("says an origin 'voice' item means the human is in hands-free mode and will HEAR you", () => {
+    expect(section).toContain("origin");
+    expect(section).toContain("'voice'");
+    expect(section).toMatch(/hands-free/i);
+    expect(section).toMatch(/hear|read (back )?aloud/i);
+  });
+
+  it('carries the canonical VOICE_REGISTER_NOTE verbatim (no drift)', () => {
+    expect(section).toContain(VOICE_REGISTER_NOTE);
+  });
+
+  it('asks for a few sentences, and still an in-room reply with inReplyTo', () => {
+    expect(section).toMatch(/few sentences/i);
+    expect(section).toContain('inReplyTo');
+    expect(section).toMatch(/in-room|in the room/i);
+  });
+
+  it('names the dictation flag for an agent that speaks instead of typing', () => {
+    expect(section).toContain('sparrow send --origin voice');
   });
 });
 

@@ -9,11 +9,11 @@ const NOW = Date.parse('2026-08-20T17:10:00Z');
 const TTS_ON: CapabilitiesResponse = {
   email: false,
   emailReviewer: false,
-  voice: { stt: false, tts: true },
+  voice: { stt: false, tts: true, sttStreaming: false },
   orgHostSuffix: null,
   workspaceSwitcher: null,
 };
-const TTS_OFF: CapabilitiesResponse = { ...TTS_ON, voice: { stt: false, tts: false } };
+const TTS_OFF: CapabilitiesResponse = { ...TTS_ON, voice: { stt: false, tts: false, sttStreaming: false } };
 
 const OWN: Message = {
   id: 'msg_1',

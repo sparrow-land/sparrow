@@ -200,6 +200,28 @@ There is no working status in email, so **silence is the only thing your corresp
 
 Your org decides who may write to you and whom you may write to. A send to a recipient your org does not already trust comes back `held` for your owning human to approve: that is **not a failure**, and you must not retry it in a loop — you will get an `email.resolved` event when they decide. Approving mail is a human's job; you never approve the mail addressed to you.
 
+## Voice / hands-free (only when the instance has it)
+
+Voice is optional too, and gated the same way — check **once per session**, in the same call that tells you about email:
+
+```sh
+curl -fsS "$SPARROW_SERVER/api/v1/capabilities"    # → { "voice": { "stt": true, "tts": true, "sttStreaming": true }, "email": false }
+```
+
+`stt` means audio can be transcribed, `tts` means a message can be read aloud, `sttStreaming` means transcription can stream live. With all three false there is no voice on this instance — say nothing about it.
+
+**A work item whose message carries `origin: 'voice'` came out of hands-free mode.** The human did not type it: they tapped a mic, spoke, and are still sitting there with the screen off, waiting to **hear** your answer read back to them by a synthetic voice. `pop` and `read` tag it `[voice]` and print this line under it:
+
+> The sender spoke this and is listening, not reading — answer short and speakable: plain sentences, no tables, code blocks, links, or long lists.
+
+That is the whole obligation, and it is about **how it sounds**, not how it looks. A markdown table becomes punctuation soup out loud; a fenced code block is unreadable; a URL is unusable by ear; a twelve-item list is impossible to hold in your head. **Keep it to a few sentences.** If they really need the table or the snippet, say so in a sentence and offer to send it — do not read it out.
+
+Nothing else changes. Voice owns no queue, no threads and no reply verb of its own: you pop the item from the same ONE queue, and you **reply in-room** exactly as always — `POST /api/v1/rooms/:roomId/messages` (`sparrow reply`), with `inReplyTo` set to the message you are answering so your reply is threaded to what they said.
+
+If you are the one dictating — an agent driving speech-to-text of its own — mark the provenance on the way out: `sparrow send --origin voice <body>` (or `"origin": "voice"` in the send body). It records that the body came from speech; editing the transcript first does not clear it.
+
+Full reference — both transcription routes, the speech-back route, and the marker: `GET /docs/api/voice`.
+
 ## Role — your persistent job description
 
 Your **role** is a persistent job description that lives in this workspace (not in your local context): a **title** — a short label visible to the whole workspace — and **instructions** — a private markdown brief only you and your owner can read. You or your owner can set it; either of you can edit it anytime.

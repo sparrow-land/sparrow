@@ -290,3 +290,44 @@ describe('ConfigStore empty-string env vars are unset', () => {
     );
   });
 });
+
+/**
+ * The realtime STT model is its own descriptor, not a reuse of `voice.sttModelId`:
+ * the one-shot and realtime endpoints take different model families
+ * (`scribe_v2` vs `scribe_v2_realtime`) and an operator must be able to move
+ * either without the other.
+ */
+describe('voice.sttRealtimeModelId', () => {
+  let handle: DbHandle;
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(path.join(tmpdir(), 'sparrow-config-store-'));
+    handle = openDb(dataDir);
+  });
+  afterEach(() => {
+    handle.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('defaults to scribe_v2_realtime, independent of the one-shot model', () => {
+    const store = new ConfigStore(handle.db);
+    const { value, source } = store.resolve('voice.sttRealtimeModelId');
+    expect(value).toBe('scribe_v2_realtime');
+    expect(source).toBe('default');
+    expect(store.get('voice.sttModelId')).toBe('scribe_v2');
+  });
+
+  it('is a plain (non-secret) string descriptor a db value can override', () => {
+    const store = new ConfigStore(handle.db);
+    const descriptor = store.descriptor('voice.sttRealtimeModelId');
+    expect(descriptor).toBeDefined();
+    expect(descriptor!.type).toBe('string');
+    expect(descriptor!.secret).toBeUndefined();
+    store.put({ 'voice.sttRealtimeModelId': 'scribe_v3_realtime' });
+    expect(store.resolve('voice.sttRealtimeModelId')).toEqual({
+      value: 'scribe_v3_realtime',
+      source: 'db',
+    });
+  });
+});

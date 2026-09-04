@@ -1,3 +1,6 @@
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
+import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_TRANSCRIPTION_AUDIO_BYTES } from '@sparrow/common-types';
 import {
@@ -9,6 +12,7 @@ import {
   createRoom,
   makeAgent,
   TEST_ADMIN_TOKEN,
+  sleep,
   type TestServer,
   type SignedUpHuman,
 } from './test-helpers.js';
@@ -44,7 +48,7 @@ describe('GET /capabilities', () => {
     const res = await ts.app.inject({ method: 'GET', url: '/api/v1/capabilities' });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
-      voice: { stt: false, tts: false },
+      voice: { stt: false, tts: false, sttStreaming: false },
       // v4: the email medium's on/off rides here too, and whether an automatic
       // reviewer (an LlmJudge) is registered — neither is on this bare server.
       email: false,
@@ -59,12 +63,29 @@ describe('GET /capabilities', () => {
     const ts = await makeTestServer({ voiceProvider: 'fake' });
     const res = await ts.app.inject({ method: 'GET', url: '/api/v1/capabilities' });
     expect(res.json()).toEqual({
-      voice: { stt: true, tts: true },
+      voice: { stt: true, tts: true, sttStreaming: true },
       email: false,
       emailReviewer: false,
       orgHostSuffix: null,
       workspaceSwitcher: null,
     });
+    await ts.close();
+  });
+
+  it('sttStreaming follows the STT provider: false when it cannot stream', async () => {
+    // `sttStreaming` is not "voice is on" — it is "the registered STT provider
+    // implements `stream`". A buffered-only provider advertises stt:true and
+    // sttStreaming:false, and the client falls back to record-then-transcribe
+    // rather than opening a socket that would 404.
+    const bufferedOnly = {
+      id: 'buffered',
+      async transcribe() {
+        return { text: 'typed by hand' };
+      },
+    };
+    const ts = await makeTestServer({ voice: { stt: bufferedOnly, tts: null } });
+    expect((await ts.app.inject({ method: 'GET', url: '/api/v1/capabilities' })).json().voice)
+      .toEqual({ stt: true, tts: false, sttStreaming: false });
     await ts.close();
   });
 
@@ -224,6 +245,26 @@ describe('message origin', () => {
     const res = await send({ to: alice.userId, body: 'x', origin: 'email' });
     expect(res.statusCode).toBe(400);
   });
+
+  it('message.new carries origin so an SSE-woken agent knows the register before it pops', async () => {
+    // The frame is the FIRST thing a listening agent sees. Without `origin` it
+    // would have to pop the message to learn the sender is listening, not
+    // reading — after it has already decided how to answer.
+    await send({ to: alice.userId, body: 'dictated', origin: 'voice' });
+    await send({ to: alice.userId, body: 'typed' });
+
+    const log = await ts.app.inject({
+      method: 'GET',
+      url: '/api/v1/me/events/log?since=0',
+      headers: auth(alice.token),
+    });
+    const frames = (log.json().events as { event: string; data: { preview: string; origin: unknown } }[])
+      .filter((e) => e.event === 'message.new');
+    expect(frames.map((f) => [f.data.preview, f.data.origin])).toEqual([
+      ['dictated', 'voice'],
+      ['typed', null],
+    ]);
+  });
 });
 
 /* ------------------------------- Speech ---------------------------- */
@@ -269,6 +310,122 @@ describe('GET /rooms/:roomId/messages/:id/speech', () => {
     expect(res.headers['content-type']).toBe('audio/mpeg');
     expect(res.headers['content-disposition']).toBe('inline');
     expect(Buffer.from(res.rawPayload).equals(FAKE_MP3)).toBe(true);
+  });
+
+  it('streams from a provider that can (piping while tee-ing into the cache)', async () => {
+    // Phase 2 of the voice design: the browser starts playing while the vendor
+    // is still talking. The cache file must still land, byte-identical, so the
+    // SECOND listen costs nothing.
+    const synthesize = vi.fn(async () => ({ audio: FAKE_MP3, contentType: 'audio/mpeg' }));
+    const synthesizeStream = vi.fn(async () => Readable.from([FAKE_MP3.subarray(0, 32), FAKE_MP3.subarray(32)]));
+    await setup({ voice: { tts: { id: 'streaming', synthesize, synthesizeStream } } });
+    const msgId = await sendDm(alice.userId);
+    const url = `/api/v1/rooms/${roomId}/messages/${msgId}/speech`;
+
+    const first = await ts.app.inject({ method: 'GET', url, headers: auth(alice.token) });
+    expect(first.statusCode).toBe(200);
+    expect(first.headers['content-type']).toBe('audio/mpeg');
+    expect(first.headers['content-disposition']).toBe('inline');
+    expect(Buffer.from(first.rawPayload).equals(FAKE_MP3)).toBe(true);
+    // The streaming path is preferred; the buffered one is never called.
+    expect(synthesizeStream).toHaveBeenCalledTimes(1);
+    expect(synthesize).not.toHaveBeenCalled();
+
+    // The tee wrote the cache: a second fetch is served from disk.
+    await vi.waitFor(() => expect(existsSync(path.join(ts.dataDir, 'tts', msgId))).toBe(true));
+    const second = await ts.app.inject({ method: 'GET', url, headers: auth(alice.token) });
+    expect(Buffer.from(second.rawPayload).equals(FAKE_MP3)).toBe(true);
+    expect(synthesizeStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('two concurrent listeners on one uncached message cannot corrupt the cache', async () => {
+    // Each request must stage its bytes in its OWN part file. With a shared
+    // `${cachePath}.part`, the second writer's `'w'` open TRUNCATES the first
+    // mid-write: the first keeps writing at its old offset, so the file gains a
+    // zero-filled hole, and the first's rename then publishes that hole as the
+    // permanent cache. Message bodies are immutable, so nothing ever
+    // invalidates it — every later listener hears the corruption forever.
+    const clip = Buffer.concat([FAKE_MP3, FAKE_MP3]);
+    const head = clip.subarray(0, FAKE_MP3.length);
+    const tail = clip.subarray(FAKE_MP3.length);
+
+    const gate = (): { wait: Promise<void>; open: () => void } => {
+      let open!: () => void;
+      const wait = new Promise<void>((resolve) => (open = resolve));
+      return { wait, open };
+    };
+    const aTail = gate();
+    const bResolve = gate();
+    const bData = gate();
+
+    let call = 0;
+    const synthesizeStream = vi.fn(async () => {
+      if (++call === 1) {
+        return Readable.from(
+          (async function* () {
+            yield head;
+            await aTail.wait;
+            yield tail;
+          })(),
+        );
+      }
+      // The second vendor response arrives LATER — and the instant its write
+      // stream opens is the instant a shared part file would be truncated,
+      // while the first listener is still mid-clip.
+      await bResolve.wait;
+      return Readable.from(
+        (async function* () {
+          await bData.wait;
+          yield head;
+          yield tail;
+        })(),
+      );
+    });
+    await setup({ voice: { tts: { id: 'streaming', synthesize: async () => ({ audio: clip, contentType: 'audio/mpeg' }), synthesizeStream } } });
+    const msgId = await sendDm(alice.userId);
+    const url = `/api/v1/rooms/${roomId}/messages/${msgId}/speech`;
+    const cachePath = path.join(ts.dataDir, 'tts', msgId);
+
+    // Both listeners are in flight before either has a cache to read.
+    const first = ts.app.inject({ method: 'GET', url, headers: auth(alice.token) });
+    const second = ts.app.inject({ method: 'GET', url, headers: auth(owner.token) });
+
+    // Let the first write its head, THEN let the second open its part file.
+    await vi.waitFor(() => expect(synthesizeStream).toHaveBeenCalledTimes(2));
+    bResolve.open();
+    await sleep(100); // the second write stream's fd is open by now
+    aTail.open();
+
+    const firstRes = await first;
+    expect(firstRes.statusCode).toBe(200);
+    expect(Buffer.from(firstRes.rawPayload).equals(clip)).toBe(true);
+    // The published cache is the WHOLE clip — not a hole-punched one.
+    await vi.waitFor(() => expect(existsSync(cachePath)).toBe(true));
+    expect(readFileSync(cachePath).equals(clip)).toBe(true);
+
+    bData.open();
+    const secondRes = await second;
+    expect(Buffer.from(secondRes.rawPayload).equals(clip)).toBe(true);
+    // The later writer republishes identical bytes and cleans up after itself.
+    await vi.waitFor(() =>
+      expect(readdirSync(path.join(ts.dataDir, 'tts')).filter((f) => f.includes('.part'))).toEqual([]),
+    );
+    expect(readFileSync(cachePath).equals(clip)).toBe(true);
+  });
+
+  it('a failing stream is a 502 and leaves NO cache file behind', async () => {
+    const synthesizeStream = vi.fn(async () => {
+      throw new Error('vendor said no');
+    });
+    await setup({ voice: { tts: { id: 'streaming', synthesize: async () => ({ audio: FAKE_MP3, contentType: 'audio/mpeg' }), synthesizeStream } } });
+    const msgId = await sendDm(alice.userId);
+    const res = await ts.app.inject({
+      method: 'GET',
+      url: `/api/v1/rooms/${roomId}/messages/${msgId}/speech`,
+      headers: auth(alice.token),
+    });
+    expect(res.statusCode).toBe(502);
+    expect(existsSync(path.join(ts.dataDir, 'tts', msgId))).toBe(false);
   });
 
   it('caches: a second fetch serves identical bytes without re-calling the provider', async () => {

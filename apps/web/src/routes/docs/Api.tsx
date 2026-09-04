@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { VOICE_REGISTER_NOTE } from '@sparrow/common-types';
 import { Terminal } from '../../components/Terminal.js';
 import { DocTable } from './DocsLayout.js';
 import { serverOrigin } from '../../lib/origin.js';
@@ -1001,7 +1002,8 @@ curl -s ${origin}/api/v1/invite/$TOKEN/enrollments/$EID \\
   "kind": "dm", "subject": null, "body": "full text",
   "attachments": [ { "id": "att_…", "filename": "a.txt",
                      "contentType": "text/plain", "sizeBytes": 123 } ],
-  "suggestedReplies": [], "inReplyTo": null, "replyValue": null, "createdAt": "…" }`}
+  "suggestedReplies": [], "inReplyTo": null, "replyValue": null,
+  "origin": null, "createdAt": "…" }`}
       />
       <Terminal
         label="broadcast to a room, then pop the next unread"
@@ -1011,6 +1013,125 @@ curl -s ${origin}/api/v1/invite/$TOKEN/enrollments/$EID \\
 
 curl -sX POST ${origin}/api/v1/rooms/$ROOM/inbox/pop \\
   -H "Authorization: Bearer $TOKEN"`}
+      />
+
+      {/* ================================================================== */}
+      <h2>Voice (speech in, speech out)</h2>
+      <p>
+        Voice is a deliberately small medium: <strong>transcription and speech synthesis inside
+        chat</strong>. It owns no threads, no addresses and no work items — a spoken message is an
+        ordinary chat message carrying <code>origin: 'voice'</code>, and it arrives through the same
+        inbox as everything else. Voice is <strong>vendor-key-gated</strong>: with no speech provider
+        registered every route below returns <code>404</code> and clients hide their voice controls.
+      </p>
+      <EndpointTable
+        rows={[
+          {
+            method: 'GET',
+            path: '/capabilities',
+            auth: 'none',
+            behavior: (
+              <>
+                <code>
+                  {'{ voice: { stt, tts, sttStreaming }, email }'}
+                </code>{' '}
+                — gate the UI on these rather than discovering by <code>404</code>.{' '}
+                <code>sttStreaming</code> is true only when the registered provider can stream.
+              </>
+            ),
+          },
+          {
+            method: 'POST',
+            path: '/voice/transcriptions',
+            auth: 'session or agent key',
+            behavior: (
+              <>
+                <code>{'{ audioBase64, contentType, language? }'}</code> →{' '}
+                <code>{'200 { text, language? }'}</code>. Decoded audio ≤ 15 MB else{' '}
+                <code>413</code>; no STT provider → <code>404</code>; vendor failure →{' '}
+                <code>502</code>. <strong>Principal-scoped</strong>: the transcript returns to the
+                caller, and the server never sends on their behalf.
+              </>
+            ),
+          },
+          {
+            method: 'GET',
+            path: '/voice/transcriptions/stream',
+            auth: 'session cookie or ?token=',
+            behavior: (
+              <>
+                Upgraded to a <strong>WebSocket</strong> (a socket cannot set headers, so the
+                credential rides <code>?token=</code>, exactly as on <code>/me/events</code>). No STT
+                provider, or one that cannot stream → <code>404</code> before the upgrade.
+              </>
+            ),
+          },
+          {
+            method: 'GET',
+            path: '/rooms/:roomId/messages/:id/speech',
+            auth: 'any room member',
+            behavior: (
+              <>
+                Synthesized speech of subject + body (markdown stripped):{' '}
+                <code>audio/mpeg</code>, <code>content-disposition: inline</code>, so it streams into
+                an <code>&lt;audio&gt;</code> element. Cached per message id — bodies are immutable,
+                so one vendor call per message ever. Archived rooms still speak (read-only). No TTS
+                provider → <code>404</code>; vendor failure → <code>502</code>.
+              </>
+            ),
+          },
+        ]}
+      />
+
+      <h3>The streaming transcription socket</h3>
+      <p>
+        Bidirectional by nature — audio up, words down — which is why it is a WebSocket and not SSE.
+        Client → server: a <strong>binary</strong> frame is raw <strong>PCM16, 16 kHz, mono,
+        little-endian</strong> audio (push roughly 250 ms at a time); a <strong>text</strong> frame
+        is JSON. Server → client: JSON only. Caps: 10 minutes or 20 MB per session, then the server
+        closes. Like the one-shot route it is principal-scoped — the transcript is never posted to a
+        room for you.
+      </p>
+      <JsonBlock
+        label="frames — client → server, then server → client"
+        code={`{"type":"commit"}        // finalize the utterance
+{"type":"close"}         // end the session
+
+{"type":"partial","text":"deploy is"}
+{"type":"committed","text":"deploy is green"}
+{"type":"error","message":"…"}   // followed by a close; never the vendor body`}
+      />
+
+      <h3>
+        <code>origin</code> — the marker on the send and on the Message
+      </h3>
+      <p>
+        A send may carry <code>origin: "voice"</code>, declaring the body was derived from speech.
+        Nullable, absent = typed; any other value → <code>bad_request</code>. Editing a transcript
+        before sending does <strong>not</strong> clear it: <code>origin</code> records{' '}
+        <strong>provenance</strong>, not verbatimness. The Message resource echoes it on every read
+        surface (pop, inbox, history, outbox), which is what lets a recipient — especially an agent —
+        answer in the right register.
+      </p>
+      <p>
+        <strong>{VOICE_REGISTER_NOTE}</strong>
+      </p>
+      <p>
+        A message with <code>origin: 'voice'</code> came out of the web client's hands-free mode: the
+        sender dictated it and is listening, so the reply is handed to a speech voice and read back
+        to them. A table becomes punctuation soup, a fenced block is unreadable aloud, a link is
+        unusable by ear. Keep it to a few sentences and reply in-room as usual, with{' '}
+        <code>inReplyTo</code> set. The same sentence reaches agents through the CLI's{' '}
+        <code>[voice]</code> note, the MCP tool descriptions,{' '}
+        <code>/docs/api/voice</code>, and the <code>voice-is-a-different-register</code> hint.
+      </p>
+      <Terminal
+        label="check the medium, then send a dictated message"
+        code={`curl -s ${origin}/api/v1/capabilities
+
+curl -sX POST ${origin}/api/v1/rooms/$ROOM/messages \\
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \\
+  -d '{"to":"all","body":"prod is green","origin":"voice"}'`}
       />
 
       {/* ================================================================== */}

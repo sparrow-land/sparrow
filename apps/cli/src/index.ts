@@ -25,7 +25,12 @@ import {
 import {
   deriveDefaultAgentName,
 } from '@sparrow/common-types/identity';
-import { CLAWBACK_WINDOW, minorVersionsAhead, PRESENCE_TTL_MAX } from '@sparrow/common-types';
+import {
+  CLAWBACK_WINDOW,
+  minorVersionsAhead,
+  PRESENCE_TTL_MAX,
+  VOICE_REGISTER_NOTE,
+} from '@sparrow/common-types';
 import type {
   Hint,
   QuietableEvent,
@@ -857,8 +862,23 @@ function formatMembers(items: Member[]): string {
   );
 }
 
+/**
+ * The one line every `[voice]` item carries, indented so it reads as a note
+ * ABOUT the item rather than part of its body. The `[voice]` tag alone taught
+ * nothing: a spoken message came out of hands-free mode, so the sender is
+ * sitting there LISTENING and the reply is read back to them by a speech voice.
+ * The sentence is `VOICE_REGISTER_NOTE`, verbatim from `@sparrow/common-types`,
+ * so the CLI, the MCP tool descriptions, the served docs, SKILL.md and the
+ * `voice-is-a-different-register` hint cannot drift.
+ *
+ * HUMAN OUTPUT ONLY — `print()`'s `-j` branch never sees it, so machine callers
+ * keep the byte-identical envelope they always had.
+ */
+const VOICE_NOTE_LINE = `  voice: ${VOICE_REGISTER_NOTE}`;
+
 function formatMessage(m: Message): string {
-  const voiceTag = m.origin === 'voice' ? ' [voice]' : '';
+  const voice = m.origin === 'voice';
+  const voiceTag = voice ? ' [voice]' : '';
   const lines = [
     `id:       ${m.id}`,
     `from:     ${m.from.displayName} (${m.from.id})${voiceTag}`,
@@ -884,6 +904,9 @@ function formatMessage(m: Message): string {
     }
   }
   lines.push('', m.body);
+  // Under the item, after the body: the last thing read before the answer is
+  // written is how the answer must sound.
+  if (voice) lines.push('', VOICE_NOTE_LINE);
   return lines.join('\n');
 }
 
@@ -1238,7 +1261,7 @@ function formatOutbox(items: Message[]): string {
  */
 function formatLog(items: Message[]): string {
   if (items.length === 0) return 'No messages.';
-  return [...items]
+  const lines = [...items]
     .reverse()
     .map((m) => {
       const voice = m.origin === 'voice' ? ' [voice]' : '';
@@ -1247,8 +1270,13 @@ function formatLog(items: Message[]): string {
       const n = m.attachments.length;
       const att = n > 0 ? ` (${n} attachment${n === 1 ? '' : 's'})` : '';
       return `${m.createdAt}  ${m.from.displayName}${voice}: ${body}${att}`;
-    })
-    .join('\n');
+    });
+  // A transcript is one line per message, so the register note rides it ONCE,
+  // as a footnote — repeating 144 characters under every spoken turn would
+  // drown the conversation it annotates. `pop` and `read`, which render one
+  // item at a time, carry it per item instead.
+  if (items.some((m) => m.origin === 'voice')) lines.push('', VOICE_NOTE_LINE);
+  return lines.join('\n');
 }
 
 function formatMessageStatus(s: MessageStatus): string {

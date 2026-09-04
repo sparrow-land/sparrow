@@ -8,6 +8,11 @@ function Probe() {
   return <div data-testid="caps">{`${voice.stt}:${voice.tts}`}</div>;
 }
 
+function StreamingProbe() {
+  const { voice } = useCapabilities();
+  return <div data-testid="streaming">{String(voice.sttStreaming ?? false)}</div>;
+}
+
 function EmailProbe() {
   const { email } = useCapabilities();
   return <div data-testid="email">{String(email)}</div>;
@@ -22,7 +27,7 @@ afterEach(() => restoreFetch());
 
 describe('CapabilitiesProvider', () => {
   it('exposes the fetched capabilities', async () => {
-    useFetch(async () => json({ voice: { stt: true, tts: true } }));
+    useFetch(async () => json({ voice: { stt: true, tts: true, sttStreaming: false } }));
     render(
       <CapabilitiesProvider>
         <Probe />
@@ -66,7 +71,7 @@ describe('CapabilitiesProvider', () => {
     await waitFor(() => expect(failed.getByTestId('email')).toHaveTextContent('false'));
     failed.unmount();
 
-    useFetch(async () => json({ voice: { stt: false, tts: false } }));
+    useFetch(async () => json({ voice: { stt: false, tts: false, sttStreaming: false } }));
     const omitted = render(
       <CapabilitiesProvider>
         <EmailProbe />
@@ -76,7 +81,7 @@ describe('CapabilitiesProvider', () => {
   });
 
   it('exposes email: true when the server advertises the medium', async () => {
-    useFetch(async () => json({ email: true, voice: { stt: false, tts: false } }));
+    useFetch(async () => json({ email: true, voice: { stt: false, tts: false, sttStreaming: false } }));
     render(
       <CapabilitiesProvider>
         <EmailProbe />
@@ -102,7 +107,7 @@ describe('CapabilitiesProvider', () => {
     await waitFor(() => expect(failed.getByTestId('reviewer')).toHaveTextContent('false'));
     failed.unmount();
 
-    useFetch(async () => json({ email: true, voice: { stt: false, tts: false } }));
+    useFetch(async () => json({ email: true, voice: { stt: false, tts: false, sttStreaming: false } }));
     const omitted = render(
       <CapabilitiesProvider>
         <ReviewerProbe />
@@ -113,7 +118,7 @@ describe('CapabilitiesProvider', () => {
 
   it('exposes emailReviewer: true when a judge is registered — independently of email', async () => {
     useFetch(async () =>
-      json({ email: false, emailReviewer: true, voice: { stt: false, tts: false } }),
+      json({ email: false, emailReviewer: true, voice: { stt: false, tts: false, sttStreaming: false } }),
     );
     render(
       <CapabilitiesProvider>
@@ -123,5 +128,49 @@ describe('CapabilitiesProvider', () => {
     );
     await waitFor(() => expect(screen.getByTestId('reviewer')).toHaveTextContent('true'));
     expect(screen.getByTestId('email')).toHaveTextContent('false');
+  });
+
+  // voice v2: `sttStreaming` says whether the registered STT provider can stream
+  // (live partials over the WS route). It gates ONLY which capture path
+  // hands-free mode uses, so its safe default is "buffered one-shot" — an
+  // instance (or a server build) that never mentions it must read false.
+  it('voice.sttStreaming defaults off (no provider, failed fetch, or a server that omits it)', async () => {
+    const bare = render(<StreamingProbe />);
+    expect(bare.getByTestId('streaming')).toHaveTextContent('false');
+    bare.unmount();
+
+    useFetch(async () => errorJson('not_found', 404));
+    const failed = render(
+      <CapabilitiesProvider>
+        <StreamingProbe />
+      </CapabilitiesProvider>,
+    );
+    await waitFor(() => expect(failed.getByTestId('streaming')).toHaveTextContent('false'));
+    failed.unmount();
+
+    useFetch(async () => json({ voice: { stt: true, tts: true, sttStreaming: false } }));
+    const omitted = render(
+      <CapabilitiesProvider>
+        <StreamingProbe />
+      </CapabilitiesProvider>,
+    );
+    await waitFor(() => expect(omitted.getByTestId('streaming')).toHaveTextContent('false'));
+  });
+
+  it('exposes voice.sttStreaming when the instance advertises it', async () => {
+    render(
+      <CapabilitiesProvider
+        initial={{
+          email: false,
+          emailReviewer: false,
+          voice: { stt: true, tts: true, sttStreaming: true },
+          orgHostSuffix: null,
+          workspaceSwitcher: null,
+        }}
+      >
+        <StreamingProbe />
+      </CapabilitiesProvider>,
+    );
+    expect(screen.getByTestId('streaming')).toHaveTextContent('true');
   });
 });

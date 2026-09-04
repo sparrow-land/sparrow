@@ -225,6 +225,7 @@ import {
 } from '@sparrow/common-types';
 import { ApiError } from './errors.js';
 import { SSEParser } from './sse.js';
+import { voiceStreamUrl } from './voiceStream.js';
 
 /* ------------------------------------------------------------------ *
  * Client-surfaced result unions.
@@ -1361,6 +1362,22 @@ export class SparrowClient {
       schema: TranscriptionResponseSchema,
       body: req,
     });
+  }
+
+  /**
+   * The `ws(s)://…/api/v1/voice/transcriptions/stream` URL for STREAMING STT
+   * (hands-free mode), derived from this client's configured server — `http` →
+   * `ws`, `https` → `wss`, and an empty server (the same-origin web app)
+   * resolves against the page. A configured token rides as `?token=` because a
+   * WebSocket handshake carries no `Authorization` header; the browser needs
+   * neither, its session cookie is same-origin.
+   *
+   * Only meaningful when `capabilities.voice.sttStreaming` is true — the route
+   * 404s before the upgrade otherwise. Open it with
+   * {@link openTranscriptionStream}.
+   */
+  voiceStreamUrl(): string {
+    return voiceStreamUrl(this.server, { token: this._token });
   }
 
   /**

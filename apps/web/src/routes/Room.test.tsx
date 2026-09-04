@@ -91,7 +91,7 @@ function stubRoom(opts: Opts = {}) {
   useFetch(async (input, init) => {
     const url = String(input).split('?')[0]!;
     const method = init?.method ?? 'GET';
-    if (url.includes('/capabilities')) return json({ voice: { stt: true, tts: true } });
+    if (url.includes('/capabilities')) return json({ voice: { stt: true, tts: true, sttStreaming: false } });
     if (url.includes('/voice/transcriptions')) return json({ text: opts.transcript ?? 'dictated text' });
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
@@ -158,7 +158,7 @@ function stubDmRoom(partnerNote: string | null) {
   const future = new Date(Date.now() + 60_000).toISOString();
   useFetch(async (input) => {
     const url = String(input).split('?')[0]!;
-    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
@@ -192,24 +192,32 @@ afterEach(() => {
   restoreFetch();
 });
 
-describe('Room voice dictation → origin on send', () => {
-  it('dictates into the composer and sends with origin:"voice"', async () => {
-    const sends: unknown[] = [];
-    stubRoom({ transcript: 'deploy the build', onSend: (b) => sends.push(b) });
+describe('Room voice → the composer stays a TYPING surface', () => {
+  // Voice v2 moved dictation out of the composer entirely: the mic opens
+  // hands-free mode, which owns the transcript and posts it itself (covered end
+  // to end in Room.voice.test.tsx). What must hold HERE is the negative — a
+  // typed send never claims voice provenance, and the composer grew no voice
+  // state of its own.
+  it('a typed send carries no origin, and the composer has no voice chip', async () => {
+    const sends: Array<{ origin?: string }> = [];
+    stubRoom({ onSend: (b) => sends.push(b as { origin?: string }) });
     renderRoom();
 
-    // Record → stop drives transcribe → transcript lands in the composer.
-    await userEvent.click(await screen.findByRole('button', { name: /record voice/i }));
-    await userEvent.click(await screen.findByRole('button', { name: /stop recording/i }));
-
     const textarea = await screen.findByRole('textbox');
-    await waitFor(() => expect((textarea as HTMLTextAreaElement).value).toBe('deploy the build'));
-    expect(screen.getByLabelText(/composed by voice/i)).toBeInTheDocument();
-
+    await userEvent.type(textarea, 'deploy the build');
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
 
     await waitFor(() => expect(sends).toHaveLength(1));
-    expect(sends[0]).toMatchObject({ to: 'all', body: 'deploy the build', origin: 'voice' });
+    expect(sends[0]).toMatchObject({ to: 'all', body: 'deploy the build' });
+    expect(sends[0]!.origin).toBeUndefined();
+    expect(screen.queryByLabelText(/composed by voice/i)).toBeNull();
+  });
+
+  it('the mic is the door to hands-free mode, not a recorder', async () => {
+    stubRoom({});
+    renderRoom();
+    expect(await screen.findByRole('button', { name: /hands-free/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /record voice/i })).toBeNull();
   });
 });
 
@@ -239,7 +247,7 @@ describe('Room DM working indicator (iMessage-style, bottom placement)', () => {
     wsState.rooms = [{ room: { ...DM_ROOM, counterpart: COUNTERPART }, memberId: SELF.id, roomRole: 'owner' }];
     useFetch(async (input) => {
       const url = String(input).split('?')[0]!;
-      if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+      if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
       if (url.includes('/whoami')) return json(SELF);
       if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
       if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
@@ -265,7 +273,7 @@ function stubOfflineDm(type: 'agent' | 'human') {
   const other = { ...OTHER, kind: type };
   useFetch(async (input) => {
     const url = String(input).split('?')[0]!;
-    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, other], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
@@ -336,7 +344,7 @@ describe('Room historical bubbles are never collapsed (always full body, no elli
   function stubHistoryRoom(msg: Message, room: RoomResource = ROOM) {
     useFetch(async (input) => {
       const url = String(input).split('?')[0]!;
-      if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+      if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
       if (url.includes('/whoami')) return json(SELF);
       if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
       if (url.includes('/inbox')) return json({ items: [], nextCursor: null });

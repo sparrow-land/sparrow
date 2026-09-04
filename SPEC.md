@@ -573,6 +573,7 @@ carried them, because that request is always the same one:
 | `drain-your-inbox` | ≥5 unread | standard |
 | `refresh-your-role` | the role changed and has not been re-read — RE-ARMS per `roleUpdatedAt` rather than on the daily cooldown, so it fires once per role version and again whenever the role changes | per role version |
 | `email-is-a-different-register` | the agent's most recently READ inbound email was read within `RECENT_ACTIVITY_MS` | **permanent** — once ever |
+| `voice-is-a-different-register` | the agent's most recent reply to a message carrying `origin: 'voice'`, sent within `RECENT_ACTIVITY_MS`, is not speakable (a markdown table row, a fenced code block, or a body over 600 chars) | **permanent** — once ever |
 | `you-have-email` | has an address, has never looked at it | standard |
 | `email-is-held` | an outbound mail has waited on the owner ~10 min | standard |
 | `markdown-renders` | the last `MARKDOWN_STREAK` (3) sends are all long and formatting-free, the newest within `RECENT_ACTIVITY_MS` | standard |
@@ -1401,7 +1402,9 @@ under *Web UI → Reconnect must never outlast the grace*.
 `GET /rooms/:roomId/events` — `text/event-stream`, member auth (`?token=` accepted
 since EventSource can't set headers — session or agent key). Named events:
 
-- `message.new` — `{ messageId, from: MemberRef, preview, kind }` (to recipients)
+- `message.new` — `{ messageId, from: MemberRef, preview, kind, origin }` (to
+  recipients; `origin` is the message's provenance, `'voice'` or `null`, so a woken
+  agent knows the register before it pops)
 - `message.read` — `{ messageId, by: MemberRef, readAt }` (to the sender)
 - `message.received` — `{ messageId, by: MemberRef, receivedAt }` (to the
   sender; emitted once per recipient when delivery marks `received` — see Read
@@ -1584,8 +1587,8 @@ Shapes: lists → `{ items: [...] }`; deletes → `{ ok: true }`.
   `server.version`/`server.build` are the same strings `/healthz` reports;
   `client.minimum`/`client.recommended` are the configured version-gate floors (both
   `null` when unset). Never gated.
-- `GET /api/v1/capabilities` → `200 { voice: { stt: boolean, tts: boolean },
-  email: boolean, emailReviewer: boolean, orgHostSuffix: string | null,
+- `GET /api/v1/capabilities` → `200 { voice: { stt: boolean, tts: boolean,
+  sttStreaming: boolean }, email: boolean, emailReviewer: boolean, orgHostSuffix: string | null,
   workspaceSwitcher: { directoryUrl, createUrl: string | null } | null }`, no auth.
   The instance-wide feature advertisement:
   booleans derived from registered providers and configured suffixes, never key
@@ -2701,7 +2704,7 @@ speech synthesis inside chat**. An agent or human dictates instead of typing, an
 listens to a message instead of reading it; the message that results is an ordinary
 chat message carrying `origin: "voice"`. Voice owns no threads, no addresses, and no
 work items — it has no independent inbox to drain, so nothing about it reaches
-`POST /me/inbox/pop`. What follows is unchanged from v3.
+`POST /me/inbox/pop`.
 
 Voice is optional and **vendor-key-gated**: the server registers speech
 providers at boot — `elevenlabs` iff `ELEVENLABS_API_KEY` is present (STT model
@@ -2710,7 +2713,10 @@ providers at boot — `elevenlabs` iff `ELEVENLABS_API_KEY` is present (STT mode
 valid MP3 — what tests, scenarios, and keyless dev stacks use). With no
 provider registered, the voice routes below → `404` and clients hide every
 voice control. `GET /api/v1/capabilities` (*HTTP API → Misc*) reports
-`voice: { stt, tts }` so clients gate render rather than discover by `404`.
+`voice: { stt, tts, sttStreaming }` so clients gate render rather than discover by
+`404` — `sttStreaming` is true iff the registered STT provider implements
+`stream` (below); `fake` does, `elevenlabs` does (Scribe v2 Realtime,
+`voice.sttRealtimeModelId`).
 
 Provider seam (apps/api, mirrors `AuthProvider`; providers are internal, never
 wire shapes):
@@ -2720,23 +2726,45 @@ interface SttProvider {
   id: string;   // 'elevenlabs' | 'fake'
   transcribe(audio: Buffer, contentType: string,
              opts?: { language?: string }): Promise<{ text: string; language?: string }>;
+  stream?(opts?: { language?: string }): SttStream;   // optional: live words
+}
+interface SttStream {
+  push(pcm16: Buffer): void;   // 16 kHz mono signed-16 LE
+  commit(): void;              // finalize what was pushed
+  close(): void;
+  on(ev: 'partial' | 'committed', cb: (text: string) => void): void;
+  on(ev: 'error', cb: (err: Error) => void): void;
 }
 interface TtsProvider {
   id: string;
   synthesize(text: string): Promise<{ audio: Buffer; contentType: string }>;
+  synthesizeStream?(text: string): Promise<ReadableStream<Uint8Array>>;  // optional: chunked
 }
 ```
+
+`elevenlabs` implements `synthesizeStream` (`/v1/text-to-speech/{voice}/stream`);
+`/speech` prefers it — the first bytes reach the listener while the vendor is still
+speaking — tee-ing the stream into a `.part` file that becomes the cache entry only
+when the stream ends, so a listener who hangs up mid-sentence never leaves a
+truncated cache behind. Providers without it are served buffered.
 
 | Route | Auth | Behavior |
 |---|---|---|
 | `POST /voice/transcriptions` | session or agent key | `{ audioBase64, contentType, language? }` → `200 { text, language? }`. Decoded audio ≤ 15 MB else `413`; no STT provider → `404`; vendor failure → `502` |
+| `GET /voice/transcriptions/stream` | session cookie or `?token=` (as `/me/events`) | **WebSocket** upgrade. Client → server: binary frames = raw PCM16 16 kHz mono audio; text frames `{"type":"commit"}` (finalize) and `{"type":"close"}`. Server → client: `{"type":"partial","text"}` (interim, replaces the previous partial), `{"type":"committed","text"}` (final for that segment), `{"type":"error","message"}` followed by close `1011` (`voice vendor request failed` on a vendor failure — never the vendor body; `transcription session audio limit reached` / `transcription session time limit reached` at the caps). `{"type":"close"}` or the client hanging up ends the session cleanly (`1000`); unknown or unparseable text frames are ignored. `?language=` is forwarded to the provider as a language hint. No STT provider, or one without `stream` → `404` before the upgrade; `401` unauthenticated. One session is capped at 20 MB of audio or 10 minutes, then closed with an error frame. Principal-scoped like one-shot transcription: the server never sends the words anywhere |
 | `GET /rooms/:roomId/messages/:id/speech` | any room member (same authz as GetAttachment) | synthesized speech of subject + body (markdown syntax stripped): `200` with the provider's audio (`audio/mpeg`), `content-disposition: inline` (streamable into `<audio>`, unlike attachments' forced download). Result cached at `$DATA_DIR/tts/{messageId}` — message bodies are immutable, so one vendor call per message ever. No TTS provider → `404`; vendor failure → `502`; archived rooms still speak (read-only route) |
 
 Transcription is **principal-scoped** — audio is not room data, and the server
 never sends on the caller's behalf: the transcript returns to the caller, and
 sending remains a separate, explicit `POST .../messages` carrying
-`origin: "voice"` (manual mode). Client flow: record → transcribe → transcript
-lands editable in the composer → send.
+`origin: "voice"`. Client flow: **hands-free mode** (*Web app → Voice
+controls*) — tap the mic, speak while the words stream in, Send, hear the reply
+read aloud, tap the mic again. Every message spoken this way carries
+`origin: "voice"`, which is why the marker means *the sender is listening*: the
+register agents are taught for it (*Hints*, MCP, CLI, SKILL.md) is one sentence,
+canonical in `packages/common-types` — "The sender spoke this and is listening,
+not reading — answer short and speakable: plain sentences, no tables, code
+blocks, links, or long lists." Design record: `docs/design/hands-free-v2.md`.
 
 **Future.** Calls and phone numbers slot in as voice-medium objects — a call is the
 medium's thread, a number its address — reusing the same provider seam and the same
@@ -3215,7 +3243,8 @@ must not report `source: 'env'`). A `string[]` descriptor's env form is a
 | `voice.elevenLabsApiKey` | string | `''` (env `ELEVENLABS_API_KEY`), **secret** | presence registers the `elevenlabs` STT+TTS providers |
 | `voice.ttsVoiceId` | string | `''` (= vendor default voice) | ElevenLabs voice id for `/speech` |
 | `voice.ttsModelId` | string | `eleven_flash_v2_5` | ElevenLabs TTS model |
-| `voice.sttModelId` | string | `scribe_v2` | ElevenLabs STT model |
+| `voice.sttModelId` | string | `scribe_v2` | ElevenLabs STT model (one-shot `/voice/transcriptions`) |
+| `voice.sttRealtimeModelId` | string | `scribe_v2_realtime` | ElevenLabs realtime STT model (`/voice/transcriptions/stream`) |
 
 Vendor **keys** are descriptors (db-settable, env-fallback, masked on the wire);
 provider **selection** and deployment topology are env-only (`EMAIL_PROVIDER`,
@@ -3699,7 +3728,10 @@ expensive mistake an agent makes here is writing chat into a mail client:
 
 That paragraph is canonical: it is written once in `packages/common-types` and reused
 by the MCP descriptions, the onboarding doc, and the
-`email-is-a-different-register` hint, so the three cannot drift.
+`email-is-a-different-register` hint, so the three cannot drift. The voice register
+sentence (*Voice*) is canonical the same way: one constant in `packages/common-types`,
+reused by the MCP tool descriptions, the CLI's line under `[voice]` items, the served
+docs, and the `voice-is-a-different-register` hint.
 
 Per-tool descriptions add:
 
@@ -4145,15 +4177,38 @@ Email info boxes carry none of this: there is no receipt, no presence, and no wo
 status behind an address.
 
 **Voice controls** (rendered only per `GET /api/v1/capabilities`): with `voice.stt`, the
-composer gains a mic button — `MediaRecorder` capture (mime feature-detected:
-webm/opus, Safari mp4), pulsing while recording, stop → `POST
-/voice/transcriptions` → transcript lands **editable** in the composer with a
-small "voice" chip; Send carries `origin: "voice"`. Mic-denied and vendor
-errors surface inline; discarding the transcript clears the chip. With
-`voice.tts`, counterpart message bubbles gain a speaker button — fetches
-`/speech` into a Blob URL and plays inline (play/stop toggle, one at a time);
-playback starts only from the click gesture (autoplay policies). Messages the
-user sent by voice render the same chip for provenance.
+composer gains a mic button that opens **hands-free mode** — a full-viewport
+overlay (`role="dialog"`, `aria-modal`, background scroll locked; corner ✕ or
+Escape leaves it) that runs a spoken conversation loop without returning to the
+composer between turns:
+
+- **ready** — one big mic, "Tap to talk"; the last spoken reply shown small.
+- **listening** — tap the mic to start. With `voice.sttStreaming`, audio is
+  captured at 16 kHz PCM (Web Audio worklet) and streamed over
+  `/voice/transcriptions/stream`; the words appear **as they are spoken**
+  (committed text plain, the current partial muted, `aria-live="polite"`)
+  beside a level meter. Two big buttons: **Send** (primary; enabled once there
+  is text) and **Cancel** (back to ready, nothing sent, nothing transcribed
+  further). Without `sttStreaming` the same overlay records with
+  `MediaRecorder` (mime feature-detected: webm/opus, Safari mp4) and shows the
+  one-shot `POST /voice/transcriptions` transcript after Stop.
+- **sending** — Send posts the transcript through the ordinary send path with
+  `origin: "voice"` and **stays in the mode**.
+- **awaiting** — shows the counterpart's working status while the reply is
+  pending.
+- **speaking** — with `voice.tts`, every message from another member that
+  arrives while the overlay is open is queued and read aloud in order via
+  `/speech` (own messages never); the `Audio` element is created and unlocked
+  inside the Send tap so mobile autoplay policies allow later playback. Tap the
+  mic to interrupt and start the next turn. Without `voice.tts` the reply is
+  shown as text instead.
+
+Mic-denied and vendor errors surface inline in the overlay. Leaving the mode
+stops capture and playback. Outside the overlay: with `voice.tts`, counterpart
+message bubbles keep the speaker button — fetches `/speech` into a Blob URL and
+plays inline (play/stop toggle, one at a time); playback starts only from the
+click gesture. Messages sent by voice render a small "voice" chip for
+provenance, on both sides.
 
 **Invite landing page** (`/invite/:token`) — the browser rendering of the invite
 URL. Shows org name, inviter, and a one-paragraph what-sparrow-is explainer ("a shared
@@ -4374,7 +4429,9 @@ to read `.item.type`, `.item.message`, `.item.room`: **020**, **025**, **035**,
 mechanical (jq paths plus the empty case becoming `.item == null`); each scenario's
 *intent* is unchanged. Two more shape changes: **015-invite-agent** adds a rejected
 proposed name (uppercase / trailing dot / `..`), and **115-voice** asserts
-`capabilities.email` alongside the voice booleans.
+`capabilities.email` alongside the voice booleans, and (hands-free) drives one
+WebSocket exchange over `/voice/transcriptions/stream` against the fake provider,
+checks `voice.sttStreaming` on both stacks, and reads `origin` off `message.new`.
 
 v4 scenarios:
 

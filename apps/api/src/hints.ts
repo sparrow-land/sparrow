@@ -32,7 +32,7 @@
  * for "just now". That is what makes the pause a legitimate teaching moment: the
  * lesson still has a referent the agent remembers.
  */
-import { and, desc, eq, gte, inArray, isNotNull, isNull } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray } from 'drizzle-orm';
 import type { FastifyRequest } from 'fastify';
 import {
   HINT_COOLDOWN_MS,
@@ -40,6 +40,7 @@ import {
   HINT_META_THRESHOLD,
   parseClientIdent,
   clientVersionBelow,
+  VOICE_REGISTER_NOTE,
   type Hint,
   type HintAction,
   type HintLevel,
@@ -79,6 +80,26 @@ const MARKDOWN_TOKEN = /[*_#`]|\[.+\]\(/;
  * still remembers doing — without the engine keeping any state of its own.
  */
 const RECENT_ACTIVITY_MS = 30 * 60 * 1000;
+
+/**
+ * Body length (chars) above which a reply is too long to LISTEN to. A reader
+ * skims 900 characters in seconds; a text-to-speech voice takes a minute to say
+ * them, with no way to skip ahead. Drives `voice-is-a-different-register`.
+ */
+const SPEAKABLE_MAX_CHARS = 600;
+/**
+ * The two markdown constructs that do not survive being read aloud: a table row
+ * (a line with at least two pipes) and a fenced code block. Both come out of a
+ * TTS voice as punctuation soup.
+ */
+const UNSPEAKABLE_TOKEN = /^[^\n]*\|[^\n]*\|/m;
+const FENCE_TOKEN = /```/;
+/**
+ * How many of the agent's recent sends `voice-is-a-different-register` walks
+ * back through looking for one that answers a spoken message. Small on purpose:
+ * the lesson is about the reply the agent still remembers writing.
+ */
+const VOICE_REPLY_SCAN = 10;
 
 /** The default hint level for a principal with no stored preference. */
 export const DEFAULT_HINT_LEVEL: HintLevel = 'normal';
@@ -273,6 +294,84 @@ function lastReadInboundEmail(h: HintEvalCtx, agentId: string): EmailRow | undef
     .get();
 }
 
+/**
+ * Whether a body could be READ ALOUD to someone who is not looking at a screen.
+ * Deliberately mechanical (length + two markdown tokens) — the engine judges
+ * shape, never quality.
+ */
+function isSpeakable(body: string): boolean {
+  if (body.length > SPEAKABLE_MAX_CHARS) return false;
+  return !UNSPEAKABLE_TOKEN.test(body) && !FENCE_TOKEN.test(body);
+}
+
+/** One of the agent's own sends, with everything the voice trigger judges. */
+interface VoiceReply {
+  roomId: string;
+  body: string;
+}
+
+/**
+ * The agent's most recent OWN send, inside {@link RECENT_ACTIVITY_MS}, that
+ * ANSWERS a message someone spoke (`origin: 'voice'`) — or undefined when it
+ * answered nothing spoken.
+ *
+ * "Answers" has two forms, because nothing forces a client to thread: an
+ * explicit `inReplyTo` pointing at a voice-origin message, or — with no
+ * `inReplyTo` — plain conversational adjacency, i.e. the newest message someone
+ * ELSE posted in that room before this send was spoken. Walks back at most
+ * {@link VOICE_REPLY_SCAN} sends so the lesson stays attached to an exchange the
+ * agent remembers.
+ */
+function lastReplyToVoice(h: HintEvalCtx): VoiceReply | undefined {
+  if (h.memberIds.length === 0) return undefined;
+  const cutoff = new Date(h.now - RECENT_ACTIVITY_MS).toISOString();
+  const sends = h.ctx.db
+    .select({
+      roomId: messages.roomId,
+      body: messages.body,
+      inReplyTo: messages.inReplyTo,
+      createdAt: messages.createdAt,
+    })
+    .from(messages)
+    .where(
+      and(
+        inArray(messages.senderId, h.memberIds),
+        isNull(messages.clawedBackAt),
+        gte(messages.createdAt, cutoff),
+      ),
+    )
+    .orderBy(desc(messages.createdAt), desc(messages.id))
+    .limit(VOICE_REPLY_SCAN)
+    .all();
+  for (const send of sends) {
+    // The registry-invariant test drives `build()` through a structural db stub
+    // that answers every query with one undefined row — tolerate it.
+    if (!send) continue;
+    const answered = send.inReplyTo
+      ? h.ctx.db
+          .select({ origin: messages.origin })
+          .from(messages)
+          .where(eq(messages.id, send.inReplyTo))
+          .get()
+      : h.ctx.db
+          .select({ origin: messages.origin })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.roomId, send.roomId),
+              notInArray(messages.senderId, h.memberIds),
+              isNull(messages.clawedBackAt),
+              lt(messages.createdAt, send.createdAt),
+            ),
+          )
+          .orderBy(desc(messages.createdAt), desc(messages.id))
+          .limit(1)
+          .get();
+    if (answered?.origin === 'voice') return { roomId: send.roomId, body: send.body };
+  }
+  return undefined;
+}
+
 /** The agent row behind an agent principal — undefined for a human caller. */
 function roleAgent(h: HintEvalCtx): AgentRow | undefined {
   if (h.principal.type !== 'agent') return undefined;
@@ -453,6 +552,41 @@ export const TRIGGERS: Trigger[] = [
           method: 'POST',
           path: `/api/v1/me/email/threads/${threadId}/reply`,
           exampleBody: { text: '…' },
+        },
+      };
+    },
+  },
+  {
+    // The spoken twin of the register hint above, and the same shape: a lesson
+    // about the SENDER'S channel, derived at the pause from what the agent
+    // already wrote. A message with `origin: 'voice'` came out of hands-free
+    // mode — the human dictated it and is sitting there listening — so the
+    // reply is handed to a text-to-speech voice and READ BACK to them. A table,
+    // a fenced block or a 900-character essay is unlistenable.
+    //
+    // `applies` looks at the agent's most recent OWN answer to a spoken message
+    // within RECENT_ACTIVITY_MS and asks only whether it is SPEAKABLE (length +
+    // two markdown tokens). A long, table-laden reply to a TYPED message is not
+    // this lesson — `markdown-renders` owns chat prose.
+    //
+    // Stays `permanent` (once ever), exactly like its email sibling: the
+    // register only needs teaching the first time an agent meets the medium.
+    id: 'voice-is-a-different-register',
+    docs: 'voice',
+    ownerLabel: 'Sparrow hinted the agent to answer a spoken message in a speakable way.',
+    permanent: true,
+    applies(h) {
+      const reply = lastReplyToVoice(h);
+      return reply !== undefined && !isSpeakable(reply.body);
+    },
+    build(h) {
+      const roomId = lastReplyToVoice(h)?.roomId ?? ':roomId';
+      return {
+        text: `You answered a SPOKEN message, so your reply is read aloud — they will hear it, not see it. ${VOICE_REGISTER_NOTE}`,
+        action: {
+          method: 'POST',
+          path: `/api/v1/rooms/${roomId}/messages`,
+          exampleBody: { text: '…', inReplyTo: '…' },
         },
       };
     },

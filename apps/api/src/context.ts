@@ -83,6 +83,13 @@ export interface ServerConfig {
    */
   voice?: { stt?: SttProvider | null; tts?: TtsProvider | null };
   /**
+   * Streaming-transcription session caps (test seam; SPEC ships 20 MB / 600 s).
+   * Mirrors `streamMaxLifetimeSeconds`: a cap the spec fixes, injectable so a
+   * test can prove the boundary in milliseconds instead of megabytes.
+   */
+  voiceStreamMaxAudioBytes?: number;
+  voiceStreamMaxSeconds?: number;
+  /**
    * Global kill-switch for the hints engine (env `HINTS_ENABLED`, default ON).
    * `false` suppresses every response-body hint instance-wide; undefined/true
    * leaves hints on. Trumps the per-principal hint level and opt-out header.

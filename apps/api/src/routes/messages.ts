@@ -217,6 +217,7 @@ export function registerMessageRoutes(app: FastifyInstance, ctx: AppContext): vo
       from: message.from,
       preview,
       kind,
+      origin: message.origin,
     });
     // Trigger (a): server-observed delivery. Any recipient whose principal holds
     // an open stream on this room at send time (the same online source of truth

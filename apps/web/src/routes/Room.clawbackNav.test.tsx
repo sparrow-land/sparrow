@@ -116,7 +116,7 @@ function stubRoom(opts: Opts = {}) {
   useFetch(async (input, init) => {
     const url = String(input).split('?')[0]!;
     const method = init?.method ?? 'GET';
-    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
     if (url.includes('/whoami')) {
       if (opts.whoamiStatus) return errorJson('not_found', opts.whoamiStatus);
       return json(SELF);

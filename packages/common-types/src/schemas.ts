@@ -2922,6 +2922,13 @@ export const MessageNewEventSchema = z.object({
   from: MemberRefSchema,
   preview: z.string(),
   kind: MessageKindSchema,
+  /**
+   * The message's `origin` (`'voice'` = dictated, null = typed), so an
+   * SSE-woken agent knows the sender's REGISTER before it pops: a voice sender
+   * is listening, not reading. Defaulted (not required) so a new client still
+   * parses a pre-voice server's frames.
+   */
+  origin: MessageOriginSchema.nullable().default(null),
 });
 export type MessageNewEvent = z.infer<typeof MessageNewEventSchema>;
 
@@ -3264,6 +3271,13 @@ export const CapabilitiesResponseSchema = z.object({
   voice: z.object({
     stt: z.boolean(),
     tts: z.boolean(),
+    /**
+     * Whether the registered STT provider can stream (`GET
+     * /voice/transcriptions/stream`). Clients gate hands-free mode's LIVE
+     * transcript on it and fall back to record-then-transcribe when it is
+     * false. Defaulted so pre-streaming servers parse.
+     */
+    sttStreaming: z.boolean().default(false),
   }),
   /**
    * The email medium's on/off — true iff `EMAIL_ORG_SUFFIX` is set AND an email

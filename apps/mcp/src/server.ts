@@ -17,7 +17,12 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { SparrowClient, ApiError, clientBuildVersion } from '@sparrow/client';
 import { deriveDefaultAgentName } from '@sparrow/common-types/identity';
-import { EMAIL_REGISTER_NOTE, type AttachmentInput, type Email } from '@sparrow/common-types';
+import {
+  EMAIL_REGISTER_NOTE,
+  VOICE_REGISTER_NOTE,
+  type AttachmentInput,
+  type Email,
+} from '@sparrow/common-types';
 import { upsertDefaultProfile, defaultProfileNote, type Profile } from './credentials.js';
 
 export type Env = Record<string, string | undefined>;
@@ -93,6 +98,19 @@ export const EMAIL_OFF_MESSAGE = 'email is not enabled on this server';
 function emailDescription(own: string): string {
   return `${EMAIL_REGISTER_NOTE}\n\n${own}`;
 }
+
+/**
+ * The voice-register sentence every tool that can HAND BACK A MESSAGE carries,
+ * verbatim from `@sparrow/common-types` — the same words the CLI prints under a
+ * `[voice]` item, the `/docs/api/voice` page serves, SKILL.md states, and the
+ * `voice-is-a-different-register` hint delivers. A message with
+ * `origin: 'voice'` came out of hands-free mode: the sender dictated it and is
+ * listening, so the reply is read back to them by a speech voice.
+ *
+ * Only the message-returning tools get it. On a listing or a read-receipt tool
+ * it would be noise in a description the model has to parse on every call.
+ */
+const VOICE_NOTE = `When a message carries origin 'voice': ${VOICE_REGISTER_NOTE}`;
 
 /** The shared paragraph on all three approval tools (SPEC, MCP chapter). */
 const APPROVAL_NOTE =
@@ -596,7 +614,8 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
         'unknown type as an error. Pass ack=true to advertise a "working" status scoped to a ' +
         "chat sender (it auto-expires; `note` sets its text); on an email item ack does " +
         'nothing at all — there is no room to scope to, and the honest way to acknowledge mail ' +
-        'is to answer it. Use pop_next_message instead only if you work exactly one room.',
+        'is to answer it. Use pop_next_message instead only if you work exactly one room. ' +
+        VOICE_NOTE,
       inputSchema: {
         ack: z
           .boolean()
@@ -693,8 +712,7 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
         'Pass ack=true to immediately advertise a "working" status scoped to that message\'s ' +
         "sender (so they see you're on their reply); it auto-expires. `note` sets that status " +
         'note (defaults to "reading your message"). ' +
-        "When a message carries origin 'voice' the sender spoke it and is likely listening to your " +
-        'reply — prefer a concise, speakable answer (no tables or code walls).',
+        VOICE_NOTE,
       inputSchema: {
         roomId: roomIdArg,
         ack: z
@@ -722,8 +740,7 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
       description:
         'Fetch the full content of a message by id. By default this marks it read for you; ' +
         'pass peek=true to read without changing its read state. ' +
-        "When a message carries origin 'voice' the sender spoke it and is likely listening to your " +
-        'reply — prefer a concise, speakable answer (no tables or code walls).',
+        VOICE_NOTE,
       inputSchema: {
         roomId: roomIdArg,
         messageId: z.string().describe('The message id (msg_…).'),

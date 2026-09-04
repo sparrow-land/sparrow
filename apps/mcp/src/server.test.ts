@@ -10,6 +10,7 @@ import { buildServer } from '@sparrow/api';
 import { SparrowClient } from '@sparrow/client';
 import { deriveDefaultAgentName } from '@sparrow/common-types/identity';
 import { clientBuildVersion } from '@sparrow/client';
+import { VOICE_REGISTER_NOTE } from '@sparrow/common-types';
 import { createMcpServer, TOOL_NAMES, type McpServerDeps } from './server.js';
 import { credentialsPath } from './credentials.js';
 import type { Env } from './config.js';
@@ -160,14 +161,34 @@ describe('tools/list', () => {
     }
   });
 
-  it('pop_next_message and read_message coach a speakable reply for voice origin', async () => {
+  /**
+   * EVERY tool that can hand back a message must teach the voice register — the
+   * unified `pop_next_work_item` is the one an agent runtime actually drains, so
+   * leaving it out was the gap. All three carry `VOICE_REGISTER_NOTE` VERBATIM
+   * (the same sentence the CLI prints, the docs serve, SKILL.md states and the
+   * `voice-is-a-different-register` hint delivers), so the surfaces cannot drift.
+   */
+  it('every message-returning tool coaches a speakable reply for voice origin', async () => {
     const api = await startApi();
     const client = await connectMcp({ server: api.url });
     const { tools } = await client.listTools();
-    for (const name of ['pop_next_message', 'read_message']) {
+    for (const name of ['pop_next_work_item', 'pop_next_message', 'read_message']) {
       const desc = tools.find((t) => t.name === name)?.description ?? '';
       expect(desc, `${name} voice guidance`).toMatch(/origin 'voice'/);
       expect(desc, `${name} speakable guidance`).toMatch(/speakable/);
+      expect(desc, `${name} carries the canonical note`).toContain(VOICE_REGISTER_NOTE);
+    }
+  });
+
+  it('tools that never hand back a message do NOT carry the voice note', async () => {
+    // The note is guidance for answering a spoken sender; on a listing or a
+    // read-receipt tool it would be noise in a description an agent must parse.
+    const api = await startApi();
+    const client = await connectMcp({ server: api.url });
+    const { tools } = await client.listTools();
+    for (const name of ['list_members', 'get_message_status', 'set_status']) {
+      const desc = tools.find((t) => t.name === name)?.description ?? '';
+      expect(desc, `${name}`).not.toContain(VOICE_REGISTER_NOTE);
     }
   });
 });

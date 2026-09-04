@@ -1,7 +1,7 @@
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
-import { HINT_TEXT_MAX, type Hint } from '@sparrow/common-types';
+import { HINT_TEXT_MAX, VOICE_REGISTER_NOTE, type Hint } from '@sparrow/common-types';
 import { TRIGGERS } from './hints.js';
 import {
   makeTestServer,
@@ -590,5 +590,170 @@ describe('GET /me/hints — the read-only tips view', () => {
     });
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe('forbidden');
+  });
+});
+
+/**
+ * `voice-is-a-different-register` — the spoken twin of the email register hint.
+ *
+ * A message carrying `origin: 'voice'` came out of hands-free mode: the human
+ * DICTATED it and is sitting there listening, so whatever the agent writes back
+ * is read aloud to them by a synthetic voice. A table, a fenced code block or a
+ * 900-character essay is unlistenable. The trigger derives that miss from the
+ * db at the PAUSE (never on the send it judges): the agent's most recent OWN
+ * reply to a voice-origin message, inside `RECENT_ACTIVITY_MS`, is not
+ * speakable.
+ */
+describe('voice-is-a-different-register', () => {
+  /** The owner speaks: a message with `origin: 'voice'`, returning its id. */
+  async function ownerSpeaks(f: Fixture, body: string): Promise<string> {
+    const res = await f.ts.app.inject({
+      method: 'POST',
+      url: `/api/v1/rooms/${f.roomId}/messages`,
+      headers: auth(f.ownerToken),
+      payload: { body, origin: 'voice' },
+    });
+    if (res.statusCode !== 201) throw new Error(`voice send failed: ${res.body}`);
+    return res.json().message.id as string;
+  }
+
+  /** Quiet the higher-priority triggers so the voice hint is what we observe. */
+  async function quiet(f: Fixture): Promise<void> {
+    await goOnline(f.ts.app, f.agentKey);
+    await holdStatus(f.ts.app, f.agentKey, f.roomId);
+  }
+
+  const TABLE_REPLY = 'Here you go:\n\n| env | status |\n| --- | --- |\n| prd | green |\n';
+  const CODE_REPLY = 'Run this:\n\n```sh\nsparrow pop\n```\n';
+  const LONG_REPLY = 'x'.repeat(601);
+
+  it('fires when the reply to a spoken message carries a markdown TABLE', async () => {
+    fx = await setup();
+    await quiet(fx);
+    const spoken = await ownerSpeaks(fx, 'how is prod looking');
+    await popAs(fx.ts.app, fx.agentKey); // drain, so the pause is empty
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: TABLE_REPLY, inReplyTo: spoken });
+    const body = await pause(fx.ts.app, fx.agentKey);
+    const hint = body.hints![0]!;
+    expect(hint.id).toBe('voice-is-a-different-register');
+    expect(hint.docs).toBe('https://sparrow.land/docs/api/voice.md');
+    expect(hint.text).toMatch(/hear/i);
+    expect(hint.text).toContain('listening, not reading');
+    expect(hint.text.length).toBeLessThanOrEqual(HINT_TEXT_MAX);
+    expect(hint.action!.method).toBe('POST');
+    expect(hint.action!.path).toBe(`/api/v1/rooms/${fx.roomId}/messages`);
+    expect(hint.action!.exampleBody).toEqual({ text: '…', inReplyTo: '…' });
+  });
+
+  it('fires on a FENCED CODE BLOCK reply, and on an over-long one', async () => {
+    fx = await setup();
+    await quiet(fx);
+    const spoken = await ownerSpeaks(fx, 'how do I drain');
+    await popAs(fx.ts.app, fx.agentKey);
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: CODE_REPLY, inReplyTo: spoken });
+    expect((await pause(fx.ts.app, fx.agentKey)).hints![0]!.id).toBe(
+      'voice-is-a-different-register',
+    );
+
+    // A second agent, same instance, replying at length instead of in code.
+    const other = await makeAgent(fx.ts.app, fx.ownerToken, fx.orgId, 'other-bot');
+    await fx.ts.app.inject({
+      method: 'POST',
+      url: `/api/v1/rooms/${fx.roomId}/members`,
+      headers: auth(fx.ownerToken),
+      payload: { principal: other.id },
+    });
+    await goOnline(fx.ts.app, other.key);
+    await holdStatus(fx.ts.app, other.key, fx.roomId);
+    const spoken2 = await ownerSpeaks(fx, 'and the rollout');
+    // Drain both messages this agent can see, so its pause is genuinely empty.
+    while ((await popAs(fx.ts.app, other.key)).item !== null) {
+      /* drain */
+    }
+    await sendAs(fx.ts.app, other.key, fx.roomId, { body: LONG_REPLY, inReplyTo: spoken2 });
+    expect((await pause(fx.ts.app, other.key)).hints![0]!.id).toBe(
+      'voice-is-a-different-register',
+    );
+  });
+
+  it('counts an UNTHREADED reply — the next thing the agent said in that room', async () => {
+    // Nothing forces `inReplyTo`, so the trigger falls back to conversational
+    // adjacency: the newest message in the room before the agent's own send.
+    fx = await setup();
+    await quiet(fx);
+    await ownerSpeaks(fx, 'read me the deploy table');
+    await popAs(fx.ts.app, fx.agentKey);
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: TABLE_REPLY });
+    expect((await pause(fx.ts.app, fx.agentKey)).hints![0]!.id).toBe(
+      'voice-is-a-different-register',
+    );
+  });
+
+  it('does NOT fire when the reply to a spoken message is speakable', async () => {
+    fx = await setup();
+    await quiet(fx);
+    const spoken = await ownerSpeaks(fx, 'how is prod looking');
+    await popAs(fx.ts.app, fx.agentKey);
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, {
+      body: 'Production is green. The last deploy finished eleven minutes ago.',
+      inReplyTo: spoken,
+    });
+    expect('hints' in (await pause(fx.ts.app, fx.agentKey))).toBe(false);
+  });
+
+  it('does NOT fire for a long, table-laden reply to a TYPED message', async () => {
+    // The register lesson is about the SENDER'S channel, not the agent's style —
+    // `markdown-renders` is the hint for chat prose, and it must not be
+    // shadowed by a voice lesson with no voice in it.
+    fx = await setup();
+    await quiet(fx);
+    await ownerSays(fx, 'how is prod looking'); // typed: origin null
+    await popAs(fx.ts.app, fx.agentKey);
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: TABLE_REPLY });
+    const body = await pause(fx.ts.app, fx.agentKey);
+    expect(body.hints?.[0]?.id).not.toBe('voice-is-a-different-register');
+  });
+
+  it('does NOT fire on a STALE exchange (the lesson has lost its referent)', async () => {
+    fx = await setup();
+    await quiet(fx);
+    const spoken = await ownerSpeaks(fx, 'how is prod looking');
+    await popAs(fx.ts.app, fx.agentKey);
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: TABLE_REPLY, inReplyTo: spoken });
+    ageAllActivity(fx.ts.dataDir, 2 * 60 * 60 * 1000);
+    expect('hints' in (await pause(fx.ts.app, fx.agentKey))).toBe(false);
+  });
+
+  it('fires ONCE ever — the register lesson is permanent, like its email sibling', async () => {
+    fx = await setup();
+    await quiet(fx);
+    const spoken = await ownerSpeaks(fx, 'how is prod looking');
+    await popAs(fx.ts.app, fx.agentKey);
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: TABLE_REPLY, inReplyTo: spoken });
+    expect((await pause(fx.ts.app, fx.agentKey)).hints![0]!.id).toBe(
+      'voice-is-a-different-register',
+    );
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: TABLE_REPLY, inReplyTo: spoken });
+    const again = await pause(fx.ts.app, fx.agentKey);
+    expect(again.hints?.[0]?.id).not.toBe('voice-is-a-different-register');
+  });
+
+  it('sits right after the email register hint in priority order', async () => {
+    const ids = TRIGGERS.map((t) => t.id);
+    expect(ids.indexOf('voice-is-a-different-register')).toBe(
+      ids.indexOf('email-is-a-different-register') + 1,
+    );
+    const trigger = TRIGGERS.find((t) => t.id === 'voice-is-a-different-register')!;
+    expect(trigger.permanent).toBe(true);
+    expect(trigger.docs).toBe('voice');
+  });
+
+  it('carries the canonical VOICE_REGISTER_NOTE verbatim (no drift)', async () => {
+    fx = await setup();
+    await quiet(fx);
+    const spoken = await ownerSpeaks(fx, 'how is prod looking');
+    await popAs(fx.ts.app, fx.agentKey);
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: TABLE_REPLY, inReplyTo: spoken });
+    expect((await pause(fx.ts.app, fx.agentKey)).hints![0]!.text).toContain(VOICE_REGISTER_NOTE);
   });
 });

@@ -115,7 +115,7 @@ function stubRoom() {
   const far = new Date(Date.now() + 60_000).toISOString();
   useFetch(async (input) => {
     const url = String(input).split('?')[0]!;
-    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false } });
     if (server.identityDown && (url.includes('/whoami') || url.includes('/members') || /\/rooms\/room_abc$/.test(url))) {
       return errorJson('internal', 500);
     }

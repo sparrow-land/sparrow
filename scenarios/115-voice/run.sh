@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 115-voice — the VOICE_PROVIDER=fake stack: capabilities booleans reflect the
-# registered providers; principal-scoped transcription returns the deterministic
+# registered providers (incl. sttStreaming); the hands-free streaming route runs
+# one WebSocket exchange (stream-client.cjs) and gates 401/404 before upgrading;
+# message.new carries origin; principal-scoped transcription returns the deterministic
 # transcript (and 401s unauthenticated); a message sent with origin:voice records
 # provenance the recipient sees (JSON + human-readable [voice] chip); /speech
 # synthesizes byte-stable audio (cached — identical across two fetches) for every
@@ -30,6 +32,7 @@ scenario_start
 caps="$(curl -fsS "$SERVER/api/v1/capabilities")" || fail "GET /capabilities failed"
 assert_json "$caps" '.voice.stt' 'true' 'fake stack: voice.stt true'
 assert_json "$caps" '.voice.tts' 'true' 'fake stack: voice.tts true'
+assert_json "$caps" '.voice.sttStreaming' 'true' 'fake stack: voice.sttStreaming true (fake provider streams)'
 # v4: /capabilities is where a client learns a MEDIUM is on — never a 404 from
 # its routes. Voice being on says nothing about email; this stack has no email
 # provider, so it reads false.
@@ -63,6 +66,38 @@ assert_json "$popped" '.message.origin' 'voice' 'recipient sees origin:voice'
 
 human="$(ac_tok "$bkey" read "$mid" --peek --room "$room")"
 assert_contains "$human" '[voice]' 'human-readable read shows the [voice] chip'
+# The register line rides under a spoken item on every human surface (SPEC → Voice:
+# one canonical sentence, VOICE_REGISTER_NOTE), never under a typed one.
+assert_contains "$human" 'listening, not reading' 'human-readable read carries the speakable-register line'
+
+# 4b) Hands-free: message.new carries `origin` so a woken agent knows the register
+# before it pops — 'voice' for a spoken send, null for a typed one.
+ev="$SPARROW_TMPROOT/b-me-events.jsonl"
+bpid="$(sse_me_watch "$bkey" "$ev")"
+sleep 1
+ac_tok "$owner" send "$bid" 'spoken live' --origin voice --room "$room" --json >/dev/null
+wait_for_line "$ev" '"origin":"voice"' || { kill "$bpid" 2>/dev/null || true; fail "message.new for a spoken send does not carry origin:voice"; }
+ac_tok "$owner" send "$bid" 'typed live' --room "$room" --json >/dev/null
+wait_for_line "$ev" '"origin":null' || { kill "$bpid" 2>/dev/null || true; fail "message.new for a typed send does not carry origin:null"; }
+kill "$bpid" 2>/dev/null || true
+grep -F '"type":"message.new"' "$ev" | grep -qF '"origin":"voice"' || fail "origin:voice not on a message.new frame"
+# Drain what those two sends queued so later pops in this stack stay predictable.
+ac_tok "$bkey" pop --room "$room" --json >/dev/null; ac_tok "$bkey" pop --room "$room" --json >/dev/null
+
+# 4c) Hands-free: the streaming route. One WebSocket exchange against the fake
+# provider — two PCM16 chunks up, partial then committed words down, clean close.
+wsurl="${SERVER/http:/ws:}/api/v1/voice/transcriptions/stream?token=$bkey"
+frames="$(node "$(dirname "$0")/stream-client.cjs" "$wsurl")" || fail "streaming exchange failed: $frames"
+[ "$(jq -r '[.[] | select(.type=="partial")] | length' <<<"$frames")" -ge 1 ] || fail "no partial frame: $frames"
+assert_json "$frames" '[.[] | select(.type=="committed")][0].text' 'fake transcript' 'committed frame carries the fake transcript'
+assert_json "$frames" '[.[] | select(.type=="closed")][0].code' '1000' 'client close → clean 1000'
+# Pre-upgrade gates: unauthenticated → 401 (the route rejects before upgrading).
+ws_status() { # <server> <path> <token-or-empty>
+  curl -sS -o /dev/null -w '%{http_code}' -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+    -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+    "$1/api/v1$2${3:+?token=$3}"
+}
+assert_eq 401 "$(ws_status "$SERVER" /voice/transcriptions/stream "")" 'unauthenticated stream upgrade → 401'
 
 # 5) /speech: byte-stable, cached, audio/mpeg — for recipient and sender.
 b1="$SPARROW_TMPROOT/speech-1.mp3"; h1="$SPARROW_TMPROOT/speech-1.hdr"
@@ -115,6 +150,7 @@ scenario_start
 caps2="$(curl -fsS "$SERVER/api/v1/capabilities")" || fail "keyless GET /capabilities failed"
 assert_json "$caps2" '.voice.stt' 'false' 'keyless stack: voice.stt false'
 assert_json "$caps2" '.voice.tts' 'false' 'keyless stack: voice.tts false'
+assert_json "$caps2" '.voice.sttStreaming' 'false' 'keyless stack: voice.sttStreaming false'
 assert_json "$caps2" '.email' 'false' 'keyless stack: capabilities.email false'
 
 # Fresh DB — bootstrap a principal and a message to reach the provider gate.
@@ -129,7 +165,8 @@ mid2="$(jq -r '.message.id' <<<"$sent2")"
 
 # Valid auth, but no STT provider → 404 (not 401/502).
 assert_eq 404 "$(http_status "$owner2" POST /voice/transcriptions "$tbody")" 'keyless transcription (authed) → 404'
+assert_eq 404 "$(ws_status "$SERVER" /voice/transcriptions/stream "$bkey2")" 'keyless stream upgrade (authed) → 404'
 # Speech route with a real member+message but no TTS provider → 404.
 assert_eq 404 "$(http_status "$bkey2" GET "/rooms/$room2/messages/$mid2/speech")" 'keyless /speech → 404'
 
-pass "fake-stack capabilities/transcribe/origin/speech-cache + keyless 404s verified"
+pass "fake-stack capabilities/transcribe/origin/streaming/message.new origin/speech-cache + keyless 404s verified"

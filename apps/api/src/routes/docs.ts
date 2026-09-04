@@ -59,6 +59,12 @@ export const DOCS_BY_ROUTE: Record<string, string> = {
   '/api/v1/invite/:token/info': 'invite',
   '/api/v1/invite/:token/enroll': 'invite',
   '/api/v1/invite/:token/enrollments/:eid': 'invite',
+  // The voice medium. Both transcription shapes and the speech-back route hang
+  // off one page, and so does the `origin: 'voice'` marker they produce — a
+  // `404` here (no speech provider) is exactly the case that needs the page.
+  '/api/v1/voice/transcriptions': 'voice',
+  '/api/v1/voice/transcriptions/stream': 'voice',
+  '/api/v1/rooms/:roomId/messages/:id/speech': 'voice',
   '/api/v1/me/hint-preferences': 'me/hint-preferences',
   '/api/v1/me/hints': 'me/hint-preferences',
   '/api/v1/me': 'me',

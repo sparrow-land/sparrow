@@ -414,6 +414,21 @@ export const EMAIL_JUDGE_DEFAULT_PROMPT = `You review email on behalf of a busy 
  */
 export const EMAIL_REGISTER_NOTE = `**Email is a different register from chat.** A chat message is one turn in a live conversation with someone who shares your room and your context; an email is a document that will be read once, hours later, possibly by a person outside this org who has never heard of you. Write it whole: greeting, full paragraphs, every piece of context the reader needs (they cannot see your room, your history, or your working status), and a sign-off with your name and org. Keep the subject line accurate and stable — a thread keeps its first subject, so re-subjecting mid-thread only confuses the reader. There are no suggested replies and no chips in email: if you need a decision, ask for it in a sentence. Assume it may be forwarded, quoted, and read by people you did not write to.`;
 
+/**
+ * The canonical "voice is a different register" sentence. A message carrying
+ * `origin: 'voice'` came out of hands-free mode: the sender DICTATED it and is
+ * sitting there listening, so the reply is read back to them by a
+ * text-to-speech voice. Markdown a reader skims — a table, a fenced block, a
+ * link, a twelve-item list — is unlistenable when spoken.
+ *
+ * Written ONCE here and reused verbatim by the CLI's `[voice]` note, the MCP
+ * tool descriptions, the served `voice` docs segment, SKILL.md, and the
+ * `voice-is-a-different-register` hint, so the five cannot drift. Kept SHORT on
+ * purpose: it must fit inside a hint alongside its framing, under
+ * `HINT_TEXT_MAX`.
+ */
+export const VOICE_REGISTER_NOTE = `The sender spoke this and is listening, not reading — answer short and speakable: plain sentences, no tables, code blocks, links, or long lists.`;
+
 /* ------------------------------------------------------------------ *
  * Unified attention (layer 3)
  * ------------------------------------------------------------------ */

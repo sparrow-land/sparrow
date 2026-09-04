@@ -543,6 +543,16 @@ describe('voice (STT & TTS)', () => {
     expect(CapabilitiesResponseSchema.safeParse({ voice: { stt: 'yes', tts: false } }).success).toBe(false);
     expect(CapabilitiesResponseSchema.safeParse({}).success).toBe(false);
   });
+  it('CapabilitiesResponseSchema defaults voice.sttStreaming to false (pre-streaming servers)', () => {
+    // Additive and defaulted: a server that predates streaming STT omits the
+    // field entirely and a new client still parses its capabilities.
+    const parsed = CapabilitiesResponseSchema.parse({ voice: { stt: true, tts: false } });
+    expect(parsed.voice.sttStreaming).toBe(false);
+    expect(CapabilitiesResponseSchema.parse({ voice: { stt: true, tts: true, sttStreaming: true } }).voice.sttStreaming)
+      .toBe(true);
+    expect(CapabilitiesResponseSchema.safeParse({ voice: { stt: true, tts: true, sttStreaming: 'yes' } }).success)
+      .toBe(false);
+  });
   it('TranscriptionRequestSchema requires non-empty audio + contentType, language optional', () => {
     expect(TranscriptionRequestSchema.parse({ audioBase64: 'aGk=', contentType: 'audio/webm' }).language)
       .toBeUndefined();
@@ -678,6 +688,24 @@ describe('SSE room events', () => {
       .toBe('agent');
     expect(MessageReadEventSchema.parse({ messageId: 'msg_a', by: humanRef, readAt: '2026-08-20T17:05:00Z' }).by.kind)
       .toBe('human');
+  });
+  it('message.new carries the message origin, defaulted to null', () => {
+    // A voice-origin message tells an SSE-woken agent the sender's register
+    // BEFORE it pops. Defaulted so pre-voice servers' frames still parse.
+    expect(MessageNewEventSchema.parse({ messageId: 'msg_a', from: memberRef, preview: 'hi', kind: 'dm' }).origin)
+      .toBeNull();
+    expect(
+      MessageNewEventSchema.parse({ messageId: 'msg_a', from: memberRef, preview: 'hi', kind: 'dm', origin: 'voice' })
+        .origin,
+    ).toBe('voice');
+    expect(
+      MessageNewEventSchema.parse({ messageId: 'msg_a', from: memberRef, preview: 'hi', kind: 'dm', origin: null })
+        .origin,
+    ).toBeNull();
+    expect(
+      MessageNewEventSchema.safeParse({ messageId: 'msg_a', from: memberRef, preview: 'hi', kind: 'dm', origin: 'email' })
+        .success,
+    ).toBe(false);
   });
   it('message.received carries { messageId, by, receivedAt }', () => {
     const evt = { messageId: 'msg_a', by: humanRef, receivedAt: '2026-08-20T17:04:00Z' };

@@ -11,6 +11,7 @@ import {
   AGENT_DM_NO_COMMON_VIEWER_MESSAGE,
   DM_NOT_ELIGIBLE_MESSAGE,
   PRESENCE_TTL_MAX,
+  VOICE_REGISTER_NOTE,
 } from '@sparrow/common-types';
 import { clientBuildVersion } from '@sparrow/client';
 import { PassThrough, Writable } from 'node:stream';
@@ -279,6 +280,11 @@ async function setAgentPolicy(owner: Owner, policy: 'approval' | 'open'): Promis
 /* ================================================================== *
  * login / login-agent / whoami
  * ================================================================== */
+
+/** Escape a literal for embedding in a RegExp (the register note has `—`, `,`). */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 describe('sparrow CLI — auth & identity', () => {
   it('login prompts for password, stores a ses_ human profile, whoami works', async () => {
@@ -1643,6 +1649,85 @@ describe('sparrow CLI — room messaging', () => {
     const read = capture();
     await runCli(['read', poppedId, '--room', roomName, '--peek'], env, read.io);
     expect(read.out()).toContain('[voice]');
+  });
+
+  /**
+   * The tag alone taught nothing. A `[voice]` item means the human DICTATED it
+   * and is listening to your reply through a speech voice — so every surface
+   * that renders the tag now also renders the one-line register lesson,
+   * verbatim from `VOICE_REGISTER_NOTE`. Human output only: `-j` stays the raw
+   * envelope, byte for byte.
+   */
+  it('a [voice] item carries the register line under it in `pop` and `read`', async () => {
+    const { owner, roomId, roomName, agentId } = await roomFixture('vreg');
+    await owner.client.sendMessage(roomId, {
+      to: agentId,
+      body: 'spoken to you',
+      origin: 'voice',
+    } as unknown as Parameters<typeof owner.client.sendMessage>[1]);
+
+    const pop = capture();
+    expect(await runCli(['pop', '--room', roomName], env, pop.io)).toBe(0);
+    expect(pop.out()).toContain('[voice]');
+    expect(pop.out()).toContain(VOICE_REGISTER_NOTE);
+    // Indented, so it reads as a note ABOUT the item, not as part of the body.
+    expect(pop.out()).toMatch(new RegExp(`^ +voice: ${escapeRe(VOICE_REGISTER_NOTE)}$`, 'm'));
+
+    const poppedId = pop.out().match(/id:\s+(\S+)/)![1]!;
+    const read = capture();
+    await runCli(['read', poppedId, '--room', roomName, '--peek'], env, read.io);
+    expect(read.out()).toContain(VOICE_REGISTER_NOTE);
+  });
+
+  it('the register line never touches -j output', async () => {
+    const { owner, roomId, roomName, agentId } = await roomFixture('vjsn');
+    await owner.client.sendMessage(roomId, {
+      to: agentId,
+      body: 'spoken to you',
+      origin: 'voice',
+    } as unknown as Parameters<typeof owner.client.sendMessage>[1]);
+    const pop = capture();
+    expect(await runCli(['pop', '--room', roomName, '--json'], env, pop.io)).toBe(0);
+    expect(pop.out()).not.toContain(VOICE_REGISTER_NOTE);
+    // Still valid, unaltered JSON carrying the marker.
+    expect(JSON.parse(pop.out()).message.origin).toBe('voice');
+  });
+
+  it('a TYPED item carries no register line', async () => {
+    const { owner, roomId, roomName, agentId } = await roomFixture('vnon');
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'plain' });
+    const pop = capture();
+    expect(await runCli(['pop', '--room', roomName], env, pop.io)).toBe(0);
+    expect(pop.out()).not.toContain(VOICE_REGISTER_NOTE);
+  });
+
+  /**
+   * `log` is a one-line-per-message transcript, so a 144-character note under
+   * every spoken turn would drown the conversation it annotates. It gets the
+   * lesson ONCE, as a footnote, and only when the page actually holds a spoken
+   * message.
+   */
+  it('`log` carries the register line once as a footnote when the page holds voice', async () => {
+    const { owner, roomId, roomName, agentId } = await roomFixture('vlog');
+    for (const body of ['first spoken', 'second spoken']) {
+      await owner.client.sendMessage(roomId, {
+        to: agentId,
+        body,
+        origin: 'voice',
+      } as unknown as Parameters<typeof owner.client.sendMessage>[1]);
+    }
+    const log = capture();
+    expect(await runCli(['log', '--room', roomName], env, log.io)).toBe(0);
+    const out = log.out();
+    expect(out.match(/\[voice\]/g)!.length).toBe(2);
+    expect(out.split(VOICE_REGISTER_NOTE).length - 1).toBe(1);
+    // A typed-only transcript says nothing about voice.
+    const typedRoom = await owner.client.createRoom(owner.orgId, { name: 'vlog-typed' });
+    await owner.client.addMember(typedRoom.id, agentId);
+    await owner.client.sendMessage(typedRoom.id, { to: agentId, body: 'typed only' });
+    const quiet = capture();
+    expect(await runCli(['log', '--room', 'vlog-typed'], env, quiet.io)).toBe(0);
+    expect(quiet.out()).not.toContain(VOICE_REGISTER_NOTE);
   });
 
   it('a typed (no --origin) message shows no [voice] tag', async () => {

@@ -20,6 +20,13 @@ export type {
   MeEventsLogResult,
   InviteHumanResult,
 } from './client.js';
+export { voiceStreamUrl, openTranscriptionStream, VOICE_STREAM_PATH } from './voiceStream.js';
+export type {
+  TranscriptionStream,
+  TranscriptionStreamHandlers,
+  OpenTranscriptionStreamOptions,
+  WebSocketLike,
+} from './voiceStream.js';
 export { ApiError } from './errors.js';
 export { SSEParser } from './sse.js';
 export type { RawSSEEvent } from './sse.js';

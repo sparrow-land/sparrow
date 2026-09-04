@@ -35,7 +35,7 @@ function bootMock(opts: { resolve?: 'ok' | '404'; signedIn?: boolean } = {}) {
     const method = (init?.method ?? 'GET').toUpperCase();
 
     if (url.includes('/auth/config')) return json({ providers: [], allowSignup: true });
-    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false }, orgHostSuffix: '.sparrow.test' });
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false, sttStreaming: false }, orgHostSuffix: '.sparrow.test' });
     if (url.includes('/auth/me')) {
       return signedIn ? json({ user: jake }) : errorJson('unauthorized', 401);
     }

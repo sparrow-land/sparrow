@@ -45,6 +45,7 @@ import { CopyMessageButton } from '../components/CopyMessageButton.js';
 import { AddPeopleModal, AddAgentModal } from '../components/AddMemberModals.js';
 import { Composer, type ReplyEcho } from './room/Composer.js';
 import { SpeakerButton } from './room/SpeakerButton.js';
+import type { HandsFreeIncoming } from './room/HandsFreeOverlay.js';
 import { Attachment } from './room/Attachment.js';
 import { useCapabilities } from '../lib/capabilities.js';
 import { DraftsModal } from './room/DraftsModal.js';
@@ -116,9 +117,23 @@ export function Room() {
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [receipts, setReceipts] = useState<Record<string, MessageStatus>>({});
   const [draft, setDraft] = useState('');
-  // Provenance: the current composer text was (at least partly) dictated. Sends
-  // then carry origin:'voice'. Cleared when the composer empties or a send lands.
-  const [voiceOrigin, setVoiceOrigin] = useState(false);
+  // Hands-free mode (voice v2). The overlay owns the spoken turn end to end —
+  // nothing dictated reaches this composer any more — so the room keeps only
+  // what the overlay cannot know: whether the mode is up, and which arrivals
+  // belong to it. `handsFreeOpenRef` shadows the state because the live stream
+  // handler is a stable closure that must read the CURRENT value.
+  const handsFreeOpenRef = useRef(false);
+  const [voiceIncoming, setVoiceIncoming] = useState<HandsFreeIncoming[]>([]);
+  /**
+   * Message ids hands-free mode has already been handed (seeded on open with
+   * everything then on screen). The queue cannot be derived from "what the
+   * announcer called an arrival": THREE places write `historyRef` — the
+   * `message.new` handler, the wake/reconnect reconcile, and the send's own
+   * re-list — and only the first announces. A reply absorbed by either of the
+   * others is real, on screen, and (without this) never spoken, leaving the
+   * overlay waiting for something that already came.
+   */
+  const voiceSeenRef = useRef<Set<string>>(new Set());
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   // Files staged on the composer (paste / paperclip / drag-drop), sent with the
@@ -225,6 +240,31 @@ export function Room() {
       preview ? `${newest.from.displayName}: ${preview}` : `${newest.from.displayName} sent a message`,
     );
   }, []);
+
+  /**
+   * Hand hands-free mode anything in `items` it has not seen, oldest first.
+   * Called from EVERY site that writes `historyRef`, because any of them can be
+   * the one that first sees a reply. Own messages are never included: hearing
+   * your own turn read back is the one thing a voice loop must not do.
+   */
+  const feedHandsFree = useCallback((items: Message[]) => {
+    if (!handsFreeOpenRef.current) return;
+    const me = selfRef.current;
+    const fresh = items
+      .filter((m) => m.from.id !== me?.id && !voiceSeenRef.current.has(m.id))
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    if (fresh.length === 0) return;
+    for (const m of fresh) voiceSeenRef.current.add(m.id);
+    setVoiceIncoming((cur) => [
+      ...cur,
+      ...fresh.map((m) => ({ id: m.id, body: m.body, from: m.from.displayName })),
+    ]);
+  }, []);
+
+  // Read through a ref by the two callers that are stable closures (the stream
+  // subscription and `reconcile`), matching how this file reaches `hydrate`.
+  const feedHandsFreeRef = useRef(feedHandsFree);
+  feedHandsFreeRef.current = feedHandsFree;
 
   // An expired session is the same everywhere: the whole app is unusable, so
   // both handlers below start here. Returns true when it took the error.
@@ -405,6 +445,9 @@ export function Room() {
       setStatusNow(Date.now());
       setOnlineIds(new Set(sts.presence.online));
       setPresenceHydrated(true);
+      // A reconcile is a backfill for the ANNOUNCER, but not for hands-free
+      // mode: a reply the stream was down for is exactly what it is waiting on.
+      feedHandsFreeRef.current(items);
       await hydrateRef.current(items, inbItems);
     } catch (e) {
       handleRoomError(e);
@@ -523,6 +566,7 @@ export function Room() {
               setHistory(items);
               setInbox(inbItems);
               announceArrivals(known, items);
+              feedHandsFreeRef.current(items);
               await hydrateRef.current(items, inbItems);
             } catch (e) {
               handleRoomError(e);
@@ -634,23 +678,34 @@ export function Room() {
     [members, self],
   );
 
-  async function send(body?: string, reply?: ReplyEcho): Promise<boolean> {
+  /**
+   * Post a message. Returns the new message's id, or `null` when nothing was
+   * sent (empty, in flight, archived) or the send failed — hands-free mode
+   * needs the id to know its turn landed, and every other caller only needs
+   * the truthiness.
+   */
+  async function send(
+    body?: string,
+    reply?: ReplyEcho,
+    opts: { origin?: 'voice' } = {},
+  ): Promise<string | null> {
     const isChip = body !== undefined;
     const text = (body ?? draft).trim();
     // Staged files ride only on a composed (non-chip) send; a quick chip reply
     // never carries the composer's attachments.
     const staged = isChip ? [] : pending;
-    if ((!text && staged.length === 0) || sending || archived) return false;
+    if ((!text && staged.length === 0) || sending || archived) return null;
     setSending(true);
     setSendError(null);
     try {
       const to = isDm ? (selected === 'all' ? 'all' : selected) : 'all';
-      // A chip reply is typed provenance; only a composed (non-chip) send that was
-      // dictated carries origin:'voice' (editing the transcript keeps the flag).
-      const voice = !isChip && voiceOrigin;
+      // A chip reply is typed provenance. `origin:'voice'` is now declared by the
+      // ONE caller that speaks — hands-free mode — rather than inferred from a
+      // composer flag: the transcript never passes through the composer at all.
+      const voice = opts.origin === 'voice';
       const attachmentInputs =
         staged.length > 0 ? await Promise.all(staged.map((p) => fileToAttachmentInput(p.file))) : [];
-      await api.sendMessage(roomId, {
+      const { message: posted } = await api.sendMessage(roomId, {
         to,
         body: text,
         ...(attachmentInputs.length > 0 ? { attachments: attachmentInputs } : {}),
@@ -659,7 +714,6 @@ export function Room() {
       });
       if (!isChip) {
         setDraft('');
-        setVoiceOrigin(false);
         setPending([]);
         setAttachError(null);
       }
@@ -673,14 +727,17 @@ export function Room() {
       inboxRef.current = inbItems;
       setHistory(items);
       setInbox(inbItems);
+      // The counterpart may already have answered: this listing, not a later
+      // `message.new`, is where that reply first appears.
+      feedHandsFree(items);
       await hydrateRef.current(items, inbItems);
-      return true;
+      return posted.id;
     } catch (e) {
       setSendError(e instanceof ApiError ? e.message : 'Failed to send. Please try again.');
       // A rejected send IS room-level: 403/404 here means we're no longer in
       // this room (or it's gone), which is exactly the redirect case.
       if (e instanceof ApiError && e.status !== 400 && e.status !== 410) handleRoomError(e);
-      return false;
+      return null;
     } finally {
       setSending(false);
     }
@@ -820,7 +877,7 @@ export function Room() {
   // confirmed success. The chip-style body arg leaves the live composer untouched.
   async function sendDraft(d: Draft) {
     if (sending) return;
-    const ok = await send(d.text);
+    const ok = (await send(d.text)) !== null;
     if (!ok) return;
     setDrafts((cur) => cur.filter((x) => x.id !== d.id));
     setShowDrafts(false);
@@ -907,6 +964,37 @@ export function Room() {
     () => (self && !isDm ? activeRoomStatuses(statuses, self.id, statusNow) : []),
     [self, isDm, statuses, statusNow],
   );
+
+  /**
+   * Everything hands-free mode (voice v2) needs, rebuilt each render so `onSend`
+   * always closes over the CURRENT send path — a memo here would freeze
+   * `sending`/`archived` and let the overlay post into a room it has left.
+   *
+   * `onSend` is that ordinary path with the voice origin declared, so a spoken
+   * turn is an ordinary message in every other respect: same route, same
+   * receipts, same history refresh, and the composer's draft and staged files
+   * are never touched.
+   */
+  const handsFree = {
+    roomId,
+    onSend: (text: string) => send(text, undefined, { origin: 'voice' as const }),
+    incoming: voiceIncoming,
+    // The counterpart's live working note IS the awaiting state's content — the
+    // room already streams it, so hands-free mode shows the same truth the
+    // composer's working bubble does. A DM has exactly one partner; a project
+    // room takes whoever is working (the first of the same list the bubbles
+    // render), which for a spoken turn is invariably the agent answering it.
+    awaitingNote: (partnerStatus ?? roomStatuses[0])?.note ?? null,
+    counterpartName: counterpart?.displayName ?? roomStatuses[0]?.displayName ?? null,
+    onOpenChange: (open: boolean) => {
+      handsFreeOpenRef.current = open;
+      // Each session starts with an empty queue and everything currently on
+      // screen already marked seen — opening the mode must not read the room's
+      // backlog aloud, only what arrives from here on.
+      voiceSeenRef.current = new Set(historyRef.current.map((m) => m.id));
+      setVoiceIncoming([]);
+    },
+  };
 
   const quoteFor = (id: string): { who: string; body: string } | undefined => {
     const full = fullMessages[id];
@@ -1166,14 +1254,8 @@ export function Room() {
         onChange={(v) => {
           setDraft(v);
           if (sendError) setSendError(null);
-          if (voiceOrigin && v.trim() === '') setVoiceOrigin(false);
         }}
-        onTranscript={(text) => {
-          setDraft((cur) => (cur.trim() ? `${cur} ${text}` : text));
-          setVoiceOrigin(true);
-          if (sendError) setSendError(null);
-        }}
-        voiceChip={voiceOrigin}
+        handsFree={handsFree}
         onSend={(body, reply) => void send(body, reply)}
         onDraft={enqueueDraft}
         onOpenDrafts={() => setShowDrafts(true)}

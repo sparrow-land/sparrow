@@ -52,7 +52,11 @@ function parseLogLimit(raw: string | undefined): number {
  * `agk_`) authenticates when present since EventSource can't set headers; else
  * the normal header/cookie path runs.
  */
-function resolveStreamPrincipal(ctx: AppContext, request: FastifyRequest, token?: string): Principal {
+export function resolveStreamPrincipal(
+  ctx: AppContext,
+  request: FastifyRequest,
+  token?: string,
+): Principal {
   if (token && token.startsWith('ses_')) {
     const session = ctx.db
       .select()

@@ -20,7 +20,7 @@ function bootMock() {
     const method = (init?.method ?? 'GET').toUpperCase();
     if (url.includes('/auth/config')) return json({ providers: [], allowSignup: true });
     if (url.includes('/capabilities'))
-      return json({ voice: { stt: false, tts: false }, orgHostSuffix: '.sparrow.test' });
+      return json({ voice: { stt: false, tts: false, sttStreaming: false }, orgHostSuffix: '.sparrow.test' });
     if (url.includes('/auth/me')) return json({ user: jake });
     if (url.includes('/me/orgs'))
       return json({ items: [{ org: { id: 'org_1', name: 'Acme', slug: 'acme' }, role: 'owner' }] });
@@ -88,7 +88,7 @@ describe('scoped host /me routes', () => {
       const method = (init?.method ?? 'GET').toUpperCase();
       if (url.includes('/auth/config')) return json({ providers: [], allowSignup: true });
       if (url.includes('/capabilities'))
-        return json({ voice: { stt: false, tts: false }, orgHostSuffix: '.sparrow.test' });
+        return json({ voice: { stt: false, tts: false, sttStreaming: false }, orgHostSuffix: '.sparrow.test' });
       if (url.includes('/auth/me')) return json({ user: jake });
       if (url.includes('/me/orgs'))
         return json({
