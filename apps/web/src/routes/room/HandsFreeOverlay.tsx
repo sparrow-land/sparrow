@@ -5,14 +5,7 @@ import { ApiError, openTranscriptionStream, type TranscriptionStream } from '@sp
 import { api } from '../../lib/client.js';
 import { useCapabilities } from '../../lib/capabilities.js';
 import { startPcmCapture, type PcmCapture } from '../../lib/pcmCapture.js';
-import {
-  WORKING_CUE_LABELS,
-  WORKING_CUE_STYLES,
-  loadWorkingCueStyle,
-  saveWorkingCueStyle,
-  startWorkingCue,
-  type WorkingCueStyle,
-} from '../../lib/workingCue.js';
+import { startWorkingCue } from '../../lib/workingCue.js';
 import { LevelMeter } from './LevelMeter.js';
 
 /**
@@ -167,8 +160,6 @@ export function HandsFreeOverlay({
   const [turns, setTurns] = useState<HandsFreeTurn[]>([]);
   /** Which turn is being read aloud right now (a subtle marker, not a state). */
   const [speakingId, setSpeakingId] = useState<string | null>(null);
-  /** The audible "still working" heartbeat during `awaiting` (per-browser choice). */
-  const [cueStyle, setCueStyle] = useState<WorkingCueStyle>(loadWorkingCueStyle);
 
   // Live capture handles. Refs, not state: teardown must be able to run from an
   // unmount cleanup, where no render will follow.
@@ -656,12 +647,12 @@ export function HandsFreeOverlay({
    * through the same cleanup, with no exit path left to forget.
    */
   useEffect(() => {
-    if (phase !== 'awaiting' || error || cueStyle === 'off') return;
+    if (phase !== 'awaiting' || error) return;
     const ctx = cueCtxRef.current;
     if (!ctx) return;
-    const cue = startWorkingCue(ctx, cueStyle);
+    const cue = startWorkingCue(ctx);
     return () => cue.stop();
-  }, [phase, error, cueStyle]);
+  }, [phase, error]);
 
   // Release the cue's context with the overlay (the capture graph has its own).
   useEffect(
@@ -672,11 +663,6 @@ export function HandsFreeOverlay({
     },
     [],
   );
-
-  const chooseCue = useCallback((style: WorkingCueStyle) => {
-    setCueStyle(style);
-    saveWorkingCueStyle(style);
-  }, []);
 
   /* ---------------------------------------------------------------- *
    * Render
@@ -919,38 +905,6 @@ export function HandsFreeOverlay({
         )}
       </div>
 
-      {/* The cue's style, parked below the controls: a preference you set once
-          and then never look at, so it gets the smallest type on the screen and
-          none of the tap targets' room. */}
-      <div
-        role="radiogroup"
-        aria-label="Working sound"
-        data-testid="hands-free-cue-picker"
-        className="mx-auto flex w-full max-w-md shrink-0 flex-wrap items-center justify-center gap-1 pb-2 text-[11px]"
-      >
-        <span className="mr-1 text-[var(--sparrow-muted)]" aria-hidden="true">
-          Working sound
-        </span>
-        {WORKING_CUE_STYLES.map((style) => {
-          const on = style === cueStyle;
-          return (
-            <button
-              key={style}
-              type="button"
-              role="radio"
-              aria-checked={on}
-              onClick={() => chooseCue(style)}
-              className={`rounded-full px-2 py-1 transition-colors ${
-                on
-                  ? 'bg-[var(--sparrow-accent-soft)] text-[var(--sparrow-accent)]'
-                  : 'text-[var(--sparrow-muted)] hover:text-[var(--sparrow-text)]'
-              }`}
-            >
-              {WORKING_CUE_LABELS[style]}
-            </button>
-          );
-        })}
-      </div>
     </div>,
     document.body,
   );

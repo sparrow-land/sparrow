@@ -19,6 +19,8 @@ versions that release shipped with.
 ### Changed
 
 - Hands-free mode: **Cancel is on the left and Send on the right** while listening.
+- Hands-free mode: the working sound is always the **pulse** — the picker introduced
+  in 0.1.12 is gone, and nothing is remembered per browser.
 
 Client floor: minimum 0.1.1, recommended 0.1.13.
 

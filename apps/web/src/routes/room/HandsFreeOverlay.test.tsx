@@ -5,7 +5,6 @@ import type { CapabilitiesResponse } from '@sparrow/common-types';
 import { useFetch, restoreFetch, json, errorJson, binary } from '../../test/apiStub.js';
 import { CapabilitiesProvider } from '../../lib/capabilities.js';
 import { HandsFreeOverlay, type HandsFreeIncoming } from './HandsFreeOverlay.js';
-import { WORKING_CUE_KEY } from '../../lib/workingCue.js';
 
 /**
  * The working cue is tested for what it SOUNDS like in `lib/workingCue.test.ts`;
@@ -17,8 +16,8 @@ vi.mock('../../lib/workingCue.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../lib/workingCue.js')>();
   return {
     ...actual,
-    startWorkingCue: (_ctx: AudioContext, style: string) => {
-      cueStart(style);
+    startWorkingCue: (_ctx: AudioContext) => {
+      cueStart();
       return { stop: cueStop };
     },
   };
@@ -941,7 +940,7 @@ describe('HandsFreeOverlay working cue', () => {
     renderOverlay();
     expect(cueStart).not.toHaveBeenCalled(); // silence until there is a wait
     await sendOneTurn();
-    expect(cueStart).toHaveBeenCalledWith('tick'); // the default
+    expect(cueStart).toHaveBeenCalled();
   });
 
   it('stops the moment the reply starts speaking — it never talks over the voice', async () => {
@@ -975,40 +974,27 @@ describe('HandsFreeOverlay working cue', () => {
     expect(cueStart).not.toHaveBeenCalled();
   });
 
-  it('"Off" schedules nothing at all', async () => {
-    localStorage.setItem(WORKING_CUE_KEY, 'off');
+  it('offers no choice about it — one cue, no picker to find or set', async () => {
+    // Three styles shipped briefly behind a "Working sound" selector; Jake
+    // picked the pulse and the selector went with the other two.
     renderOverlay();
+    expect(screen.queryByRole('radiogroup')).toBeNull();
+    expect(screen.queryByText(/working sound/i)).toBeNull();
     await sendOneTurn();
-    expect(cueStart).not.toHaveBeenCalled();
+    expect(screen.queryByRole('radiogroup')).toBeNull();
   });
 
-  it('offers a Working sound selector, and remembers the choice per browser', async () => {
+  it('remembers nothing between sessions — there is nothing to remember', async () => {
     const first = renderOverlay();
-    const group = screen.getByRole('radiogroup', { name: /working sound/i });
-    expect(within(group).getByRole('radio', { name: 'Tick' })).toHaveAttribute(
-      'aria-checked',
-      'true',
-    );
-
-    await userEvent.click(within(group).getByRole('radio', { name: 'Chime' }));
-    expect(localStorage.getItem(WORKING_CUE_KEY)).toBe('chime');
-
-    // A later session restores it.
+    await sendOneTurn();
+    expect(cueStart).toHaveBeenCalledTimes(1);
     first.unmount();
+
+    // A second session behaves identically without reading any stored state.
+    cueStart.mockClear();
     renderOverlay();
     await sendOneTurn();
-    expect(cueStart).toHaveBeenCalledWith('chime');
-  });
-
-  it('changing the style mid-wait swaps the cue rather than layering it', async () => {
-    renderOverlay();
-    await sendOneTurn();
-    expect(cueStart).toHaveBeenCalledWith('tick');
-
-    const group = screen.getByRole('radiogroup', { name: /working sound/i });
-    await userEvent.click(within(group).getByRole('radio', { name: 'Pulse' }));
-    expect(cueStop).toHaveBeenCalled();
-    expect(cueStart).toHaveBeenLastCalledWith('pulse');
+    expect(cueStart).toHaveBeenCalledTimes(1);
   });
 });
 
