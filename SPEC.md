@@ -1654,7 +1654,7 @@ build.
   events stream too, so `sparrow watch`/`sparrow loop` treat a `426` as
   TERMINAL — they print the server's message plus `sparrow upgrade` and exit 1
   rather than reconnect-looping against a floor no retry can clear.
-- **`sparrow upgrade`** re-downloads `sparrow.js` / `sparrow-mcp.js` (saved as
+- **`sparrow upgrade`** (alias `sparrow update`) re-downloads `sparrow.js` / `sparrow-mcp.js` (saved as
   `.mjs`) from the canonical install home (`https://sparrow.land`, overridable with
   `SPARROW_INSTALL_URL`) into `~/.local/bin` and prints old → new.
   It errors clearly when sparrow was not installed via `install.sh` (no
@@ -3550,7 +3550,7 @@ sparrow room restore <roomId> [--org O]
 sparrow room add <agent-name|agt_> --room R           # attach a visible agent
 sparrow room invite <email|usr_> --room R             # invite a human (they accept)
 sparrow invitations [list|accept <rinId>|decline <rinId>]   # your room invitations
-sparrow upgrade                                       # re-download the CLI + MCP bundles from your server into ~/.local/bin (prints old → new)
+sparrow upgrade | update                              # re-download the CLI + MCP bundles from https://sparrow.land (SPARROW_INSTALL_URL to mirror) into ~/.local/bin (prints old → new)
 sparrow admin orgs|rooms|delete ... [--server URL --admin-token T]
 ```
 
