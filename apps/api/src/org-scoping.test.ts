@@ -321,7 +321,9 @@ describe('org scoping seam', () => {
       expect(demoApex?.loginUrl).toBe('https://example.com/api/v1/auth/demo');
     });
 
-    it('install.sh reflects the org-scoped Host', async () => {
+    // The installer is explicitly NOT host-aware: it has one canonical home, so
+    // every reader is taught the same one-liner (SPEC "Canonical public homes").
+    it('install.sh 302s to the canonical home regardless of the org-scoped Host', async () => {
       ts = await makeTestServer({
         baseUrl: 'https://example.com',
         orgHostSuffix: '.example.com',
@@ -331,7 +333,8 @@ describe('org scoping seam', () => {
         url: '/install.sh',
         headers: { host: 'acme.example.com' },
       });
-      expect(res.body).toContain('BASE_URL="https://acme.example.com"');
+      expect(res.statusCode).toBe(302);
+      expect(res.headers.location).toBe('https://sparrow.land/install.sh');
     });
   });
 

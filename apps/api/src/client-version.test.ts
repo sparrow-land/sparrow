@@ -60,7 +60,7 @@ describe('426 client-upgrade gate', () => {
     expect(body.error.code).toBe('client_upgrade_required');
     expect(body.error.message).toContain('0.1.0');
     expect(body.error.message).toContain('0.2.0');
-    expect(body.error.docs).toContain('/docs/api/versioning');
+    expect(body.error.docs).toBe('https://sparrow.land/docs/api/versioning.md');
   });
 
   it('passes a client AT or ABOVE the minimum', async () => {
@@ -98,17 +98,21 @@ describe('426 client-upgrade gate', () => {
     const old = CLI('0.0.1');
     const meta = await ts.app.inject({ method: 'GET', url: '/api/v1/meta', headers: old });
     expect(meta.statusCode).toBe(200);
+    // Docs and install are 302s to the canonical homes — the point is that an old
+    // client is redirected onward rather than rejected with a 426 it cannot clear.
     const docs = await ts.app.inject({ method: 'GET', url: '/docs/api/versioning', headers: old });
-    expect(docs.statusCode).toBe(200);
+    expect(docs.statusCode).toBe(302);
+    expect(docs.headers.location).toBe('https://sparrow.land/docs/api/versioning.md');
     const installScript = await ts.app.inject({ method: 'GET', url: '/install.sh', headers: old });
-    expect(installScript.statusCode).toBe(200);
+    expect(installScript.statusCode).toBe(302);
+    expect(installScript.headers.location).toBe('https://sparrow.land/install.sh');
     const installBundle = await ts.app.inject({
       method: 'GET',
       url: '/install/sparrow.js',
       headers: old,
     });
-    // 404 (no built bundle in the test tree) is fine — the point is it is NOT 426.
-    expect(installBundle.statusCode).not.toBe(426);
+    expect(installBundle.statusCode).toBe(302);
+    expect(installBundle.headers.location).toBe('https://sparrow.land/install/sparrow.js');
   });
 });
 
@@ -189,7 +193,7 @@ describe('upgrade-your-cli hint', () => {
     const hint = hasUpgrade(hints);
     expect(hint).toBeDefined();
     expect(hint!.text).toContain('0.3.0');
-    expect(hint!.docs).toContain('/docs/api/versioning');
+    expect(hint!.docs).toBe('https://sparrow.land/docs/api/versioning.md');
   });
 
   it('does NOT fire at or above the recommended version', async () => {

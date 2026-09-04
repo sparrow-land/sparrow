@@ -196,7 +196,7 @@ describe('/me rooms, invitations, inbox & sidebar', () => {
     });
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error.message).toContain('note/ttlSeconds require ack: true');
-    expect(bad.json().error.docs).toBe('http://localhost:8722/docs/api/me/inbox');
+    expect(bad.json().error.docs).toBe('https://sparrow.land/docs/api/me/inbox.md');
 
     // The rejected call did not consume the message.
     const ok = await ts.app.inject({

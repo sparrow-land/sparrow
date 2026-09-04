@@ -44,7 +44,7 @@ import { registerAvatarRoutes } from './routes/avatars.js';
 import { registerVoiceRoutes } from './routes/voice.js';
 import { registerHintPreferenceRoutes } from './routes/hint-preferences.js';
 import { registerDocsRoutes, DOCS_BY_ROUTE } from './routes/docs.js';
-import { effectiveOrigin } from './effective-origin.js';
+import { apiDocMarkdownUrl, docsHome, installArtifactUrl, installHome } from './public-homes.js';
 import { ElevenLabsVoiceProvider } from './voice/elevenlabs.js';
 import { FakeVoiceProvider } from './voice/fake.js';
 import type { VoiceRegistry } from './voice/types.js';
@@ -84,14 +84,18 @@ const SPA_EXACT_ROUTES = new Set([
   '/login',
   '/me',
   '/admin',
-  '/docs',
 ]);
 
 /**
  * Client route PREFIXES (each takes at least one more path segment):
  * `/invite/:token`, the unscoped org tree `/org/:orgId/...` (plus `/orgs/...`),
  * the host-scoped org tree mounted at the root (`/rooms/...`, `/agents/...`),
- * `/me/...`, and the docs tree.
+ * and `/me/...`.
+ *
+ * `/docs*` is deliberately ABSENT: documentation has one canonical home and the
+ * instance only `302`s there (SPEC "Canonical public homes"), so a docs path must
+ * never fall through to the SPA shell — the explicit routes in `routes/docs.ts`
+ * answer every one of them.
  */
 const SPA_ROUTE_PREFIXES = [
   '/invite/',
@@ -100,7 +104,6 @@ const SPA_ROUTE_PREFIXES = [
   '/rooms/',
   '/agents/',
   '/me/',
-  '/docs/',
 ];
 
 /**
@@ -429,23 +432,25 @@ export function buildServer(config: ServerConfig): FastifyInstance {
     const ident = parseClientIdent(header);
     if (!ident) return; // unknown/absent client → ungated
     if (!clientVersionBelow(ident.version, min)) return; // at/above the floor → ok
-    const origin = effectiveOrigin(request, config);
     await reply.code(426).type('application/json').send(
       errorEnvelope(
         'client_upgrade_required',
         `Your Sparrow client (${ident.version}) is below the minimum this server requires (${min}). ` +
-          `Upgrade with \`sparrow upgrade\`, or re-run ${origin}/install.sh.`,
-        `${origin}/docs/api/versioning`,
+          `Upgrade with \`sparrow upgrade\`, or re-run ` +
+          `${installArtifactUrl(installHome(config), 'install.sh')}.`,
+        apiDocMarkdownUrl(docsHome(config), 'versioning'),
       ),
     );
   });
 
-  // Docs URL for a failed request on a DOCUMENTED route (request-origin based),
-  // so 4xx envelopes teach where to read. Undefined for undocumented routes.
-  const docsForRequest = (request: { routeOptions?: { url?: string }; headers: { host?: string } }): string | undefined => {
+  // Docs URL for a failed request on a DOCUMENTED route, so 4xx envelopes teach
+  // where to read. Built from the canonical docs home (never the request origin):
+  // the markdown page is the same document for every instance. Undefined for
+  // undocumented routes.
+  const docsForRequest = (request: { routeOptions?: { url?: string } }): string | undefined => {
     const segment = request.routeOptions?.url ? DOCS_BY_ROUTE[request.routeOptions.url] : undefined;
     if (!segment) return undefined;
-    return `${effectiveOrigin(request, config)}/docs/api/${segment}`;
+    return apiDocMarkdownUrl(docsHome(config), segment);
   };
 
   // Uniform error envelope for every non-2xx.
@@ -490,7 +495,7 @@ export function buildServer(config: ServerConfig): FastifyInstance {
       const message = isApi
         ? 'No such API route. Probe GET /api/v1/meta for install + docs + the API base.'
         : 'Not found';
-      const docs = `${effectiveOrigin(request, config)}/docs/api`;
+      const docs = apiDocMarkdownUrl(docsHome(config));
       sendError(reply, 404, errorEnvelope('not_found', message, docs));
       return;
     }
@@ -521,18 +526,12 @@ export function buildServer(config: ServerConfig): FastifyInstance {
     return reply.send({ ok: true, version: API_VERSION, build: BUILD_STAMP });
   });
 
-  // Agent onboarding: install.sh, install artifacts, and /invite/:token
-  // content negotiation. Registered before the SPA notFound fallback so an
-  // explicit GET /invite/:token handles Accept negotiation.
-  const bundledAssets = new URL('../install-assets', import.meta.url).pathname;
-  const installAssetsDir =
-    config.installAssetsDir ??
-    (existsSync(bundledAssets)
-      ? bundledAssets
-      : path.resolve(config.dataDir, '..', 'install-assets'));
-  registerOnboardingRoutes(app, ctx, { installAssetsDir, staticRoot });
-  // Instance-served API docs (markdown for agents, SPA fallthrough for browsers).
-  registerDocsRoutes(app, ctx, { staticRoot });
+  // Agent onboarding: the install redirects and /invite/:token content
+  // negotiation. Registered before the SPA notFound fallback so an explicit
+  // GET /invite/:token handles Accept negotiation.
+  registerOnboardingRoutes(app, ctx, { staticRoot });
+  // The docs door: every /docs path 302s to the canonical documentation home.
+  registerDocsRoutes(app, ctx);
 
   registerAuthRoutes(app, ctx);
   registerOrgRoutes(app, ctx);

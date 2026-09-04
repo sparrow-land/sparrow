@@ -1,27 +1,50 @@
 /**
- * Instance-served API docs, one markdown page per core endpoint area, served at
- * `GET /docs/api/<segment>` (with a `GET /docs/api` index). This is the
- * "docs-by-URL-convention" half of teaching agents through the API: a hint or an
- * error envelope points at `/docs/api/<path>` and the agent fetches concrete,
- * self-hostable docs anchored to its own instance's origin.
+ * The SOURCE of the API documentation: one markdown page per core endpoint area,
+ * plus an index. This is the "docs-by-URL-convention" half of teaching agents
+ * through the API — a hint or an error envelope points at
+ * `DOCS_URL/api/<path>.md` and the agent fetches a concrete, complete page.
+ *
+ * The instance does not SERVE these any more (SPEC "Canonical public homes"):
+ * `/docs/api/*` `302`s to the canonical home, and the pages there are dumped
+ * from this file at site build (`pnpm --filter @sparrow/api dump-docs`), so the
+ * server that emits the URLs and the documents behind them are one source.
  *
  * Pages are authored here as data (purpose + request/response shape + one curl +
- * related links); {@link renderDocPage} assembles the markdown, interpolating the
- * request origin so every example targets the instance the agent is talking to.
+ * related links); {@link renderDocPage} assembles the markdown, interpolating an
+ * example SERVER origin into the requests and building cross-links from the docs
+ * home. The two are separate on purpose: a curl example must name a server, and
+ * a link between two pages must name the docs site.
  */
 
 import { CLAWBACK_WINDOW } from '@sparrow/common-types';
+import {
+  DEFAULT_DOCS_URL,
+  DEFAULT_INSTALL_URL,
+  apiDocMarkdownUrl,
+  installArtifactUrl,
+  stripTrailingSlash,
+} from '../public-homes.js';
+
+/**
+ * The canonical public homes a page may name (SPEC "Canonical public homes").
+ * Separate from the example server origin: a docs link and an install one-liner
+ * are the same on every instance, a curl example is not.
+ */
+export interface DocHomes {
+  docsUrl: string;
+  installUrl: string;
+}
 
 /** One documented endpoint area. */
 export interface DocPage {
-  /** URL segment under `/docs/api/…`, e.g. `rooms/status`. */
+  /** URL segment under `<DOCS_URL>/api/…`, e.g. `rooms/status`. */
   segment: string;
   /** Short human title. */
   title: string;
   /** One-line summary (used on the index). */
   summary: string;
-  /** Body sections (markdown), origin-interpolated. */
-  body(origin: string): string;
+  /** Body sections (markdown): the example server origin plus the canonical homes. */
+  body(origin: string, homes: DocHomes): string;
   /** A single runnable curl example. */
   curl(origin: string): string;
   /** Related page segments. */
@@ -453,7 +476,7 @@ export const DOC_PAGES: DocPage[] = [
     segment: 'versioning',
     title: 'Client versioning & upgrades',
     summary: 'How clients identify themselves, the upgrade policy, and 426 semantics.',
-    body: (o) =>
+    body: (_o, homes) =>
       [
         '**Purpose.** Sparrow can advertise (and, past a hard floor, require) a minimum client version so instances are not held back by stale CLIs/MCP servers. This is purely additive: an instance that sets no policy gates nothing, and web / third-party callers are never affected.',
         '',
@@ -470,7 +493,9 @@ export const DOC_PAGES: DocPage[] = [
         'A KNOWN client below `minimum` is rejected `426` with `{ error: { code: "client_upgrade_required", message, docs } }`. The escape-hatch routes are NEVER gated — `GET /api/v1/meta`, `/docs/*`, and `/install*` — so an old client can always read the policy and pull a fresh bundle. Absent or unparseable client headers pass.',
         '',
         '### Upgrading',
-        'Run `sparrow upgrade` to re-download the CLI + MCP bundles from your server into `~/.local/bin` (it prints old → new), or re-run the installer: `curl -fsSL ' + o + '/install.sh | sh`.',
+        'Run `sparrow upgrade` to re-download the CLI + MCP bundles into `~/.local/bin` (it prints old → new), or re-run the installer: `curl -fsSL ' +
+          installArtifactUrl(homes.installUrl, 'install.sh') +
+          ' | sh`. Both pull from the one canonical install home, not from your instance.',
       ].join('\n'),
     curl: (o) => fence('sh', `curl -s ${o}/api/v1/meta`),
     related: ['me/hint-preferences', 'me'],
@@ -563,60 +588,84 @@ const BY_SEGMENT = new Map(
   [...DOC_PAGES, ...EMAIL_DOC_PAGES].map((p) => [p.segment, p]),
 );
 
-/** Look up a page by its `/docs/api/<segment>` path (regardless of gating). */
+/** Look up a page by its `<DOCS_URL>/api/<segment>` path (regardless of gating). */
 export function docPage(segment: string): DocPage | undefined {
   return BY_SEGMENT.get(segment);
 }
 
-/** Strip a trailing slash so `${origin}/docs/…` never doubles up. */
-function normOrigin(origin: string): string {
-  return origin.replace(/\/+$/, '');
+/** How a page is rendered: the example server, the docs home, and the gating. */
+export interface DocRenderOptions {
+  /** Include the email-medium pages (the medium is configured). */
+  email?: boolean;
+  /**
+   * The canonical documentation home cross-links point at (default
+   * {@link DEFAULT_DOCS_URL}). Independent of `origin`: a link between two pages
+   * names the docs site, a curl example names a server.
+   */
+  docsUrl?: string;
+  /** The canonical install home (default {@link DEFAULT_INSTALL_URL}). */
+  installUrl?: string;
+}
+
+/** The homes a render should name. */
+function homesOf(opts: DocRenderOptions): DocHomes {
+  return {
+    docsUrl: stripTrailingSlash(opts.docsUrl?.trim() || DEFAULT_DOCS_URL),
+    installUrl: stripTrailingSlash(opts.installUrl?.trim() || DEFAULT_INSTALL_URL),
+  };
+}
+
+/** The docs home a render should link to. */
+function linkHome(opts: DocRenderOptions): string {
+  return homesOf(opts).docsUrl;
 }
 
 /** Render one page to markdown, or undefined for an unknown (or gated-off) segment. */
 export function renderDocPage(
   origin: string,
   segment: string,
-  opts: { email?: boolean } = {},
+  opts: DocRenderOptions = {},
 ): string | undefined {
   const page = docPages(opts).find((p) => p.segment === segment);
   if (!page) return undefined;
-  const base = normOrigin(origin);
+  const base = stripTrailingSlash(origin);
+  const docs = linkHome(opts);
   const related = page.related
     .map((seg) => {
       const p = docPage(seg);
-      return p ? `- [${p.title}](${base}/docs/api/${seg})` : null;
+      return p ? `- [${p.title}](${apiDocMarkdownUrl(docs, seg)})` : null;
     })
     .filter((x): x is string => x !== null)
     .join('\n');
   return [
     `# ${page.title}`,
     '',
-    page.body(base),
+    page.body(base, homesOf(opts)),
     '',
     '## Example',
     page.curl(base),
     '',
     '## Related',
-    related || '- [All API docs](' + base + '/docs/api)',
+    related || `- [All API docs](${apiDocMarkdownUrl(docs)})`,
     '',
-    `_Every documented API path serves this markdown at ${base}/docs/api/<path>. A real browser — a \`Mozilla/…\` User-Agent with no agent marker, asking for \`text/html\` — gets the rendered docs page instead; \`?format=md\` forces this markdown either way. \`/invite/:token\` negotiates by the same rule. Note that \`headless\` IS one of the agent markers: an automated browser must present a normal desktop User-Agent to exercise the rendered page._`,
+    `_Every documented API path has this markdown at ${docs}/api/<path>.md — one home for every instance, so the page you are reading is the same one your server points at. Humans read the whole REST reference on one page at ${docs}/api/. An instance's own \`/docs/api/<path>\` \`302\`s here: to the \`.md\` for a machine caller, to that reference page for a browser (\`?format=md\` forces markdown either way). Requests below use \`${base}\` as the example server — substitute your own._`,
     '',
   ].join('\n');
 }
 
-/** Render the `/docs/api` index listing every page this instance serves. */
-export function renderDocsIndex(origin: string, opts: { email?: boolean } = {}): string {
-  const base = normOrigin(origin);
+/** Render the API docs index listing every page. */
+export function renderDocsIndex(origin: string, opts: DocRenderOptions = {}): string {
+  const base = stripTrailingSlash(origin);
+  const docs = linkHome(opts);
   const rows = docPages(opts)
-    .map((p) => `- [${p.title}](${base}/docs/api/${p.segment}) — ${p.summary}`)
+    .map((p) => `- [${p.title}](${apiDocMarkdownUrl(docs, p.segment)}) — ${p.summary}`)
     .join('\n');
   return [
     '# Sparrow API docs',
     '',
-    'Concise, self-hostable reference for the core endpoints an agent uses. Base path `/api/v1`. Auth is a `Bearer agk_…` agent key (or a human session). Every path below serves markdown at `/docs/api/<path>`; a real browser (browser User-Agent asking for `text/html`) gets the rendered docs page instead, and `?format=md` forces markdown either way.',
+    `Concise reference for the core endpoints an agent uses. Base path \`/api/v1\`. Auth is a \`Bearer agk_…\` agent key (or a human session). Every page below is markdown at \`${docs}/api/<path>.md\`; humans read the whole reference rendered on one page at \`${docs}/api/\`. An instance's own \`/docs/api/<path>\` \`302\`s to whichever suits the caller. Requests use \`${base}\` as the example server — substitute your own.`,
     '',
-    `Machine-readable discovery: probe [\`GET /api/v1/meta\`](${base}/api/v1/meta) (unauthenticated) for the install script, CLI/MCP bundle URLs, this docs index, and the API base — all anchored to the host you hit.`,
+    `Machine-readable discovery: probe \`GET ${base}/api/v1/meta\` (unauthenticated) for the install script, CLI/MCP bundle URLs, this docs index, and the API base.`,
     '',
     '## Pages',
     rows,

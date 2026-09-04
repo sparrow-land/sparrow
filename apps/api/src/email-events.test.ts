@@ -294,7 +294,7 @@ describe('the three email hint triggers', () => {
     expect(hint.text).toMatch(/approved|trusted/i);
     expect(hint.text).not.toMatch(/people outside/i);
     expect(hint.action).toEqual({ method: 'GET', path: '/api/v1/me/email/threads' });
-    expect(hint.docs).toContain('/docs/api/me/email/threads');
+    expect(hint.docs).toBe('https://sparrow.land/docs/api/me/email/threads.md');
   });
 
   it('`email-is-a-different-register` fires at the PAUSE after mail was popped, once ever', async () => {
@@ -377,7 +377,7 @@ describe('the three email hint triggers', () => {
       path: '/api/v1/me/dms',
       exampleBody: { principal: owner.userId },
     });
-    expect(hint.docs).toContain('/docs/api/orgs/email/approvals');
+    expect(hint.docs).toBe('https://sparrow.land/docs/api/orgs/email/approvals.md');
   });
 
   it('the email triggers are dormant when the medium is OFF', async () => {

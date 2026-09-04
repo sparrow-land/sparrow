@@ -29,7 +29,6 @@ import {
   getHintLevel,
   setHintLevel,
   clientVersionOf,
-  hintOrigin,
   previewHints,
   HINT_LEVEL_CHOICES,
 } from '../hints.js';
@@ -67,7 +66,6 @@ export function registerHintPreferenceRoutes(app: FastifyInstance, ctx: AppConte
     if (principal.type !== 'agent') throw forbidden('Hints are an agent surface');
     const response: MeHintsResponse = {
       hints: previewHints(ctx, principalIdent(principal), {
-        origin: hintOrigin(request, ctx),
         clientVersion: clientVersionOf(request),
       }),
     };

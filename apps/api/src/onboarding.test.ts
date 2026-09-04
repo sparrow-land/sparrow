@@ -6,6 +6,8 @@ import { newInviteId, newInviteToken } from '@sparrow/common-types';
 import { sha256Hex } from '@sparrow/common-types/identity';
 import { makeTestServer, auth, signup, firstOrgId, createInvite, type TestServer } from './test-helpers.js';
 import { userAgentPrefersMarkdown } from './routes/onboarding.js';
+import { renderInstallScript } from './routes/onboarding.templates.js';
+import { renderDocPage, renderDocsIndex } from './routes/docs-content.js';
 import { openDb } from './db/index.js';
 import { invites } from './db/schema.js';
 
@@ -354,8 +356,8 @@ describe('invite onboarding doc', () => {
     // The two real ways to run it: the CLI subcommand, and the wrapper install.sh drops.
     expect(body).toContain('sparrow skill install');
     expect(body).toContain('sparrow-skill');
-    const install = await ts.app.inject({ method: 'GET', url: '/install.sh' });
-    expect(install.body).toContain('${BIN_DIR}/sparrow-skill');
+    // …and the installer published at the canonical home drops that wrapper.
+    expect(renderInstallScript('https://sparrow.land')).toContain('${BIN_DIR}/sparrow-skill');
   });
 
   it('never calls one way of connecting "recommended"', async () => {
@@ -466,17 +468,12 @@ describe('invite onboarding doc', () => {
     expect(sentence).toMatch(/no `body`/);
     expect(sentence).toContain('sparrow read --peek <id>');
     expect(sentence).toContain('GET /api/v1/me/messages/:messageId');
-    // The served docs page carries the same note.
-    const docs = await ts.app.inject({
-      method: 'GET',
-      url: '/docs/api/me/inbox',
-      headers: { 'user-agent': 'curl/8', accept: '*/*' },
-    });
-    expect(docs.statusCode).toBe(200);
-    expect(docs.body).toContain('`preview`');
-    expect(docs.body).toContain('`truncated: true`');
-    expect(docs.body).toMatch(/no `body`/);
-    expect(docs.body).toContain('me/messages');
+    // The docs page published at the canonical home carries the same note.
+    const docs = renderDocPage('https://sparrow.example.com', 'me/inbox')!;
+    expect(docs).toContain('`preview`');
+    expect(docs).toContain('`truncated: true`');
+    expect(docs).toMatch(/no `body`/);
+    expect(docs).toContain('me/messages');
   });
 
   it('is honest about a killed or stopped listener, and about the prompt reminder', async () => {
@@ -757,18 +754,13 @@ describe('invite onboarding doc', () => {
     expect(dead.headers['content-type']).toContain('text/html');
   });
 
-  it('the invite docs page states the dead-link statuses (404 unknown / 410 revoked or expired)', async () => {
-    const res = await ts.app.inject({
-      method: 'GET',
-      url: '/docs/api/invite',
-      headers: { 'user-agent': 'curl/8.4.0' },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('GET /invite/:token');
-    expect(res.body).toMatch(/404/);
-    expect(res.body).toMatch(/410/);
-    expect(res.body).toMatch(/revoked/i);
-    expect(res.body).toMatch(/expired/i);
+  it('the invite docs page states the dead-link statuses (404 unknown / 410 revoked or expired)', () => {
+    const body = renderDocPage('https://sparrow.example.com', 'invite')!;
+    expect(body).toContain('GET /invite/:token');
+    expect(body).toMatch(/404/);
+    expect(body).toMatch(/410/);
+    expect(body).toMatch(/revoked/i);
+    expect(body).toMatch(/expired/i);
   });
 
   // The enroll route now MIRRORS the doc route (see invite-dead.test.ts for the
@@ -794,83 +786,43 @@ describe('invite onboarding doc', () => {
     }
   });
 
-  it('GET /install.sh serves the installer (no legacy `ac` alias)', async () => {
+  it('GET /install.sh 302s to the canonical install home (it is not served here)', async () => {
     const res = await ts.app.inject({ method: 'GET', url: '/install.sh' });
-    expect(res.statusCode).toBe(200);
-    expect(res.headers['content-type']).toContain('shellscript');
-    // Bundles are fetched from the .js server paths…
-    expect(res.body).toContain('install/sparrow.js');
-    expect(res.body).toContain('install/sparrow-mcp.js');
-    // …but saved and run locally as .mjs so Node runs them as ES modules with no
-    // MODULE_TYPELESS_PACKAGE_JSON warning (no package.json alongside them).
-    expect(res.body).toContain('"${BIN_DIR}/sparrow.mjs"');
-    expect(res.body).toContain('"${BIN_DIR}/sparrow-mcp.mjs"');
-    expect(res.body).toContain('write_wrapper sparrow sparrow.mjs');
-    expect(res.body).toContain('write_wrapper sparrow-mcp sparrow-mcp.mjs');
-    // The wrappers must not point at a bare .js (that path is server-only).
-    expect(res.body).not.toContain('write_wrapper sparrow sparrow.js');
-    // The legacy `ac` CLI alias is dropped entirely — no wrapper, no mention.
-    expect(res.body).not.toContain('write_wrapper ac');
-    expect(res.body).not.toMatch(/\bac\b/);
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe('https://sparrow.land/install.sh');
   });
 
-  it('install artifacts are served Cache-Control: no-store (a CDN default-cached bundle survives deploys stale)', async () => {
-    // 2026-09-01 prod incident: Cloudflare's default 4h edge TTL for `.js` kept
-    // serving a pre-deploy /install/sparrow.js — `sparrow upgrade` "succeeded"
-    // into the old build. The artifacts change on every deploy and are fetched
-    // rarely, so the origin forbids caching outright.
-    const assetsDir = mkdtempSync(path.join(tmpdir(), 'sparrow-assets-'));
-    writeFileSync(path.join(assetsDir, 'sparrow.js'), '#!/usr/bin/env node\n// bundle\n');
-    const tsAssets = await makeTestServer({ installAssetsDir: assetsDir });
-    try {
-      for (const url of ['/install.sh', '/install/sparrow.js']) {
-        const res = await tsAssets.app.inject({ method: 'GET', url });
-        expect(res.statusCode).toBe(200);
-        expect(res.headers['cache-control']).toBe('no-store');
-      }
-    } finally {
-      await tsAssets.close();
-      rmSync(assetsDir, { recursive: true, force: true });
-    }
-  });
-
-  it('install.sh also writes a `sparrow-skill` wrapper delegating to `sparrow skill`', async () => {
-    const res = await ts.app.inject({ method: 'GET', url: '/install.sh' });
-    expect(res.statusCode).toBe(200);
-    // A third wrapper so the standalone `sparrow-skill …` copy keeps working.
-    expect(res.body).toContain('${BIN_DIR}/sparrow-skill');
-    expect(res.body).toContain('sparrow.mjs" skill "\\$@"');
-  });
-
-  it('install.sh removes stale pre-.mjs bundles left by older installs', async () => {
-    const res = await ts.app.inject({ method: 'GET', url: '/install.sh' });
-    expect(res.statusCode).toBe(200);
-    // Older installs saved the bundles as sparrow.js / sparrow-mcp.js next to the
-    // new ones; clean up exactly those two filenames, and only if present.
-    expect(res.body).toContain('sparrow.js sparrow-mcp.js');
-    expect(res.body).toContain('rm -f');
-    expect(res.body).toContain('removed stale');
-    // …after the new bundles and wrappers are in place, never before.
-    expect(res.body.indexOf('removed stale')).toBeGreaterThan(
-      res.body.indexOf('write_wrapper sparrow-mcp sparrow-mcp.mjs'),
-    );
-  });
-
-  it('GET /api/v1/meta returns an unauthenticated discovery doc anchored to the origin', async () => {
+  it('GET /api/v1/meta advertises the CANONICAL homes and an origin-anchored api.base', async () => {
     const res = await ts.app.inject({ method: 'GET', url: '/api/v1/meta' });
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('application/json');
     const body = res.json();
     expect(body.name).toBe('sparrow');
     expect(typeof body.version).toBe('string');
-    // Origin-anchored install + docs + api URLs (default baseUrl in tests).
-    const base = 'http://localhost:8722';
-    expect(body.install.script).toBe(`${base}/install.sh`);
-    expect(body.install.cli).toBe(`${base}/install/sparrow.js`);
-    expect(body.install.mcp).toBe(`${base}/install/sparrow-mcp.js`);
-    expect(body.docs.index).toBe(`${base}/docs/api`);
-    expect(body.docs.convention).toContain('/docs/api/');
-    expect(body.api.base).toBe(`${base}/api/v1`);
+    // install.* and docs are the one home each — identical on every instance…
+    expect(body.install.script).toBe('https://sparrow.land/install.sh');
+    expect(body.install.cli).toBe('https://sparrow.land/install/sparrow.js');
+    expect(body.install.mcp).toBe('https://sparrow.land/install/sparrow-mcp.js');
+    expect(body.docs.index).toBe('https://sparrow.land/docs/');
+    expect(body.docs.convention).toBe('https://sparrow.land/docs/api/<endpoint-path>.md');
+    // …while the API base stays anchored to this request's effective origin.
+    expect(body.api.base).toBe('http://localhost:8722/api/v1');
+  });
+
+  it('GET /api/v1/meta follows a DOCS_URL / INSTALL_URL override', async () => {
+    const mirror = await makeTestServer({
+      docsUrl: 'https://mirror.example.com/docs',
+      installUrl: 'https://mirror.example.com',
+    });
+    try {
+      const body = mirror.app.inject
+        ? (await mirror.app.inject({ method: 'GET', url: '/api/v1/meta' })).json()
+        : undefined;
+      expect(body.install.script).toBe('https://mirror.example.com/install.sh');
+      expect(body.docs.index).toBe('https://mirror.example.com/docs/');
+    } finally {
+      await mirror.close();
+    }
   });
 
   it('an unknown /api/* route 404s with a JSON body pointing at docs + meta (never the SPA)', async () => {
@@ -883,18 +835,12 @@ describe('invite onboarding doc', () => {
     expect(res.headers['content-type']).toContain('application/json');
     const body = res.json();
     expect(body.error.code).toBe('not_found');
-    expect(body.error.docs).toBe('http://localhost:8722/docs/api');
+    expect(body.error.docs).toBe('https://sparrow.land/docs/api/index.md');
     expect(body.error.message).toContain('/api/v1/meta');
   });
 
-  it('the /docs/api index advertises the meta discovery endpoint', async () => {
-    const res = await ts.app.inject({
-      method: 'GET',
-      url: '/docs/api',
-      headers: { 'user-agent': 'curl/8', accept: '*/*' },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('/api/v1/meta');
+  it('the API docs index advertises the meta discovery endpoint', () => {
+    expect(renderDocsIndex('https://sparrow.example.com')).toContain('/api/v1/meta');
   });
 
   it('the onboarding invite doc tells agents to probe GET /api/v1/meta', async () => {

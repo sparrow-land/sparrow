@@ -19,6 +19,19 @@ export interface ServerConfig {
   baseUrl: string;
   adminToken?: string;
   /**
+   * The ONE home of the documentation (env `DOCS_URL`, default
+   * `https://sparrow.land/docs`; trailing slash stripped). `/docs*` redirects
+   * there and every `docs` URL the API emits is built from it. Undefined =
+   * the default — see `public-homes.ts`.
+   */
+  docsUrl?: string;
+  /**
+   * The ONE home of `install.sh` and the CLI/MCP bundles (env `INSTALL_URL`,
+   * default `https://sparrow.land`; trailing slash stripped). `/install.sh` and
+   * `/install/*` redirect there. Undefined = the default.
+   */
+  installUrl?: string;
+  /**
    * Env fallback for config key `orgs.openCreation` (`OPEN_ORG_CREATION`).
    * Undefined when the operator did not set the env var — the config store then
    * resolves db value → descriptor default (true).
@@ -39,8 +52,6 @@ export interface ServerConfig {
    * set; anything here is merged on top.
    */
   providers?: AuthProvider[];
-  /** Directory holding bundled install artifacts; defaults to apps/api/install-assets. */
-  installAssetsDir?: string;
   /**
    * Grace period (seconds) between a principal's last `/events` disconnect and
    * the `presence.changed offline` emit (env `PRESENCE_GRACE_SECONDS`, default

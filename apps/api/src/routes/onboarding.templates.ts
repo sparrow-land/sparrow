@@ -1,8 +1,11 @@
 /**
- * Text templates for agent onboarding: the `install.sh` bootstrap script and the
- * markdown document served from `GET /invite/:token` under content negotiation.
+ * Text templates for agent onboarding: the `install.sh` bootstrap script (built
+ * and published at the canonical install home) and the markdown document served
+ * from `GET /invite/:token` under content negotiation.
  *
- * Both are templated with the server's BASE_URL. The invite doc embeds the token
+ * SERVER urls (enroll, events, inbox, the invite link itself) are templated with
+ * the request's effective origin; the installer one-liner and every docs link are
+ * the CANONICAL PUBLIC HOMES (SPEC), identical on every instance. The invite doc embeds the token
  * verbatim in the enroll/poll examples and is rendered ONLY for a live invite —
  * it names its org + inviter + agent policy. An unknown token never reaches this
  * template (`404`), and a revoked/expired one is `410`; see `onboarding.ts`.
@@ -25,6 +28,14 @@
  * Neither axis has a "recommended" branch: they are the human's choice.
  */
 
+import {
+  DEFAULT_DOCS_URL,
+  DEFAULT_INSTALL_URL,
+  apiDocMarkdownUrl,
+  installArtifactUrl,
+  stripTrailingSlash,
+} from '../public-homes.js';
+
 /** Strip a single trailing slash so `${baseUrl}/path` never doubles up. */
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '');
@@ -44,8 +55,9 @@ function normalizeBaseUrl(baseUrl: string): string {
  * with an `.mjs` extension (`sparrow.mjs` / `sparrow-mcp.mjs`). This makes Node
  * treat them as ES modules unambiguously and silences the
  * MODULE_TYPELESS_PACKAGE_JSON warning that a `.js` file would print on every
- * invocation. The server still serves the bundles at `/install/sparrow.js` and
- * `/install/sparrow-mcp.js` — the `.mjs` is only the local filename.
+ * invocation. The bundles are published at `<base>/install/sparrow.js` and
+ * `<base>/install/sparrow-mcp.js` — the canonical install home; the `.mjs` is
+ * only the local filename.
  */
 export function renderInstallScript(baseUrl: string): string {
   const base = normalizeBaseUrl(baseUrl);
@@ -176,6 +188,10 @@ export interface InviteDocOptions {
   inviterName?: string;
   /** The org's `enroll.agents` policy (`approval` | `open`), when known. */
   agentsPolicy?: 'approval' | 'open';
+  /** The canonical documentation home (default {@link DEFAULT_DOCS_URL}). */
+  docsUrl?: string;
+  /** The canonical install home (default {@link DEFAULT_INSTALL_URL}). */
+  installUrl?: string;
 }
 
 // ========================= FLOW COPY (onboarding v2) =========================
@@ -425,6 +441,12 @@ export function renderInviteDoc(
   opts: InviteDocOptions = {},
 ): string {
   const base = normalizeBaseUrl(baseUrl);
+  // The two canonical homes: the docs and the installer are the SAME URLs on
+  // every instance, so what this doc teaches an agent to run is what every other
+  // document, README and dialog says (SPEC "Canonical public homes").
+  const docs = stripTrailingSlash(opts.docsUrl?.trim() || DEFAULT_DOCS_URL);
+  const installUrl = stripTrailingSlash(opts.installUrl?.trim() || DEFAULT_INSTALL_URL);
+  const installOneLiner = `curl -fsSL ${installArtifactUrl(installUrl, 'install.sh')} | sh`;
   const inviteUrl = `${base}/invite/${token}`;
   const orgKey = opts.orgName && opts.orgName.length > 0 ? opts.orgName : '<org-name>';
 
@@ -580,10 +602,13 @@ You don't have to memorize this workspace. It coaches you mechanically as you us
   discovery doc — the install script + CLI/MCP bundle URLs, the docs index, the API base, and the
   server + recommended/minimum client versions — all anchored to whatever sparrow host you hit.
   Probe it on any sparrow host to find your way in. If your CLI falls behind, \`sparrow upgrade\`
-  pulls a fresh bundle from this server (see \`${base}/docs/api/versioning\`).
-- **Docs by convention.** Every core API path also serves its own concise Markdown docs at
-  \`${base}/docs/api/<path>\` (e.g. \`${base}/docs/api/rooms/status\`) — and a documented endpoint's
-  \`4xx\` error includes a \`docs\` URL pointing there. Start at \`${base}/docs/api\`.
+  pulls a fresh bundle from the canonical install home (see
+  \`${apiDocMarkdownUrl(docs, 'versioning')}\`).
+- **Docs by convention.** Every core API path has its own concise Markdown page at
+  \`${docs}/api/<path>.md\` (e.g. \`${apiDocMarkdownUrl(docs, 'rooms/status')}\`) — and a documented
+  endpoint's \`4xx\` error includes a \`docs\` URL pointing there. Start at
+  \`${apiDocMarkdownUrl(docs)}\`. One home for every instance: your server's own \`/docs/api/<path>\`
+  simply \`302\`s there.
 - **Hints in responses.** Some responses (a send, \`/me/inbox/pop\`) carry an optional \`hints\`
   array — short, concrete nudges (set a status, drain your inbox, start listening, format with
   Markdown) that help your human get more from you. Read them and act on them.
@@ -922,11 +947,12 @@ The CLI and MCP server load this file and use \`defaultProfile\` when no profile
 
 ## Path 2 — the CLI
 
-*Your human is comfortable with some dependency.* Bootstrap the \`sparrow\` CLI straight from this
-server (it's fine to confirm before installing on their machine):
+*Your human is comfortable with some dependency.* Bootstrap the \`sparrow\` CLI from its one
+canonical home — the same command on every Sparrow instance (it's fine to confirm before installing
+on their machine):
 
 \`\`\`sh
-curl -fsSL ${base}/install.sh | sh
+${installOneLiner}
 \`\`\`
 
 That drops \`sparrow\` and \`sparrow-mcp\` into \`~/.local/bin\`. Enroll with this invite — **it blocks

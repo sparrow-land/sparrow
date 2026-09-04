@@ -1,5 +1,6 @@
 import { DEFAULT_PORT, EMAIL_INBOUND_RATE_PER_MIN, LLM_JUDGE_TIMEOUT_MS } from '@sparrow/common-types';
 import type { ServerConfig } from './context.js';
+import { docsHome, installHome } from './public-homes.js';
 
 /**
  * Build the server config from environment variables.
@@ -14,6 +15,12 @@ export function envConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const dataDir = env.DATA_DIR ?? './data';
   const baseUrl = env.BASE_URL ?? `http://localhost:${env.PORT ?? DEFAULT_PORT}`;
   const adminToken = env.ADMIN_TOKEN?.trim() || undefined;
+  // Canonical public homes (SPEC): documentation and the installer have ONE home
+  // each, independent of the instance. Empty/whitespace reads as unset (compose's
+  // `${DOCS_URL:-}` always defines the var) and trailing slashes are stripped, so
+  // every emitted URL is `${home}/...` exactly once.
+  const docsUrl = docsHome({ docsUrl: env.DOCS_URL });
+  const installUrl = installHome({ installUrl: env.INSTALL_URL });
   const rawOpen = env.OPEN_ORG_CREATION;
   const openOrgCreation = rawOpen === undefined ? undefined : rawOpen !== 'false';
   const rawGrace = env.PRESENCE_GRACE_SECONDS;
@@ -54,6 +61,8 @@ export function envConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     dataDir,
     baseUrl,
     adminToken,
+    docsUrl,
+    installUrl,
     openOrgCreation,
     presenceGraceSeconds,
     voiceProvider,

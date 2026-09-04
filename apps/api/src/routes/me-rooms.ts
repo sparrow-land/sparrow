@@ -62,7 +62,7 @@ import {
 } from '../message-helpers.js';
 import { emitMemberJoined, emitMemberRemoved, emitMessageRead } from '../room-events.js';
 import { applyAck } from '../status-helpers.js';
-import { computeHints, hintOrigin, clientVersionOf } from '../hints.js';
+import { computeHints, clientVersionOf } from '../hints.js';
 import { inviteeInvitation } from './rooms.js';
 
 /**
@@ -486,7 +486,7 @@ export function registerMeRoomRoutes(app: FastifyInstance, ctx: AppContext): voi
       const hints = computeHints(
         ctx,
         principal,
-        { origin: hintOrigin(request, ctx), clientVersion: clientVersionOf(request) },
+        { clientVersion: clientVersionOf(request) },
         request,
       );
       if (hints) empty.hints = hints;

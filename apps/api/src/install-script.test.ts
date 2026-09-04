@@ -44,6 +44,49 @@ describe('install.sh — install directory', () => {
   });
 });
 
+/**
+ * The installer's CONTENT. The instance no longer serves this script (it `302`s
+ * to `INSTALL_URL/install.sh`), so these assertions run against the template the
+ * `render-install-script` build step publishes at the canonical home.
+ */
+describe('install.sh — what it downloads and writes (no legacy `ac` alias)', () => {
+  const published = renderInstallScript('https://sparrow.land');
+
+  it('fetches the bundles from the install home and saves them as .mjs', () => {
+    // The published script points at its own home, not at any instance.
+    expect(published).toContain('BASE_URL="https://sparrow.land"');
+    expect(published).toContain('install/sparrow.js');
+    expect(published).toContain('install/sparrow-mcp.js');
+    // …saved and run locally as .mjs so Node runs them as ES modules with no
+    // MODULE_TYPELESS_PACKAGE_JSON warning (no package.json alongside them).
+    expect(published).toContain('"${BIN_DIR}/sparrow.mjs"');
+    expect(published).toContain('"${BIN_DIR}/sparrow-mcp.mjs"');
+    expect(published).toContain('write_wrapper sparrow sparrow.mjs');
+    expect(published).toContain('write_wrapper sparrow-mcp sparrow-mcp.mjs');
+    // The wrappers must not point at a bare .js (that path is download-only).
+    expect(published).not.toContain('write_wrapper sparrow sparrow.js');
+  });
+
+  it('drops the legacy `ac` CLI alias entirely — no wrapper, no mention', () => {
+    expect(published).not.toContain('write_wrapper ac');
+    expect(published).not.toMatch(/\bac\b/);
+  });
+
+  it('also writes a `sparrow-skill` wrapper delegating to `sparrow skill`', () => {
+    expect(published).toContain('${BIN_DIR}/sparrow-skill');
+    expect(published).toContain('sparrow.mjs" skill "\\$@"');
+  });
+
+  it('removes stale pre-.mjs bundles left by older installs, after the new ones land', () => {
+    expect(published).toContain('sparrow.js sparrow-mcp.js');
+    expect(published).toContain('rm -f');
+    expect(published).toContain('removed stale');
+    expect(published.indexOf('removed stale')).toBeGreaterThan(
+      published.indexOf('write_wrapper sparrow-mcp sparrow-mcp.mjs'),
+    );
+  });
+});
+
 describe('install.sh — stale bundle cleanup is guarded', () => {
   it('only removes sparrow.js/sparrow-mcp.js when a sparrow wrapper sits alongside', () => {
     // The guard: a `sparrow` wrapper in BIN_DIR proves this directory is a

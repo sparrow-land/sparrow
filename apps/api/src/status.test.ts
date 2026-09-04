@@ -143,7 +143,7 @@ describe('working status', () => {
     expect(noteOnly.json().error.code).toBe('bad_request');
     expect(noteOnly.json().error.message).toContain('note/ttlSeconds require ack: true');
     // Documented route → the 400 carries a docs link.
-    expect(noteOnly.json().error.docs).toBe('http://localhost:8722/docs/api/me/inbox');
+    expect(noteOnly.json().error.docs).toBe('https://sparrow.land/docs/api/me/inbox.md');
     // ttlSeconds without ack:true
     const ttlOnly = await ts.app.inject({
       method: 'POST',

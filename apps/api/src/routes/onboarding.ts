@@ -6,23 +6,17 @@ import type { ErrorResponse } from '@sparrow/common-types';
 import { sha256Hex } from '@sparrow/common-types/identity';
 import type { AppContext } from '../context.js';
 import { effectiveOrigin } from '../effective-origin.js';
+import { docsHome, docsPageUrl, installArtifactUrl, installHome } from '../public-homes.js';
 import { API_VERSION, BUILD_STAMP } from '../version.js';
 import { humans, invites, orgs } from '../db/schema.js';
 import { parseOrgSettings } from '../org-helpers.js';
 import { deadInvite, deadInviteError } from '../invite-helpers.js';
-import { renderInstallScript, renderInviteDoc } from './onboarding.templates.js';
+import { renderInviteDoc } from './onboarding.templates.js';
 
 export interface OnboardingOptions {
-  /** Directory holding the bundled install artifacts (sparrow.js, sparrow-mcp.js). */
-  installAssetsDir: string;
   /** Static web root (contains index.html) when the SPA is bundled; else undefined. */
   staticRoot?: string;
 }
-
-const BUNDLES: Record<string, string> = {
-  'sparrow.js': 'sparrow.js',
-  'sparrow-mcp.js': 'sparrow-mcp.js',
-};
 
 /**
  * Substrings (matched case-insensitively) that mark a User-Agent as a bot/agent
@@ -107,20 +101,36 @@ export interface ClientVersionPolicy {
   recommended?: string;
 }
 
-/** Build the discovery doc from a request's effective origin + the client policy. */
-export function renderMeta(origin: string, policy: ClientVersionPolicy = {}): MetaDoc {
+/** The canonical homes a {@link renderMeta} call advertises. */
+export interface MetaHomes {
+  docsUrl: string;
+  installUrl: string;
+}
+
+/**
+ * Build the discovery doc. `install.*` and `docs` are the CANONICAL PUBLIC HOMES
+ * (SPEC) — the same URLs on every instance, so a probe teaches the one install
+ * one-liner and the one docs site; only `api.base` is anchored to the request's
+ * effective origin.
+ */
+export function renderMeta(
+  origin: string,
+  homes: MetaHomes,
+  policy: ClientVersionPolicy = {},
+): MetaDoc {
+  const docs = homes.docsUrl;
   return {
     name: 'sparrow',
     version: API_VERSION,
     build: BUILD_STAMP,
     install: {
-      script: `${origin}/install.sh`,
-      cli: `${origin}/install/sparrow.js`,
-      mcp: `${origin}/install/sparrow-mcp.js`,
+      script: installArtifactUrl(homes.installUrl, 'install.sh'),
+      cli: installArtifactUrl(homes.installUrl, 'install/sparrow.js'),
+      mcp: installArtifactUrl(homes.installUrl, 'install/sparrow-mcp.js'),
     },
     docs: {
-      index: `${origin}/docs/api`,
-      convention: `${origin}/docs/api/<endpoint-path>`,
+      index: docsPageUrl(docs),
+      convention: `${docs}/api/<endpoint-path>.md`,
     },
     api: { base: `${origin}/api/v1` },
     server: { version: API_VERSION, build: BUILD_STAMP },
@@ -134,8 +144,8 @@ export function renderMeta(origin: string, policy: ClientVersionPolicy = {}): Me
 /**
  * Agent onboarding routes:
  *   GET /api/v1/meta         unauthenticated discovery doc (install + docs + api)
- *   GET /install.sh          POSIX installer templated with BASE_URL
- *   GET /install/:name       serve a bundled client (sparrow.js | sparrow-mcp.js)
+ *   GET /install.sh          302 → INSTALL_URL/install.sh (canonical public home)
+ *   GET /install/*           302 → INSTALL_URL/install/<file>
  *   GET /invite/:token       content-negotiated: markdown doc for non-browsers,
  *                            SPA for browsers (Accept contains text/html)
  */
@@ -145,42 +155,44 @@ export function registerOnboardingRoutes(
   opts: OnboardingOptions,
 ): void {
   // Unauthenticated discovery: an agent that lands on any sparrow host can probe
-  // this to find the installer, the CLI/MCP bundles, the docs, and the API base —
-  // all anchored to this request's origin. Stable and additive by contract.
+  // this to find the installer, the CLI/MCP bundles, the docs, and the API base.
+  // The install + docs URLs are the CANONICAL PUBLIC HOMES (identical on every
+  // instance, so a probe teaches the one install one-liner); only `api.base` is
+  // anchored to this request's origin. Stable and additive by contract.
   app.get('/api/v1/meta', (request, reply) => {
     return reply
       .type('application/json')
       .send(
-        renderMeta(effectiveOrigin(request, ctx.config), {
-          minimum: ctx.config.clientMinVersion,
-          recommended: ctx.config.clientRecommendedVersion,
-        }),
+        renderMeta(
+          effectiveOrigin(request, ctx.config),
+          { docsUrl: docsHome(ctx.config), installUrl: installHome(ctx.config) },
+          {
+            minimum: ctx.config.clientMinVersion,
+            recommended: ctx.config.clientRecommendedVersion,
+          },
+        ),
       );
   });
 
-  // The install artifacts change on EVERY deploy but sit on cache-friendly
-  // paths (a CDN default-caches `.js` by extension — Cloudflare's 4h edge TTL
-  // kept serving a pre-deploy bundle on 2026-09-01, so `sparrow upgrade`
-  // "succeeded" into the old build). They are fetched rarely, so forbid
-  // caching outright rather than tune a TTL.
-  app.get('/install.sh', (request, reply) => {
-    return reply
+  // The installer and the bundles live at the CANONICAL INSTALL HOME, never on
+  // the instance (SPEC "Canonical public homes"): per-instance installers teach
+  // every reader a different command, and the bundles published at the home are
+  // built from the same source tree and stamped with the same version. The
+  // instance keeps the old paths alive as `302`s so old links and old
+  // `sparrow upgrade` clients still resolve. `no-store` because the redirect
+  // target is an operator setting that may move (and a CDN default-caching
+  // `/install/*.js` by extension is exactly how a stale bundle survived a deploy
+  // on 2026-09-01).
+  const installRedirect = (reply: FastifyReply, file: string): FastifyReply =>
+    reply
       .header('cache-control', 'no-store')
-      .type('text/x-shellscript; charset=utf-8')
-      .send(renderInstallScript(effectiveOrigin(request, ctx.config)));
-  });
+      .redirect(installArtifactUrl(installHome(ctx.config), file), 302);
 
-  app.get<{ Params: { name: string } }>('/install/:name', (request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const file = BUNDLES[request.params.name];
-    if (!file) {
-      return reply.code(404).type('application/json').send(notFoundEnvelope());
-    }
-    const full = path.join(opts.installAssetsDir, file);
-    if (!existsSync(full)) {
-      return reply.code(404).type('application/json').send(notFoundEnvelope());
-    }
-    return reply.type('text/javascript; charset=utf-8').send(readFileSync(full));
+  app.get('/install.sh', (_request, reply) => installRedirect(reply, 'install.sh'));
+
+  app.get<{ Params: { '*': string } }>('/install/*', (request, reply) => {
+    const file = (request.params['*'] ?? '').replace(/^\/+/, '');
+    return installRedirect(reply, `install/${file}`);
   });
 
   app.get<{ Params: { token: string }; Querystring: { format?: string } }>(
@@ -245,10 +257,12 @@ export function registerOnboardingRoutes(
             orgName,
             inviterName,
             agentsPolicy,
+            docsUrl: docsHome(ctx.config),
+            installUrl: installHome(ctx.config),
           }),
         );
     },
   );
 }
 
-export { renderInstallScript, renderInviteDoc } from './onboarding.templates.js';
+export { renderInviteDoc } from './onboarding.templates.js';

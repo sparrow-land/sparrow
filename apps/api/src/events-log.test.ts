@@ -308,7 +308,7 @@ describe('GET /me/events/log — non-streaming journal read', () => {
       });
       expect(res.statusCode, `limit=${bad}`).toBe(400);
       expect(res.json().error.code).toBe('bad_request');
-      expect(res.json().error.docs).toBe('http://localhost:8722/docs/api/me/events');
+      expect(res.json().error.docs).toBe('https://sparrow.land/docs/api/me/events.md');
     }
     // A valid bound at each edge still passes.
     expect((await readLog('?since=0&limit=1', alice.token)).statusCode).toBe(200);

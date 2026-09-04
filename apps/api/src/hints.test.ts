@@ -195,7 +195,7 @@ describe('hints engine — triggers at the pause', () => {
     expect(body.hints).toBeDefined();
     expect(body.hints![0]!.id).toBe('start-listening');
     expect(body.hints![0]!.action).toEqual({ method: 'GET', path: '/api/v1/me/events' });
-    expect(body.hints![0]!.docs).toBe('http://localhost:8722/docs/api/me/events');
+    expect(body.hints![0]!.docs).toBe('https://sparrow.land/docs/api/me/events.md');
     // The turn-based half of the nudge must prescribe a WAKE mechanism, not a
     // bare presence heartbeat — heartbeating while unable to react is the state
     // that reads online and behaves deaf.
@@ -229,7 +229,7 @@ describe('hints engine — triggers at the pause', () => {
       exampleBody: { ack: true, note: 'working on your request' },
     });
     expect(body.hints![0]!.text).toContain('ack');
-    expect(body.hints![0]!.docs).toContain('/docs/api/rooms/status');
+    expect(body.hints![0]!.docs).toBe('https://sparrow.land/docs/api/rooms/status.md');
   });
 
   it('set-a-status also counts a recent SEND as activity', async () => {
@@ -524,8 +524,8 @@ describe('GET /me/hints — the read-only tips view', () => {
     const { status, hints } = await tips(fx.agentKey);
     expect(status).toBe(200);
     expect(hints.map((h) => h.id)).toEqual(['start-listening', 'drain-your-inbox']);
-    expect(hints[0]!.docs).toBe('http://localhost:8722/docs/api/me/events');
-    expect(hints[1]!.docs).toBe('http://localhost:8722/docs/api/me/inbox');
+    expect(hints[0]!.docs).toBe('https://sparrow.land/docs/api/me/events.md');
+    expect(hints[1]!.docs).toBe('https://sparrow.land/docs/api/me/inbox.md');
   });
 
   it('always carries a `hints` array — empty when nothing applies', async () => {

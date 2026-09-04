@@ -60,8 +60,6 @@ describe('isSpaRoute', () => {
     '/rooms/rm_1',
     '/rooms/rm_1/settings',
     '/agents/ag_1',
-    '/docs',
-    '/docs/cli',
   ])('%s is a client route', (p) => {
     expect(isSpaRoute(p)).toBe(true);
   });
@@ -77,6 +75,11 @@ describe('isSpaRoute', () => {
     '/wp-admin',
     '/api/v1/nope',
     '/invite', // the SPA route is /invite/:token; the bare path is not a route
+    // Docs are NOT an SPA route: they have one canonical home and the explicit
+    // /docs routes 302 there, so nothing under /docs may reach the shell.
+    '/docs',
+    '/docs/cli',
+    '/docs/api/me/inbox',
   ])('%s is NOT a client route', (p) => {
     expect(isSpaRoute(p)).toBe(false);
   });
@@ -243,17 +246,19 @@ describe('SPA fallback (I-6)', () => {
     expect(agent.headers['content-type']).toContain('text/markdown');
   });
 
-  it('still negotiates /docs (browser → SPA, agent → markdown)', async () => {
+  // Docs are no longer an SPA route at all: every /docs path 302s to the one
+  // canonical home (SPEC "Canonical public homes"), browser or not.
+  it('sends /docs to the canonical home instead of the SPA', async () => {
     const browser = await ts.app.inject({ method: 'GET', url: '/docs', headers: BROWSER });
-    expect(browser.statusCode).toBe(200);
-    expect(browser.headers['content-type']).toContain('text/html');
+    expect(browser.statusCode).toBe(302);
+    expect(browser.headers.location).toBe('https://sparrow.land/docs/');
     const agent = await ts.app.inject({
       method: 'GET',
       url: '/docs/api',
       headers: { 'user-agent': 'curl/8.4.0', accept: '*/*' },
     });
-    expect(agent.statusCode).toBe(200);
-    expect(agent.headers['content-type']).toContain('text/markdown');
+    expect(agent.statusCode).toBe(302);
+    expect(agent.headers.location).toBe('https://sparrow.land/docs/api/index.md');
   });
 });
 

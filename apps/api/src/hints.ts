@@ -18,8 +18,9 @@
  *     where the agent asked the question itself.
  *
  * Hints exist to help the agent serve ITS HUMAN — a silent, formless agent reads
- * as broken. Everything here is host-aware (docs URLs anchor to the request's own
- * origin, so self-hosted instances link to themselves), cooldown-gated (a hint
+ * as broken. Every `docs` URL points at the canonical documentation home (SPEC
+ * "Canonical public homes" — one page per endpoint, whichever instance taught the
+ * lesson), and delivery is cooldown-gated (a hint
  * re-fires at most once per {@link HINT_COOLDOWN_MS}, or {@link
  * HINT_COOLDOWN_AGGRESSIVE_MS} for an agent that opted into aggressive coaching),
  * and opt-out-able (the `HINTS_ENABLED` env kill-switch, the per-request
@@ -46,7 +47,7 @@ import {
 } from '@sparrow/common-types';
 import type { AppContext, PrincipalIdent } from './context.js';
 import { nowIso } from './context.js';
-import { effectiveOrigin } from './effective-origin.js';
+import { apiDocMarkdownUrl, docsHome, installArtifactUrl, installHome } from './public-homes.js';
 import {
   agents,
   emails,
@@ -112,8 +113,6 @@ export const HINT_LEVEL_CHOICES: HintPreferenceChoice[] = [
  * reads from the db.
  */
 export interface HintRequestInfo {
-  /** Request-anchored absolute origin for building docs URLs. */
-  origin: string;
   /**
    * The requesting client's self-reported version, parsed from `X-Sparrow-Client`
    * (absent for web / third-party / header-less callers). Drives `upgrade-your-cli`.
@@ -133,7 +132,7 @@ interface HintEvalCtx {
 
 export interface Trigger {
   id: string;
-  /** Docs segment under `/docs/api/…` this hint links to (absolute-ized per request). */
+  /** Docs segment this hint links to, resolved to `DOCS_URL/api/<segment>.md`. */
   docs: string;
   /**
    * The OWNER'S framing of this hint — a third-person sentence for the human
@@ -575,8 +574,12 @@ export const TRIGGERS: Trigger[] = [
       return {
         text:
           `Your Sparrow client (${h.info.clientVersion}) is behind the recommended ${recommended}. ` +
-          'Upgrade with `sparrow upgrade` (or re-run install.sh) to get the latest fixes.',
-        action: { method: 'GET', path: '/install.sh' },
+          'Upgrade with `sparrow upgrade`, or re-run `curl -fsSL ' +
+          `${installArtifactUrl(installHome(h.ctx.config), 'install.sh')} | sh\`.`,
+        action: {
+          method: 'GET',
+          path: installArtifactUrl(installHome(h.ctx.config), 'install.sh'),
+        },
       };
     },
   },
@@ -763,11 +766,13 @@ function makeEvalCtx(
 function toHint(
   trigger: Trigger,
   built: { text: string; action?: HintAction },
-  origin: string,
+  ctx: AppContext,
 ): Hint {
   const hint: Hint = { id: trigger.id, text: built.text };
   if (built.action) hint.action = built.action;
-  hint.docs = docsUrlFor(origin, trigger.docs);
+  // The canonical docs home, never the request origin: one page per endpoint,
+  // the same document whichever instance taught the lesson.
+  hint.docs = apiDocMarkdownUrl(docsHome(ctx.config), trigger.docs);
   return hint;
 }
 
@@ -827,7 +832,7 @@ export function computeHints(
         hint: { id: trigger.id, text },
       });
     }
-    return [toHint(trigger, { text, action }, info.origin)];
+    return [toHint(trigger, { text, action }, ctx)];
   }
   return undefined;
 }
@@ -862,17 +867,9 @@ export function previewHints(
   const hints: Hint[] = [];
   for (const trigger of TRIGGERS) {
     if (!trigger.applies(evalCtx)) continue;
-    hints.push(toHint(trigger, trigger.build(evalCtx), info.origin));
+    hints.push(toHint(trigger, trigger.build(evalCtx), ctx));
   }
   return hints;
 }
 
-/** Build a docs URL for a hint from the request origin + the trigger's segment. */
-function docsUrlFor(origin: string, segment: string): string {
-  return `${origin.replace(/\/+$/, '')}/docs/api/${segment}`;
-}
 
-/** Convenience wrapper: build {@link HintRequestInfo}'s origin from a request. */
-export function hintOrigin(request: FastifyRequest, ctx: AppContext): string {
-  return effectiveOrigin(request, ctx.config);
-}
