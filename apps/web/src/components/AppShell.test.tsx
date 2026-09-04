@@ -376,9 +376,11 @@ describe('AppShell — unified invite UX', () => {
     expect(within(dialog).getByText('Your first agent.')).toBeInTheDocument();
     expect(within(dialog).queryByRole('button', { name: /back/i })).not.toBeInTheDocument();
     // Harness is the default: the install + harness command, against this invite.
+    // The installer is the canonical one (SPEC: *Canonical public homes*) — the
+    // instance's own origin only carries the invite URL.
     await waitFor(() =>
       expect(
-        within(dialog).getByText(/curl -fsSL https:\/\/sparrow\.example\.com\/install\.sh/),
+        within(dialog).getByText(/curl -fsSL https:\/\/sparrow\.land\/install\.sh \| sh/),
       ).toBeInTheDocument(),
     );
     // Inline shows the invitation blob instead — the same invite, no second mint.

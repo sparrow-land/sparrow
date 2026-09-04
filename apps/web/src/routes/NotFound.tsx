@@ -4,6 +4,7 @@ import { Mark } from '../components/Logo.js';
 import { SiteHeader } from '../components/SiteHeader.js';
 import { SiteFooter } from '../components/SiteFooter.js';
 import { MAIN_CONTENT_ID } from '../components/SkipLink.js';
+import { docsUrl } from '../lib/docsUrl.js';
 
 export function NotFound() {
   useDocumentTitle(pageTitle('Page not found'));
@@ -33,12 +34,13 @@ export function NotFound() {
             >
               Back home
             </Link>
-            <Link
-              to="/docs"
+            {/* The docs live at sparrow.land (SPEC: *Canonical public homes*). */}
+            <a
+              href={docsUrl()}
               className="rounded-md border border-[var(--sparrow-border-strong)] px-4 py-2 text-[var(--sparrow-text)] transition-colors hover:border-[var(--sparrow-accent-2)]"
             >
               Read the docs
-            </Link>
+            </a>
           </div>
         </div>
       </main>

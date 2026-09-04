@@ -16,8 +16,8 @@ import { Login } from './routes/Login.js';
 import { Invite } from './routes/Invite.js';
 import { NotFound } from './routes/NotFound.js';
 import { NotMember } from './routes/NotMember.js';
-import { DocsLayout } from './routes/docs/DocsLayout.js';
-import { DOCS_PAGES, DOCS_ROOT } from './routes/docs/pages.js';
+import { DocsRedirect } from './routes/docs/DocsRedirect.js';
+import { DOCS_ROOT } from './routes/docs/paths.js';
 import { AuthProvider, useAuth } from './lib/auth.js';
 import { ThemeProvider } from './lib/theme-provider.js';
 import { CapabilitiesProvider } from './lib/capabilities.js';
@@ -36,21 +36,14 @@ function KeyedRoom() {
 }
 
 /**
- * Docs are readable in every auth state, so their routes appear in both trees.
- * The pages themselves come from `DOCS_PAGES` (routes/docs/pages.ts), which the
- * sidebar and the prerender script read too — one table, three consumers.
+ * The docs have ONE home — sparrow.land/docs — and this instance is not it
+ * (SPEC: *Canonical public homes*). The route stays mounted in every auth state
+ * and in both trees, but only to forward: `/docs` and everything under it hand
+ * off to {@link DocsRedirect}, the SPA-side twin of the server's `302`. The
+ * page sources still live in routes/docs/ — the marketing site pre-renders
+ * them — they are simply not rendered here.
  */
-const docsRoutes = (
-  <Route path={DOCS_ROOT} element={<DocsLayout />}>
-    {DOCS_PAGES.map(({ path, slug, Component }) =>
-      path === DOCS_ROOT ? (
-        <Route key={slug} index element={<Component />} />
-      ) : (
-        <Route key={slug} path={path.slice(DOCS_ROOT.length + 1)} element={<Component />} />
-      ),
-    )}
-  </Route>
-);
+const docsRoutes = <Route path={`${DOCS_ROOT}/*`} element={<DocsRedirect />} />;
 
 /**
  * The workspace layout for one org (`/org/:orgId/...`, BARE ids): guards

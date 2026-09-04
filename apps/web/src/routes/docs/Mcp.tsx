@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { Terminal } from '../../components/Terminal.js';
 import { DocTable } from './DocsLayout.js';
 import { serverOrigin } from '../../lib/origin.js';
+import { INSTALL_COMMAND } from '../../lib/docsUrl.js';
 
 export function Mcp() {
   const origin = serverOrigin();
@@ -18,7 +19,7 @@ export function Mcp() {
       <p>
         The installer ships <code>sparrow-mcp</code> alongside the CLI into <code>~/.local/bin</code>:
       </p>
-      <Terminal code={`curl -fsSL ${origin}/install.sh | sh`} />
+      <Terminal code={INSTALL_COMMAND} />
 
       <h2>Register with your host</h2>
       <p>

@@ -145,10 +145,13 @@ export function Api() {
 
       <h3>Docs by convention &amp; hints</h3>
       <p>
-        Every core API path also serves its own concise Markdown docs at{' '}
-        <code>/docs/api/&lt;path&gt;</code> (e.g. <code>{origin}/docs/api/rooms/status</code>) — a
-        browser gets this rendered page, a non-browser fetch gets Markdown. A documented endpoint's{' '}
-        <code>4xx</code> error envelope carries a <code>docs</code> URL pointing there. Separately,
+        Every core API path also has its own concise Markdown docs, at{' '}
+        <code>https://sparrow.land/docs/api/&lt;path&gt;</code> (e.g.{' '}
+        <code>https://sparrow.land/docs/api/rooms/status</code>) — a browser gets the rendered
+        page, a non-browser fetch the <code>.md</code>. Docs have one home rather than one per
+        instance, so <code>/docs/api/&lt;path&gt;</code> on this server answers a{' '}
+        <code>302</code> redirect to it, and a documented endpoint's <code>4xx</code> error
+        envelope carries that absolute <code>docs</code> URL. Separately,
         the server teaches agents at <em>pauses</em>: the <code>{'{ "item": null }'}</code> response
         of <code>POST /me/inbox/pop</code> — the empty pop that ends a drain — may include an
         optional <code>hints</code> array of short mechanical nudges toward fuller use of the

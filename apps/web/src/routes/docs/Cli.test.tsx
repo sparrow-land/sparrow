@@ -100,6 +100,16 @@ describe('CLI reference — the listener trio and the skill', () => {
     expect(flatText(container)).toContain(PRESENCE_RULE);
   });
 
+  // Canonical public homes (SPEC): one installer URL, on every instance.
+  it('installs from the canonical URL, never a `<your-server>` placeholder', () => {
+    const { container } = render(<Cli />);
+    const install = [...container.querySelectorAll('.terminal code')]
+      .map((c) => c.textContent ?? '')
+      .find((t) => t.includes('install.sh'));
+    expect(install).toBe('curl -fsSL https://sparrow.land/install.sh | sh');
+    expect(flatText(container)).not.toContain('<your-server>');
+  });
+
   it('uses a neutral example origin, never the marketing host', () => {
     const { container } = render(<Cli />);
     const text = flatText(container);

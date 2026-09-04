@@ -1,6 +1,7 @@
-import { Link, NavLink } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { Logo } from './Logo.js';
 import { SkipLink } from './SkipLink.js';
+import { docsUrl } from '../lib/docsUrl.js';
 
 export const GITHUB_URL = 'https://github.com/sparrow-land/sparrow';
 
@@ -15,18 +16,15 @@ export function SiteHeader() {
           <Logo size={22} />
         </Link>
         <nav className="flex items-center gap-1 text-sm">
-          <NavLink
-            to="/docs"
-            className={({ isActive }) =>
-              `rounded-md px-3 py-1.5 transition-colors ${
-                isActive
-                  ? 'text-[var(--sparrow-accent)]'
-                  : 'text-[var(--sparrow-muted)] hover:text-[var(--sparrow-text)]'
-              }`
-            }
+          {/* The docs have one home and it is not this instance (SPEC:
+              *Canonical public homes*) — link straight there, never through
+              the local `/docs` redirect. */}
+          <a
+            href={docsUrl()}
+            className="rounded-md px-3 py-1.5 text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)]"
           >
             Docs
-          </NavLink>
+          </a>
           <a
             href={GITHUB_URL}
             target="_blank"

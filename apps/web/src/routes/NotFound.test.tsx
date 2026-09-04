@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { App } from '../App.js';
 import { useFetch, restoreFetch, errorJson } from '../test/apiStub.js';
 import { DEFAULT_TITLE } from '../lib/title.js';
+import { docsUrl } from '../lib/docsUrl.js';
 
 /**
  * The SPA half of issue #35. The server's catch-all now hands the HTML shell to
@@ -42,6 +43,16 @@ describe('unknown routes render the app 404 page', () => {
       expect(screen.getByRole('link', { name: /back home/i })).toBeInTheDocument();
     },
   );
+
+  // The docs are not on this instance any more, so the way out is the real one.
+  it('sends "Read the docs" to the canonical docs home, not this instance', async () => {
+    renderAt('/totally-bogus');
+    await screen.findByRole('heading', { level: 1, name: /this page isn’t here/i });
+    expect(screen.getByRole('link', { name: /read the docs/i })).toHaveAttribute(
+      'href',
+      docsUrl(),
+    );
+  });
 
   it('titles the tab so a lost visitor can see where they are', async () => {
     renderAt('/totally-bogus');

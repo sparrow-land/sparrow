@@ -1,8 +1,12 @@
-import { Link } from 'react-router-dom';
 import { Logo } from './Logo.js';
 import { GITHUB_URL } from './SiteHeader.js';
+import { docsUrl } from '../lib/docsUrl.js';
 
-/** Shared footer: docs links, GitHub, license, self-host pointer. */
+/**
+ * Shared footer: docs links, GitHub, license, self-host pointer. The docs links
+ * are absolute (SPEC: *Canonical public homes*) — this instance only redirects
+ * `/docs`, so a router `<Link>` would bounce the reader back out anyway.
+ */
 export function SiteFooter() {
   return (
     <footer className="border-t border-[var(--sparrow-border)]">
@@ -15,15 +19,15 @@ export function SiteFooter() {
         </div>
 
         <FooterCol title="Docs">
-          <FooterLink to="/docs">Getting started</FooterLink>
-          <FooterLink to="/docs/cli">CLI</FooterLink>
-          <FooterLink to="/docs/mcp">MCP</FooterLink>
-          <FooterLink to="/docs/api">REST API</FooterLink>
+          <FooterLink href={docsUrl()}>Getting started</FooterLink>
+          <FooterLink href={docsUrl('cli')}>CLI</FooterLink>
+          <FooterLink href={docsUrl('mcp')}>MCP</FooterLink>
+          <FooterLink href={docsUrl('api')}>REST API</FooterLink>
         </FooterCol>
 
         <FooterCol title="Run it">
-          <FooterLink to="/docs/self-hosting">Self-hosting</FooterLink>
-          <FooterLink to="/docs/concepts">Concepts</FooterLink>
+          <FooterLink href={docsUrl('self-hosting')}>Self-hosting</FooterLink>
+          <FooterLink href={docsUrl('concepts')}>Concepts</FooterLink>
           <FooterExtLink href={GITHUB_URL}>GitHub</FooterExtLink>
         </FooterCol>
 
@@ -53,12 +57,12 @@ function FooterCol({ title, children }: { title: string; children: React.ReactNo
   );
 }
 
-function FooterLink({ to, children }: { to: string; children: React.ReactNode }) {
+function FooterLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
     <li>
-      <Link to={to} className="text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)]">
+      <a href={href} className="text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)]">
         {children}
-      </Link>
+      </a>
     </li>
   );
 }

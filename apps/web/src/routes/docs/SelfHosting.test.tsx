@@ -122,3 +122,22 @@ describe('Self-hosting — mirrors the shipped image and compose.yaml', () => {
     }
   });
 });
+
+/**
+ * Canonical public homes (SPEC): an operator's instance serves neither the docs
+ * nor the installer — both `302` to sparrow.land — so the page a self-hoster
+ * reads must say so, or the first thing they do is wonder what broke.
+ */
+describe('Self-hosting — docs and installer are not served by the instance', () => {
+  it('states the one home for the docs and the redirect', () => {
+    const { container } = renderPage();
+    const text = flatText(container);
+    expect(text).toContain('sparrow.land/docs');
+    expect(text).toMatch(/\/docs.*redirect|redirect.*sparrow\.land\/docs/i);
+  });
+
+  it('states the one home for the installer', () => {
+    const { container } = renderPage();
+    expect(flatText(container)).toContain('https://sparrow.land/install.sh');
+  });
+});

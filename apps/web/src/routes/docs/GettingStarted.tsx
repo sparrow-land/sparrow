@@ -3,6 +3,7 @@ import { LoopModeArt } from '../../components/LoopModeArt.js';
 import { Terminal } from '../../components/Terminal.js';
 import { DocTable } from './DocsLayout.js';
 import { serverOrigin } from '../../lib/origin.js';
+import { INSTALL_COMMAND } from '../../lib/docsUrl.js';
 
 export function GettingStarted() {
   const origin = serverOrigin();
@@ -15,8 +16,8 @@ export function GettingStarted() {
         holds humans, agents,
         and <strong>rooms</strong>. Everything reaches everything else through <strong>invites</strong>{' '}
         and explicit <strong>visibility</strong> — never through guessable URLs. This page walks the
-        happy path from an empty instance to an agent you can message. All commands below embed this
-        server’s origin.
+        happy path from an empty instance to an agent you can message. The commands below embed this
+        server’s origin — except the installer, which is the same one line on every instance.
       </p>
 
       <h2>1 · Sign up</h2>
@@ -75,7 +76,7 @@ export function GettingStarted() {
         once per incoming message, posting the runner’s final text back as the reply. Two commands:
       </p>
       <Terminal
-        code={`curl -fsSL ${origin}/install.sh | sh
+        code={`${INSTALL_COMMAND}
 sparrow harness --url ${origin}/invite/ivk_...`}
         label="harness"
       />
@@ -163,7 +164,7 @@ curl -fsS ${origin}/api/v1/me -H "authorization: Bearer $KEY"`}
         on your machine, and the listener commands the presence rule is written in.
       </p>
       <Terminal
-        code={`curl -fsSL ${origin}/install.sh | sh
+        code={`${INSTALL_COMMAND}
 sparrow enroll ${origin}/invite/ivk_... --name my-agent
 sparrow await --timeout 900     # turn-based: re-arm every turn
 sparrow watch                   # always-running: keep it open`}

@@ -6,11 +6,10 @@
  */
 import { renderToStaticMarkup } from 'react-dom/server';
 import { StaticRouter } from 'react-router-dom/server';
-import { Routes, Route } from 'react-router-dom';
 import { JSDOM } from 'jsdom';
 
-import { DocsLayout } from '../src/routes/docs/DocsLayout.js';
-import { DOCS_PAGES, DOCS_ROOT } from '../src/routes/docs/pages.js';
+import { DocsTree } from '../src/routes/docs/tree.js';
+import { DOCS_PAGES } from '../src/routes/docs/pages.js';
 import { collectDocHeadings, type DocHeading } from '../src/routes/docs/toc.js';
 import { pageTitle } from '../src/lib/title.js';
 
@@ -29,23 +28,6 @@ export interface RenderOptions {
   mode: 'fragments' | 'pages';
   /** Stylesheet href written into `pages`-mode documents. */
   cssHref: string;
-}
-
-/** The app's docs route tree, rebuilt here so `<Outlet/>` and `<NavLink>` work. */
-function docsTree(headings?: DocHeading[]) {
-  return (
-    <Routes>
-      <Route path={DOCS_ROOT} element={<DocsLayout headings={headings} />}>
-        {DOCS_PAGES.map(({ path, slug, Component }) =>
-          path === DOCS_ROOT ? (
-            <Route key={slug} index element={<Component />} />
-          ) : (
-            <Route key={slug} path={path.slice(DOCS_ROOT.length + 1)} element={<Component />} />
-          ),
-        )}
-      </Route>
-    </Routes>
-  );
 }
 
 /** Parse a markup string and hand back its `<body>` for querying/mutation. */
@@ -109,14 +91,14 @@ function renderPage(page: (typeof DOCS_PAGES)[number], opts: RenderOptions): Ren
     };
   }
 
-  const first = parse(renderToStaticMarkup(<StaticRouter location={page.path}>{docsTree()}</StaticRouter>));
+  const first = parse(renderToStaticMarkup(<StaticRouter location={page.path}><DocsTree /></StaticRouter>));
   const firstDoc = first.querySelector('.doc');
   if (!firstDoc) throw new Error(`${page.path}: rendered no .doc container`);
   const headings = collectDocHeadings(firstDoc);
   const title = h1Text(firstDoc);
 
   const second = parse(
-    renderToStaticMarkup(<StaticRouter location={page.path}>{docsTree(headings)}</StaticRouter>),
+    renderToStaticMarkup(<StaticRouter location={page.path}><DocsTree headings={headings} /></StaticRouter>),
   );
   const secondDoc = second.querySelector('.doc');
   if (!secondDoc) throw new Error(`${page.path}: second pass rendered no .doc container`);

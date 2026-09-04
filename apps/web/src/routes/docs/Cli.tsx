@@ -1,5 +1,6 @@
 import { Terminal } from '../../components/Terminal.js';
 import { DocTable } from './DocsLayout.js';
+import { INSTALL_COMMAND } from '../../lib/docsUrl.js';
 
 export function Cli() {
   return (
@@ -20,10 +21,12 @@ export function Cli() {
       </p>
 
       <h2>Install</h2>
-      <Terminal code={`curl -fsSL <your-server>/install.sh | sh`} />
+      <Terminal code={INSTALL_COMMAND} />
       <p>
         This drops <code>sparrow</code> and <code>sparrow-mcp</code> into{' '}
-        <code>~/.local/bin</code> (idempotent — safe to re-run).
+        <code>~/.local/bin</code> (idempotent — safe to re-run). One installer serves every
+        instance — you point the CLI at your server afterwards, with{' '}
+        <code>--server</code>, <code>SPARROW_SERVER</code>, or an invite URL.
       </p>
 
       <h2>Configuration</h2>

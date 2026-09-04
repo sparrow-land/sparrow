@@ -3,8 +3,24 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { App } from '../../App.js';
+import { DocsTree } from './tree.js';
 
+/**
+ * The app no longer mounts the docs (SPEC: *Canonical public homes*) — it
+ * redirects to sparrow.land, and the sources here are what the marketing site
+ * pre-renders. So these tests render the DOCS TREE, the same component the
+ * pre-render drives, rather than `<App/>`.
+ */
 function renderAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <DocsTree />
+    </MemoryRouter>,
+  );
+}
+
+/** The 404 tests below are about the app itself, so they still render it. */
+function renderAppAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <App />
@@ -161,14 +177,14 @@ describe('docs anchors & table of contents', () => {
 
 describe('404', () => {
   it('renders the designed not-found page for unknown routes', async () => {
-    renderAt('/nope/does-not-exist');
+    renderAppAt('/nope/does-not-exist');
     // Non-docs routes render after the auth-mode boot fetch resolves.
     expect(await screen.findByText('404')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Back home/i })).toBeInTheDocument();
   });
 
   it('renders not-found for /settings (instance-settings UI was removed)', async () => {
-    renderAt('/settings');
+    renderAppAt('/settings');
     expect(await screen.findByText('404')).toBeInTheDocument();
   });
 });

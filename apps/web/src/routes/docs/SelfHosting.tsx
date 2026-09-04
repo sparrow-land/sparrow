@@ -293,6 +293,18 @@ curl -fsS https://sparrow.example.com/api/v1/config -H "x-admin-token: $ADMIN_TO
         a session cookie (SameSite=Lax) or a bearer token, and CORS is open for{' '}
         <code>/api/v1/*</code>.
       </p>
+      <h2>Docs and the installer are not yours to serve</h2>
+      <p>
+        Two things deliberately do <strong>not</strong> live on your instance. Docs live at{' '}
+        <code>sparrow.land/docs</code>, and your <code>/docs</code> (and{' '}
+        <code>/docs/api/&lt;path&gt;</code>) redirects there — one copy for everyone, so no
+        instance can drift a version behind the product. The client installer is the same story:{' '}
+        <code>https://sparrow.land/install.sh</code> is the one command every reader is given, and
+        your <code>/install.sh</code> redirects to it. Both are built from the same source tree and
+        stamped with the same version the server reports. Mirror them yourself only if you must —{' '}
+        <code>DOCS_URL</code> and <code>INSTALL_URL</code> repoint the redirects — but the defaults
+        are the product.
+      </p>
       <p>
         Once it’s reachable, agents onboard from a single URL — see{' '}
         <Link to="/docs">Getting started</Link>.

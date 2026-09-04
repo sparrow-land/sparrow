@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { SiteHeader, GITHUB_URL } from './SiteHeader.js';
 import { SiteFooter } from './SiteFooter.js';
+import { docsUrl } from '../lib/docsUrl.js';
 
 /**
  * The public repo moved to github.com/sparrow-land/sparrow. `GITHUB_URL` is the
@@ -40,5 +41,48 @@ describe('site chrome — the public repo URL', () => {
       'href',
       'https://github.com/sparrow-land/sparrow/issues',
     );
+  });
+});
+
+/**
+ * Canonical public homes (SPEC): the docs have ONE address, so the chrome links
+ * to it directly rather than through this instance's `/docs`, which is now just
+ * a redirect. Router `<Link>`s would keep the reader inside the SPA for a beat
+ * and then bounce them out — these are plain external anchors.
+ */
+describe('site chrome — docs point at the one canonical home', () => {
+  function hrefs(container: HTMLElement): string[] {
+    return [...container.querySelectorAll('a')].map((a) => a.getAttribute('href') ?? '');
+  }
+
+  it('the header Docs link is the absolute docs URL', () => {
+    const { container } = render(
+      <MemoryRouter>
+        <SiteHeader />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('link', { name: 'Docs' })).toHaveAttribute('href', docsUrl());
+    expect(hrefs(container).some((h) => h === '/docs' || h.startsWith('/docs/'))).toBe(false);
+  });
+
+  it('every footer docs link is an absolute sparrow.land page', () => {
+    const { container } = render(
+      <MemoryRouter>
+        <SiteFooter />
+      </MemoryRouter>,
+    );
+    const expected: Array<[string, string]> = [
+      ['Getting started', docsUrl()],
+      ['CLI', docsUrl('cli')],
+      ['MCP', docsUrl('mcp')],
+      ['REST API', docsUrl('api')],
+      ['Self-hosting', docsUrl('self-hosting')],
+      ['Concepts', docsUrl('concepts')],
+    ];
+    for (const [name, href] of expected) {
+      expect(screen.getByRole('link', { name })).toHaveAttribute('href', href);
+    }
+    // Nothing in the chrome still points at this instance's /docs.
+    expect(hrefs(container).some((h) => h === '/docs' || h.startsWith('/docs/'))).toBe(false);
   });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { GettingStarted } from './GettingStarted.js';
+import { serverOrigin } from '../../lib/origin.js';
 
 function renderPage() {
   return render(
@@ -87,8 +88,31 @@ describe('Getting started — connecting an agent', () => {
   it('shows the two-command harness block', () => {
     const { container } = renderPage();
     const code = terminalContaining(container, 'sparrow harness');
-    expect(code).toContain('/install.sh | sh');
+    expect(code).toContain('curl -fsSL https://sparrow.land/install.sh | sh');
     expect(code).toMatch(/sparrow harness --url http.*\/invite\/ivk_/);
+  });
+
+  /**
+   * Canonical public homes (SPEC): the installer has ONE address. A per-instance
+   * `curl <this server>/install.sh` taught every reader a different command —
+   * and an instance does not serve the file at all any more, it redirects.
+   */
+  it('installs from the one canonical URL, never this instance', () => {
+    const { container } = renderPage();
+    const blocks = [...container.querySelectorAll('.terminal code')].map((c) => c.textContent ?? '');
+    const installs = blocks.filter((t) => t.includes('install.sh'));
+    expect(installs.length).toBeGreaterThan(0);
+    for (const code of installs) {
+      expect(code).toContain('curl -fsSL https://sparrow.land/install.sh | sh');
+      expect(code).not.toContain(`${serverOrigin()}/install.sh`);
+    }
+  });
+
+  it('keeps instance-relative examples for what the instance really owns', () => {
+    const { container } = renderPage();
+    const blocks = [...container.querySelectorAll('.terminal code')].map((c) => c.textContent ?? '');
+    expect(blocks.some((t) => t.includes(`${serverOrigin()}/api/v1/`))).toBe(true);
+    expect(blocks.some((t) => t.includes(`${serverOrigin()}/invite/`))).toBe(true);
   });
 
   it('states the harness robustness facts and the cron flag', () => {

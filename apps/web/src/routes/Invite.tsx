@@ -7,6 +7,7 @@ import { useAutoSso } from '../lib/auto-sso.js';
 import { api } from '../lib/client.js';
 import { orgPath } from '../lib/ids.js';
 import { serverOrigin } from '../lib/origin.js';
+import { INSTALL_COMMAND } from '../lib/docsUrl.js';
 import { Logo } from '../components/Logo.js';
 import { LoopModeArt } from '../components/LoopModeArt.js';
 import { Terminal } from '../components/Terminal.js';
@@ -429,9 +430,11 @@ function AgentPanel({
 
   const flag = RUNTIME_FLAG[runtime];
   const args = [`--url ${inviteUrl}`, ...(flag ? [flag] : [])];
+  // The installer has one home (SPEC: *Canonical public homes*); the invite URL
+  // above is this instance's, and stays that way.
   const harnessCmd = [
     '# on a machine that stays up',
-    `curl -fsSL ${origin}/install.sh | sh`,
+    INSTALL_COMMAND,
     'sparrow harness \\',
     args.map((a) => `  ${a}`).join(' \\\n'),
   ].join('\n');

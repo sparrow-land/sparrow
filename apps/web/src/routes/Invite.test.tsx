@@ -279,7 +279,10 @@ describe('Invite landing page (/invite/:token)', () => {
     // Harness: the two-command block, embedding this invite URL.
     const cmd = terminalCode('sparrow harness');
     expect(cmd).toContain('# on a machine that stays up');
-    expect(cmd).toContain('/install.sh | sh');
+    // One installer home (SPEC: *Canonical public homes*): the canonical URL,
+    // never this instance's origin — while the invite URL stays the instance's.
+    expect(cmd).toContain('curl -fsSL https://sparrow.land/install.sh | sh');
+    expect(cmd).not.toMatch(/localhost.*install\.sh|http:\/\/[^\s]*\/install\.sh/);
     expect(cmd).toMatch(/sparrow harness \\\n {2}--url http.*\/invite\/ivk_1/);
 
     // Inline: the bare invite URL to paste into an open agent.

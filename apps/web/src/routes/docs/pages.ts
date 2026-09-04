@@ -14,6 +14,7 @@
  */
 
 import type { ComponentType } from 'react';
+import { DOCS_ROOT } from './paths.js';
 import { GettingStarted } from './GettingStarted.js';
 import { Concepts } from './Concepts.js';
 import { Cli } from './Cli.js';
@@ -50,8 +51,12 @@ export const DOCS_PAGES: DocsPage[] = [
   },
 ];
 
-/** The docs root — the one page mounted as react-router's `index` route. */
-export const DOCS_ROOT = '/docs';
+/**
+ * The docs root — the one page rendered as the tree's `index` route. Defined in
+ * the data-only `paths.ts` (which the app's redirect uses without pulling these
+ * pages in) and re-exported here so both halves name one value.
+ */
+export { DOCS_ROOT };
 
 /** Find the page a pathname is on, tolerating a trailing slash. */
 export function docsPageForPath(pathname: string): DocsPage | undefined {

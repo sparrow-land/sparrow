@@ -333,7 +333,12 @@ describe('InviteDialog', () => {
       await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
       const text = terminalText();
       expect(text).toContain('# on a machine that stays up');
-      expect(text).toContain('curl -fsSL https://sparrow.example.com/install.sh | sh');
+      // The installer has ONE home (SPEC: *Canonical public homes*) — this
+      // instance does not serve `install.sh`, it redirects to sparrow.land, and
+      // printing its own origin would teach every reader a different command.
+      expect(text).toContain('curl -fsSL https://sparrow.land/install.sh | sh');
+      expect(text).not.toContain('https://sparrow.example.com/install.sh');
+      // The invite, by contrast, IS this instance's — it keeps its origin.
       expect(text).toContain(`--url ${INVITE_URL}`);
     });
 

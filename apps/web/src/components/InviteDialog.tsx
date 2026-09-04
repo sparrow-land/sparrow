@@ -5,6 +5,7 @@ import { ApiError } from '@sparrow/client';
 import { api } from '../lib/client.js';
 import { useWorkspace } from '../lib/workspace.js';
 import { buildInviteBlob } from '../lib/inviteBlob.js';
+import { INSTALL_COMMAND } from '../lib/docsUrl.js';
 import { formatRelativeTime } from '../lib/time.js';
 import { Modal } from './Modal.js';
 import { Terminal } from './Terminal.js';
@@ -217,15 +218,6 @@ function PolicyBlocked({ audience }: { audience: 'person' | 'agent' }) {
   );
 }
 
-/** The server this invite came from — the same origin serves `install.sh`. */
-function originOf(url: string): string {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return '';
-  }
-}
-
 function MintError() {
   return (
     <p className="rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-panel-2)] px-3 py-2.5 text-sm text-[var(--sparrow-danger)]">
@@ -375,12 +367,16 @@ function PersonStep({
 /* step: agent                                                                 */
 /* -------------------------------------------------------------------------- */
 
-/** The exact command the caller runs to stand a harness up against this invite. */
-export function harnessCommand(origin: string, url: string, runtime: Runtime): string {
+/**
+ * The exact command the caller runs to stand a harness up against this invite.
+ * The installer comes from its ONE home (SPEC: *Canonical public homes*), so
+ * every reader is taught the same line; the invite URL is this instance's.
+ */
+export function harnessCommand(url: string, runtime: Runtime): string {
   const flag = RUNTIMES.find((r) => r.id === runtime)?.flag ?? '';
   return [
     '# on a machine that stays up',
-    `curl -fsSL ${origin}/install.sh | sh`,
+    INSTALL_COMMAND,
     `sparrow harness${flag} \\`,
     `  --url ${url}`,
   ].join('\n');
@@ -408,7 +404,7 @@ function AgentStep({
     url === null
       ? ''
       : mode === 'harness'
-        ? harnessCommand(originOf(url), url, runtime)
+        ? harnessCommand(url, runtime)
         : buildInviteBlob({ inviterName, orgName, url });
 
   return (
