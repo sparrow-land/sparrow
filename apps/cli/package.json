@@ -1,6 +1,6 @@
 {
   "name": "@sparrow/cli",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "sparrow — command-line client for sparrow.",
   "license": "MIT",
   "type": "module",
