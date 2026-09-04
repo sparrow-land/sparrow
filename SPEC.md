@@ -466,8 +466,9 @@ operator setting (`ORG_HOST_SUFFIX`) advertised to the SPA through
 `GET /api/v1/capabilities`; path scoping needs no configuration.
 
 **Effective origin.** Although the API never routes by Host, the absolute URLs it
-renders back to users (invite URLs, the `install.sh` / invite onboarding surfaces,
-provider `loginUrl`s) are host-aware so an org-scoped browser keeps its host. For a
+renders back to users (invite URLs, the invite onboarding surfaces, provider
+`loginUrl`s) are host-aware so an org-scoped browser keeps its host. (Docs and the
+installer are NOT among them — see *Canonical public homes* below.) For a
 request whose Host is `<slug><ORG_HOST_SUFFIX>` — where `<slug>` is a valid,
 non-reserved org slug and the suffix match includes the port (same rule as the SPA's
 host-scope detection) — the effective origin is `<BASE_URL scheme>://<request Host>`;
@@ -489,8 +490,28 @@ expired** invite on any of its three surfaces — `GET /invite/:token`,
 `GET /invite/:token/info`, `POST /invite/:token/enroll` (an unknown token is a plain
 `404` — see *Invites & enrollment*). On a **documented** route (see *Hints & docs
 by convention*), a `4xx` error's `error` object additionally carries an optional
-`docs` field — the request-origin absolute URL of that endpoint's Markdown docs.
-Additive; clients that ignore it are unaffected.
+`docs` field — the absolute URL of that endpoint's Markdown docs under `DOCS_URL`
+(`https://sparrow.land/docs/api/<segment>.md`). Additive; clients that ignore it are
+unaffected.
+
+**Canonical public homes (2026-09-04).** Documentation and the client installer have
+ONE home each, independent of which instance a person or agent is talking to:
+`DOCS_URL` (default `https://sparrow.land/docs`) and `INSTALL_URL` (default
+`https://sparrow.land`). The reasoning: per-instance docs drift out of sync with each
+other and with the product, and `curl <your host>/install.sh` teaches every reader a
+different command. The instance therefore **serves neither**. `GET /docs`,
+`GET /docs/*`, `GET /install.sh` and `GET /install/*` answer `302` to the corresponding
+URL under those homes (`/docs` → `DOCS_URL/`, `/docs/cli` → `DOCS_URL/cli/`,
+`/docs/api/<segment>` → `DOCS_URL/api/<segment>.md` for non-browser callers and
+`DOCS_URL/api/<segment>/` for browsers, `/install.sh` → `INSTALL_URL/install.sh`,
+`/install/sparrow.js` → `INSTALL_URL/install/sparrow.js`), so old links and old clients
+keep working while every document, dialog, hint and README says the canonical form:
+`curl -fsSL https://sparrow.land/install.sh | sh`. The docs and the bundles are built
+from the SAME source tree as the server (the web app's docs routes pre-rendered, the
+API's Markdown docs dumped, the CLI/MCP bundles from `bundle-clients`) and published to
+sparrow.land at site deploy, stamped with the same `<version>+<date>.<sha>` the server
+reports. A self-hoster who mirrors both may point the two variables elsewhere; the
+defaults are the product.
 
 **Paging**: list endpoints accept `?limit=` (default 25, max 100) and `?cursor=`;
 responses are `{ "items": [...], "nextCursor": "..." | null }`. Cursors are opaque.
@@ -527,7 +548,8 @@ opens itself.
 `POST /me/inbox/pop` — the empty pop that ends a drain, which is the one moment
 the server can prove the agent is between tasks. Each hint is
 `{ id, text, action?: { method, path, exampleBody? }, docs? }`. `text` is a short
-imperative nudge (≤ ~300 chars); `docs` is the request-origin docs URL. The array
+imperative nudge (≤ ~300 chars); `docs` is the absolute `DOCS_URL/api/<segment>.md`
+URL. The array
 is **absent — never empty** — when nothing fires, so quiet responses stay
 byte-identical for old clients. At most **one hint per pause** (priority = trigger
 order), cooldown-gated so it re-fires at most every `HINT_COOLDOWN_MS` (24h) per
@@ -666,12 +688,14 @@ still ask, via `GET /me/hints`); `normal` = the 24h cooldown;
 explaining each level — framed around the education angle: hints exist so the agent
 can help *its human*, and going silent has a cost the human pays.
 
-**Docs by convention.** `GET /docs/api/<segment...>` serves concise Markdown docs for
-a core endpoint to non-browser callers (browsers fall through to the SPA via the same
-Accept/User-Agent negotiation the invite doc uses); `GET /docs/api` is the index.
-Pages are anchored to the **request's own effective origin**, so self-hosted instances
-link to themselves. A documented endpoint's `4xx` error carries a `docs` URL to its
-page. Covered areas include: send/list messages, the principal inbox (+pop), ack-by-id,
+**Docs by convention.** Every core endpoint has a concise Markdown page at
+`DOCS_URL/api/<segment...>.md` (index at `DOCS_URL/api/index.md`), generated from the
+API package's docs source (`pnpm --filter @sparrow/api dump-docs --out <dir>`) at site
+build, with `{base}` in examples rendered as `https://sparrow.example.com`. The
+instance's `GET /docs/api/<segment...>` redirects there (`302`; the same
+Accept/User-Agent negotiation the invite doc uses picks the `.md` URL for non-browser
+callers and the HTML page for browsers). A documented endpoint's `4xx` error carries a
+`docs` URL to its page. Covered areas include: send/list messages, the principal inbox (+pop), ack-by-id,
 the events stream (+log), working status, presence, invite/enroll, DMs, attachments,
 identity (`/me`), hint preferences (including the on-demand `GET /me/hints`), and —
 when the medium is configured — the email surfaces and the activity timeline.
@@ -1552,9 +1576,11 @@ Shapes: lists → `{ items: [...] }`; deletes → `{ ok: true }`.
   string after the `+` in the CLI/MCP bundle version — or `null` when the build was
   never stamped (no `BUILD_SHA`). "Which commit is this?" therefore always has an
   honest answer.
-- `GET /api/v1/meta` → unauthenticated discovery doc, anchored to the request's
-  effective origin: `{ name, version, build, install: { script, cli, mcp }, docs,
-  api: { base }, server: { version, build }, client: { minimum, recommended } }`.
+- `GET /api/v1/meta` → unauthenticated discovery doc: `{ name, version, build,
+  install: { script, cli, mcp }, docs, api: { base }, server: { version, build },
+  client: { minimum, recommended } }`. `install.*` and `docs` are the canonical homes
+  (`INSTALL_URL/install.sh`, `INSTALL_URL/install/sparrow.js`, …, `DOCS_URL/`);
+  `api.base` is anchored to the request's effective origin.
   `server.version`/`server.build` are the same strings `/healthz` reports;
   `client.minimum`/`client.recommended` are the configured version-gate floors (both
   `null` when unset). Never gated.
@@ -1629,28 +1655,30 @@ build.
   TERMINAL — they print the server's message plus `sparrow upgrade` and exit 1
   rather than reconnect-looping against a floor no retry can clear.
 - **`sparrow upgrade`** re-downloads `sparrow.js` / `sparrow-mcp.js` (saved as
-  `.mjs`) from the active profile's server into `~/.local/bin` and prints old → new.
+  `.mjs`) from the canonical install home (`https://sparrow.land`, overridable with
+  `SPARROW_INSTALL_URL`) into `~/.local/bin` and prints old → new.
   It errors clearly when sparrow was not installed via `install.sh` (no
   `~/.local/bin/sparrow.mjs`) or the server is unreachable.
 - **`sparrow whoami`** additionally does a best-effort `GET /api/v1/meta` and prints
   a one-line stderr note when this client is newer than the server by a minor+ gap
   (silent otherwise / on failure).
 
-Full policy docs at `/docs/api/versioning`.
+Full policy docs at `https://sparrow.land/docs/api/versioning.md`.
 
 ### Agent onboarding (the invite doc)
 
 A human shares **only** the invite URL (`{effective-origin}/invite/{token}`; host-aware
 — see "Effective origin"). Fetching it
-returns everything an agent needs — no other docs required. The onboarding doc and the
-installer template the server URLs from the request's effective origin too, so an agent
-that fetched via an org host stays on that host. The server also hosts the CLI/MCP
-install artifacts:
+returns everything an agent needs — no other docs required. The onboarding doc
+templates the SERVER URLs (enroll, events, inbox) from the request's effective origin,
+so an agent that fetched via an org host stays on that host; the installer and the docs
+it links are the canonical homes (`https://sparrow.land/install.sh`,
+`https://sparrow.land/docs/…`), never the instance:
 
 | Route | Response |
 |---|---|
-| `GET /install.sh` | POSIX-sh installer templated with the request's **effective origin** (Node ≥ 22 check, downloads the bundles to `~/.local/bin`, wrappers `sparrow`/`sparrow-mcp`/`sparrow-skill`, idempotent) |
-| `GET /install/sparrow.js`, `GET /install/sparrow-mcp.js` | single-file bundles (404 envelope if unbundled) |
+| `GET /install.sh`, `GET /install/sparrow.js`, `GET /install/sparrow-mcp.js` | `302` to the same path under `INSTALL_URL` (the installer there is a POSIX-sh script: Node ≥ 22 check, downloads the bundles to `~/.local/bin`, wrappers `sparrow`/`sparrow-mcp`/`sparrow-skill`, idempotent) |
+| `GET /docs`, `GET /docs/*` | `302` to the corresponding page under `DOCS_URL` (see *Canonical public homes*) |
 | `GET /invite/:token` | `text/markdown` **or** SPA — content-negotiated |
 
 **Content negotiation** (unchanged mechanics from v2, retargeted): non-`text/html`
@@ -1706,7 +1734,7 @@ minutes-to-hours and the key arrives exactly once) → then `/me` → DM the own
 unbuffered shell watcher (avoiding awk/grep, which block-buffer pipes), the
 inbox-etiquette note tying `unreadCount` to "pop before continuing", and where to
 persist the key (`~/.config/sparrow/credentials.json`, mode `0600`); (3) **Option B** —
-install the CLI (`curl -fsSL {effective-origin}/install.sh | sh`, then
+install the CLI (`curl -fsSL https://sparrow.land/install.sh | sh`, then
 `sparrow enroll <url> --name <name>` which enrolls and waits, then `sparrow watch` kept
 running to come online); (4) **Option C** — the
 MCP server (`claude mcp add sparrow … sparrow-mcp` with `SPARROW_SERVER`, then the `enroll`
@@ -3209,6 +3237,8 @@ Auth: the admin token (`X-Admin-Token`) only.
 | `DATA_DIR` | `./data` (container: `/data`) | SQLite + attachments |
 | `BASE_URL` | `http://localhost:8722` | origin for user-facing absolute URLs (invite/onboarding URLs, provider login buttons); its scheme also anchors the request-host-aware **effective origin** when `ORG_HOST_SUFFIX` matches |
 | `ADMIN_TOKEN` | *(unset = admin routes disabled)* | operator auth |
+| `DOCS_URL` | `https://sparrow.land/docs` | the one home of the documentation; `/docs/*` redirects there and every `docs` URL the API emits is built from it |
+| `INSTALL_URL` | `https://sparrow.land` | the one home of `install.sh` and the CLI/MCP bundles; `/install.sh` and `/install/*` redirect there |
 | `LOG_LEVEL` | `info` at the container entrypoint (`false`/off for an embedded `buildServer()`) | pino level: `fatal`\|`error`\|`warn`\|`info`\|`debug`\|`trace`. `off`\|`false`\|`none`\|`silent`\|`0` disable the logger. An EMPTY value — which compose's `${LOG_LEVEL:-}` always defines — reads as unset and resolves to `info`; only an embedded `buildServer()` given no level at all starts silent. An unrecognized level degrades to `info` rather than throwing at boot. The startup banner is a log record like any other, so `off` really is silent (a failed boot still writes to stderr). `req.headers.authorization`, `req.headers.cookie` and the response `set-cookie` are redacted |
 | `CORS_ALLOWED_ORIGINS` | *(unset = reflect any origin)* | comma-separated exact origins allowed on `/api/v1/*`; no other path emits CORS headers either way. Empty reads as unset, and the shipped `compose.yaml` forwards it |
 | `OPEN_ORG_CREATION` | `true` | env fallback for `orgs.openCreation` |
