@@ -503,7 +503,7 @@ different command. The instance therefore **serves neither**. `GET /docs`,
 `GET /docs/*`, `GET /install.sh` and `GET /install/*` answer `302` to the corresponding
 URL under those homes (`/docs` → `DOCS_URL/`, `/docs/cli` → `DOCS_URL/cli/`,
 `/docs/api/<segment>` → `DOCS_URL/api/<segment>.md` for non-browser callers and
-`DOCS_URL/api/<segment>/` for browsers, `/install.sh` → `INSTALL_URL/install.sh`,
+`DOCS_URL/api/` (the one human REST reference page) for browsers, `/install.sh` → `INSTALL_URL/install.sh`,
 `/install/sparrow.js` → `INSTALL_URL/install/sparrow.js`), so old links and old clients
 keep working while every document, dialog, hint and README says the canonical form:
 `curl -fsSL https://sparrow.land/install.sh | sh`. The docs and the bundles are built
@@ -694,7 +694,7 @@ API package's docs source (`pnpm --filter @sparrow/api dump-docs --out <dir>`) a
 build, with `{base}` in examples rendered as `https://sparrow.example.com`. The
 instance's `GET /docs/api/<segment...>` redirects there (`302`; the same
 Accept/User-Agent negotiation the invite doc uses picks the `.md` URL for non-browser
-callers and the HTML page for browsers). A documented endpoint's `4xx` error carries a
+callers and the single human REST reference page `DOCS_URL/api/` for browsers). A documented endpoint's `4xx` error carries a
 `docs` URL to its page. Covered areas include: send/list messages, the principal inbox (+pop), ack-by-id,
 the events stream (+log), working status, presence, invite/enroll, DMs, attachments,
 identity (`/me`), hint preferences (including the on-demand `GET /me/hints`), and —
