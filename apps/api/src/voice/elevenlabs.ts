@@ -17,6 +17,17 @@ const STT_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
 const STT_REALTIME_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 /** The vendor's realtime input contract: signed 16-bit LE mono at 16 kHz. */
 const REALTIME_SAMPLE_RATE = 16000;
+/**
+ * The least uncommitted audio a commit may follow, in PCM16 bytes — 0.5 s at
+ * 16 kHz mono (16000 samples/s x 2 bytes = 32000 B/s).
+ *
+ * The vendor REFUSES a commit that follows less than 0.3 s of uncommitted audio
+ * — it answers `commit_throttled` and then CLOSES the socket — so a short
+ * utterance would end in an error instead of a transcript. We top a short
+ * commit up to this floor (the vendor's 0.3 s minimum plus margin) with zero
+ * samples, which are silence and inaudible to the transcriber.
+ */
+const MIN_COMMIT_BYTES = 16000;
 const TTS_URL = 'https://api.elevenlabs.io/v1/text-to-speech';
 /** ElevenLabs' stock default voice, used when no `voice.ttsVoiceId` is configured. */
 export const ELEVENLABS_DEFAULT_VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb';
@@ -72,6 +83,12 @@ class ElevenLabsSttStream extends SttStreamEmitter implements SttStream {
   private open = false;
   private closed = false;
   private failed = false;
+  /** PCM16 bytes pushed since the last commit — what the vendor throttles on. */
+  private uncommittedBytes = 0;
+  /** A commit the vendor has not yet answered with `committed_transcript`. */
+  private commitOutstanding = false;
+  /** Whether the vendor has sent us a single frame of any kind. */
+  private heardFromVendor = false;
 
   constructor(opts: {
     apiKey: string;
@@ -91,17 +108,23 @@ class ElevenLabsSttStream extends SttStreamEmitter implements SttStream {
     }) as (arg?: never) => void);
     this.socket.on('message', ((data: unknown) => this.receive(data)) as (arg?: never) => void);
     this.socket.on('error', (() => this.fail()) as (arg?: never) => void);
-    // A close we did not ask for is a failure, not an ending: the client is
-    // still holding a microphone open and deserves to be told.
-    this.socket.on('close', (() => this.fail()) as (arg?: never) => void);
+    this.socket.on('close', (() => this.vendorClosed()) as (arg?: never) => void);
   }
 
   push(pcm16: Buffer): void {
+    if (this.closed || this.failed) return;
+    this.uncommittedBytes += pcm16.length;
     this.sendFrame(pcm16.toString('base64'), false);
   }
 
   commit(): void {
-    this.sendFrame('', true);
+    if (this.closed || this.failed) return;
+    // Pad a short utterance up to the vendor's floor rather than let it be
+    // throttled and hung up on. Zero samples are silence.
+    const shortfall = Math.max(0, MIN_COMMIT_BYTES - this.uncommittedBytes);
+    this.uncommittedBytes = 0;
+    this.commitOutstanding = true;
+    this.sendFrame(shortfall > 0 ? Buffer.alloc(shortfall).toString('base64') : '', true);
   }
 
   close(): void {
@@ -129,6 +152,9 @@ class ElevenLabsSttStream extends SttStreamEmitter implements SttStream {
 
   /** Map one inbound vendor frame. Anything unrecognized is ignored, not fatal. */
   private receive(data: unknown): void {
+    // Any frame at all — even one we cannot parse — proves the vendor accepted
+    // the handshake and is talking to us.
+    this.heardFromVendor = true;
     if (this.closed || this.failed) return;
     let payload: { message_type?: string; text?: string };
     try {
@@ -141,14 +167,39 @@ class ElevenLabsSttStream extends SttStreamEmitter implements SttStream {
         this.emitText('partial', payload.text ?? '');
         return;
       case 'committed_transcript':
+        this.commitOutstanding = false;
         this.emitText('committed', payload.text ?? '');
         return;
+      // `commit_throttled` should be unreachable now that commits are padded,
+      // but if the vendor ever throttles us anyway the speaker must hear an
+      // error rather than a silence they cannot interpret.
+      case 'commit_throttled':
       case 'input_error':
         this.fail();
         return;
       default:
         return; // session_started, audio acks, future frames
     }
+  }
+
+  /**
+   * The vendor hung up on us. That is a FAILURE when something was lost: a
+   * commit still waiting for its transcript, audio pushed and never committed,
+   * or a vendor that never said anything at all — a rejected key closes the
+   * socket without a single frame, and staying silent there would leave the
+   * speaker watching a dead microphone until the route's cap reaps it. A close
+   * after the vendor answered our last commit is simply the end of the
+   * conversation: surfacing an error there would show the speaker a problem
+   * they do not have and cannot act on.
+   */
+  private vendorClosed(): void {
+    if (this.closed || this.failed) return;
+    if (!this.heardFromVendor || this.commitOutstanding || this.uncommittedBytes > 0) {
+      this.fail();
+      return;
+    }
+    this.closed = true;
+    this.pending.length = 0;
   }
 
   /** Collapse any failure into one `error` + a closed socket. */

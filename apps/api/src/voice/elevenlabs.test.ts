@@ -209,13 +209,60 @@ describe('ElevenLabsVoiceProvider.stream', () => {
     ]);
   });
 
-  it('commit() sends an empty chunk with commit:true', () => {
+  /** The decoded `audio_base_64` of the last frame the provider sent. */
+  const lastAudio = (socket: MockSocket): Buffer =>
+    Buffer.from(String(socket.frames.at(-1)!.audio_base_64), 'base64');
+
+  it('pads a commit that follows too little audio with exactly the shortfall of silence', () => {
+    // The vendor REFUSES a commit under 0.3 s of uncommitted audio
+    // (`commit_throttled`) and then closes the socket, so a short utterance
+    // would otherwise die. Zero samples are silence — inaudible to the
+    // transcriber — so we top the commit up to the 0.5 s floor.
+    const { stream, socket } = openStream();
+    socket.fire('open');
+    stream.push(Buffer.alloc(1000));
+    stream.commit();
+
+    const commitFrame = socket.frames.at(-1)!;
+    expect(commitFrame.commit).toBe(true);
+    expect(commitFrame.message_type).toBe('input_audio_chunk');
+    const padding = lastAudio(socket);
+    expect(padding).toHaveLength(16000 - 1000);
+    expect(padding.every((b) => b === 0)).toBe(true);
+  });
+
+  it('pads a bare commit (no audio at all) up to the whole floor', () => {
     const { stream, socket } = openStream();
     socket.fire('open');
     stream.commit();
-    expect(socket.frames).toEqual([
-      { message_type: 'input_audio_chunk', audio_base_64: '', sample_rate: 16000, commit: true },
-    ]);
+    expect(lastAudio(socket)).toHaveLength(16000);
+  });
+
+  it('sends NO padding once enough audio has been pushed', () => {
+    const { stream, socket } = openStream();
+    socket.fire('open');
+    stream.push(Buffer.alloc(16000));
+    stream.commit();
+    expect(socket.frames.at(-1)).toEqual({
+      message_type: 'input_audio_chunk',
+      audio_base_64: '',
+      sample_rate: 16000,
+      commit: true,
+    });
+  });
+
+  it('counts audio across chunks, and starts counting again after each commit', () => {
+    const { stream, socket } = openStream();
+    socket.fire('open');
+    stream.push(Buffer.alloc(8000));
+    stream.push(Buffer.alloc(8000));
+    stream.commit(); // 16000 pushed → no padding
+    expect(lastAudio(socket)).toHaveLength(0);
+
+    // The counter resets: the next utterance is short again on its own terms.
+    stream.push(Buffer.alloc(2000));
+    stream.commit();
+    expect(lastAudio(socket)).toHaveLength(16000 - 2000);
   });
 
   it('maps partial_transcript → partial and committed_transcript → committed', () => {
@@ -255,12 +302,72 @@ describe('ElevenLabsVoiceProvider.stream', () => {
     expect(errors[0]).toBeInstanceOf(VoiceVendorError);
   });
 
-  it('maps a vendor-initiated close to a VoiceVendorError', () => {
-    const { socket, errors } = openStream();
+  it('maps a vendor close with audio still uncommitted to a VoiceVendorError', () => {
+    const { stream, socket, errors } = openStream();
     socket.fire('open');
+    stream.push(Buffer.alloc(320)); // words the speaker will never get back
     socket.fire('close', 1006);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(VoiceVendorError);
+  });
+
+  it('maps a vendor close while a commit is OUTSTANDING to a VoiceVendorError', () => {
+    const { stream, socket, errors } = openStream();
+    socket.fire('open');
+    stream.push(Buffer.alloc(20000));
+    stream.commit(); // asked for a transcript...
+    socket.fire('close', 1000); // ...and never got one
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(VoiceVendorError);
+  });
+
+  it('a vendor close AFTER the last commit was answered is a clean ending', () => {
+    // The vendor hangs up once it has nothing left to say. There is no loss
+    // here, so the client must not be shown an error it cannot act on.
+    const { stream, socket, errors, committed } = openStream();
+    socket.fire('open');
+    stream.push(Buffer.alloc(20000));
+    stream.commit();
+    socket.vendorSays({ message_type: 'committed_transcript', text: 'all done' });
+    socket.fire('close', 1000);
+    expect(committed).toEqual(['all done']);
+    expect(errors).toEqual([]);
+  });
+
+  it('a close before the vendor has said ANYTHING is a failure (bad key, rejected handshake)', () => {
+    // The socket opened at the TCP level and the vendor then hung up without a
+    // single frame — what a rejected key looks like. Staying silent here would
+    // leave the speaker watching a dead microphone until the route's cap reaps
+    // it ten minutes later.
+    const { socket, errors } = openStream();
+    socket.fire('open');
+    socket.fire('close', 1000);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(VoiceVendorError);
+  });
+
+  it('a close after session_started with nothing pushed is a clean ending', () => {
+    // The vendor accepted us and then the session simply ended with nothing
+    // said — no loss, so no error.
+    const { socket, errors } = openStream();
+    socket.fire('open');
+    socket.vendorSays({ message_type: 'session_started', session_id: 'sess_1' });
+    socket.fire('close', 1000);
+    expect(errors).toEqual([]);
+  });
+
+  it('maps commit_throttled to a VoiceVendorError (padding should prevent it)', () => {
+    // Unreachable once commits are padded — but if the vendor ever throttles
+    // us anyway, the speaker must hear an error rather than silence.
+    const { socket, errors } = openStream();
+    socket.fire('open');
+    socket.vendorSays({
+      message_type: 'commit_throttled',
+      error: 'Commit request ignored: only 0.10s of uncommitted audio.',
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(VoiceVendorError);
+    expect(errors[0]!.message).toBe('voice vendor request failed');
   });
 
   it('a close() we asked for is NOT an error, and is idempotent', () => {

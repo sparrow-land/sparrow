@@ -2742,6 +2742,12 @@ interface TtsProvider {
 }
 ```
 
+The `elevenlabs` realtime STT session pads a commit that follows less than
+0.5 s of audio with silence (the vendor refuses a commit under 0.3 s with
+`commit_throttled` and closes the socket), and treats a vendor close after an
+answered commit as a clean ending — only a close with a commit outstanding is a
+failure.
+
 `elevenlabs` implements `synthesizeStream` (`/v1/text-to-speech/{voice}/stream`);
 `/speech` prefers it — the first bytes reach the listener while the vendor is still
 speaking — tee-ing the stream into a `.part` file that becomes the cache entry only
@@ -4178,8 +4184,8 @@ status behind an address.
 
 **Voice controls** (rendered only per `GET /api/v1/capabilities`): with `voice.stt`, the
 composer gains a mic button that opens **hands-free mode** — a full-viewport
-overlay (`role="dialog"`, `aria-modal`, background scroll locked; corner ✕ or
-Escape leaves it) that runs a spoken conversation loop without returning to the
+overlay (`role="dialog"`, `aria-modal`, background scroll locked; the corner
+**Done** control or Escape leaves it) that runs a spoken conversation loop without returning to the
 composer between turns:
 
 - **ready** — one big mic, "Tap to talk"; the last spoken reply shown small.
