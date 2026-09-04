@@ -414,6 +414,23 @@ describe('InviteDialog', () => {
       );
     });
 
+    it('the option hint under the command is per-runtime, never a Claude flag on Codex', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'agent' });
+      const hint = (): string =>
+        screen.getByText(/sets the working folder/i).textContent ?? '';
+      await waitFor(() => expect(hint()).toContain('--model sonnet'));
+
+      await userEvent.click(screen.getByRole('tab', { name: /codex/i }));
+      await waitFor(() => expect(hint()).toContain('--sandbox read-only'));
+      expect(hint()).not.toContain('sonnet');
+
+      await userEvent.click(screen.getByRole('tab', { name: /other/i }));
+      // Nothing honest to say about an unknown command beyond the shared flag.
+      await waitFor(() => expect(hint()).not.toContain('--model'));
+      expect(hint()).toContain('--cwd ~/proj');
+    });
+
     it('mints the invite once and shares it across both modes', async () => {
       const f = mockFetch({}, rec);
       useFetch(f);

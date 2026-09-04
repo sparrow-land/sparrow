@@ -323,7 +323,12 @@ describe('install — migration between settings.json and settings.local.json', 
  */
 describe('install — .git/info/exclude', () => {
   const excludeFile = (p: string) => path.join(p, '.git', 'info', 'exclude');
-  const gitInit = (p: string) => fs.mkdirSync(path.join(p, '.git'), { recursive: true });
+  const gitInit = (p: string) => {
+    // A minimal REAL .git: the walk requires HEAD (a bare dir named .git is
+    // debris, not a repo — see the phantom regression test below).
+    fs.mkdirSync(path.join(p, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(p, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  };
 
   it('adds both entries inside a git repo and says so', async () => {
     gitInit(cwd);
@@ -376,6 +381,27 @@ describe('install — .git/info/exclude', () => {
   it('skips it (silently) outside a git repo', async () => {
     await run(['install']);
     expect(logs.join('\n')).not.toContain('.git/info/exclude');
+  });
+
+  it('a bare directory NAMED .git above cwd is not a repo — nothing written into it', async () => {
+    // Regression: a phantom `.git/` (no HEAD — e.g. debris in /tmp) used to be
+    // accepted by the upward walk, and the exclude writer then fabricated
+    // `info/exclude` inside it, making the phantom look ever more real. The
+    // phantom lives in a test-owned tree — never in the shared tmpdir itself.
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-skill-phantom-'));
+    fs.mkdirSync(path.join(parent, '.git'));
+    const nested = path.join(parent, 'project');
+    fs.mkdirSync(nested);
+    const prev = cwd;
+    cwd = nested;
+    try {
+      await run(['install']);
+      expect(logs.join('\n')).not.toContain('.git/info/exclude');
+      expect(fs.existsSync(path.join(parent, '.git', 'info'))).toBe(false);
+    } finally {
+      cwd = prev;
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
   });
 });
 

@@ -17,7 +17,6 @@
  * independent by construction) — it is held back only because two agents
  * writing the same working tree at once is a worse failure than a queued reply.
  */
-import { randomUUID } from 'node:crypto';
 import type { SparrowClient } from '@sparrow/client';
 import type { Email, InboxEntry, Message } from '@sparrow/common-types';
 import type { Env } from '../util.js';
@@ -31,7 +30,7 @@ import {
   type PendingGroup,
 } from './group.js';
 import { NO_REPLY, buildPrompt, type PromptMessage } from './prompt.js';
-import { buildRunnerCommand, resumeLooksBroken, runRunner, type RunResult, type RunnerConfig } from './runner.js';
+import { buildRunnerCommand, runRunner, runnerAdapter, type RunResult, type RunnerConfig } from './runner.js';
 import { dropSession, readSession, writeSession } from './sessions.js';
 import type { HarnessEvent } from './render.js';
 
@@ -274,13 +273,18 @@ export async function runHarness(opts: HarnessOptions): Promise<void> {
     const items = [...group.items]; // items arriving mid-run wait for the next pass
     const ids = new Set(items.map((i) => i.id));
     const sessionKey = group.key;
-    const useSessions = opts.runner.kind === 'claude' && opts.resumeSessions && opts.profileName !== undefined;
+    // WHICH runner can continue a conversation is the adapter's business, not
+    // this loop's: claude is handed an id, codex reports the one it minted, and
+    // the store (keyed by profile + conversation) is the same either way.
+    const adapter = runnerAdapter(opts.runner.kind);
+    const useSessions =
+      adapter.resume !== undefined && opts.resumeSessions && opts.profileName !== undefined;
     let storedSession = useSessions ? readSession(env, opts.profileName!, sessionKey) : undefined;
 
     const attempt = async (resuming: boolean): Promise<RunResult> => {
       const messages = await resolveItems(items);
-      // A resumed claude session already holds the transcript; re-sending it
-      // wastes context and makes the agent read its own words as new.
+      // A resumed session already holds the transcript; re-sending it wastes
+      // context and makes the agent read its own words as new.
       const transcript = resuming ? [] : await resolveTranscript(group, ids);
       const prompt = buildPrompt({
         agent: opts.agent,
@@ -291,28 +295,29 @@ export async function runHarness(opts: HarnessOptions): Promise<void> {
       const session = useSessions
         ? resuming
           ? { sessionId: storedSession, resume: true }
-          : { sessionId: randomUUID(), resume: false }
+          : { sessionId: adapter.resume!.newSessionId(), resume: false }
         : {};
       const cmd = buildRunnerCommand(opts.runner, prompt, session);
       emit({ type: 'harness.run.start', runner: cmd.label, group: group.label, items: items.length });
       await setStatus(group, 'working', `thinking… (${opts.runner.kind})`);
       const result = await spawn(cmd, opts.runner, { signal, onStderr: opts.onRunnerStderr });
-      if (useSessions && !resuming && result.sessionId) {
+      // Remember only a conversation that actually happened. (codex announces
+      // its thread id before it does any work, so a run that failed on its very
+      // first token would otherwise leave a thread worth resuming into.)
+      if (useSessions && !resuming && result.sessionId && !result.failed) {
         writeSession(env, opts.profileName!, sessionKey, result.sessionId);
       }
       return result;
     };
 
     let result = await attempt(storedSession !== undefined);
-    if (
-      result.code !== 0 &&
-      storedSession !== undefined &&
-      !signal.aborted &&
-      resumeLooksBroken(result.stdout, result.stderr)
-    ) {
+    if (result.failed && storedSession !== undefined && !signal.aborted && result.resumeBroken) {
       // The stored id names a session that is gone. That costs one fresh retry,
       // not a permanently broken conversation.
-      emit({ type: 'harness.note', message: `stored session for ${group.label} is gone — starting fresh` });
+      emit({
+        type: 'harness.note',
+        message: `stored session for ${group.label} is gone — starting fresh`,
+      });
       dropSession(env, opts.profileName!, sessionKey);
       storedSession = undefined;
       result = await attempt(false);
@@ -325,7 +330,10 @@ export async function runHarness(opts: HarnessOptions): Promise<void> {
 
     const seconds = result.ms / 1000;
     try {
-      if (result.code !== 0) {
+      if (result.failed) {
+        // A runner that says WHY it failed on stdout (codex's `turn.failed`)
+        // gets that sentence into the timeline; stderr is `-v`'s job.
+        if (result.error) emit({ type: 'harness.note', message: `runner: ${result.error}` });
         await failGroup(group, items, result, seconds);
         return;
       }
@@ -349,7 +357,7 @@ export async function runHarness(opts: HarnessOptions): Promise<void> {
         await failGroup(
           group,
           items,
-          { ...result, code: 1, stderr: String((e as Error)?.message ?? e) },
+          { ...result, code: 1, failed: true, stderr: String((e as Error)?.message ?? e) },
           seconds,
         );
       }
@@ -373,9 +381,15 @@ export async function runHarness(opts: HarnessOptions): Promise<void> {
     group.failures += 1;
     const gaveUp = group.failures >= MAX_GROUP_FAILURES;
     if (gaveUp) {
+      // Some runners exit 0 and report the failure on their event stream
+      // instead, where "runner exited 0" would read as a contradiction.
+      const how = result.timedOut
+        ? 'runner exited timeout'
+        : result.code !== null && result.code !== 0
+          ? `runner exited ${result.code}`
+          : 'the runner reported a failed turn';
       const note =
-        `I hit an error handling this (runner exited ${result.timedOut ? 'timeout' : (result.code ?? '?')}); ` +
-        `a human may need to look at the harness logs.`;
+        `I hit an error handling this (${how}); a human may need to look at the harness logs.`;
       try {
         await postReply(group, items, note);
       } catch {

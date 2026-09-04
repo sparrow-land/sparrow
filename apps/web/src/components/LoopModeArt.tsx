@@ -55,8 +55,13 @@ const CAPTION_LINES: Record<Mode, string[]> = {
   harness: ["Sparrow's CLI holds the loop and calls the", 'agent for every message.'],
 };
 
-/** The command each side runs, shown under the arrow in the docs figure. */
-const CALL_SUB: Record<Mode, string> = { inline: 'read()', harness: 'claude -p' };
+/**
+ * What each side DOES, shown under the arrow in the docs figure. Deliberately
+ * runtime-neutral on the harness side: the CLI spawns whichever runner the
+ * operator picked (`claude -p`, `codex exec`, `gemini`, any `--exec`), and a
+ * figure that named one of them would read as a requirement.
+ */
+const CALL_SUB: Record<Mode, string> = { inline: 'read()', harness: 'spawn runner' };
 
 /** Scene geometry. Sparrow sits at `sx`, the agent at `ax`, both on the `cy` line. */
 interface Geo {

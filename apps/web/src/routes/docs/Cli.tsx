@@ -424,9 +424,9 @@ sparrow status list --room R`}
       <Command
         name="sparrow harness"
         synopsis={`sparrow harness [--url URL] [--claude|--codex|--gemini|--exec CMD] [--model M]
-          [--name N] [--cwd DIR] [--permission-mode MODE] [--yolo] [--no-resume]
+          [--name N] [--cwd DIR] [--permission-mode MODE] [--sandbox MODE] [--yolo] [--no-resume]
           [--context N] [--run-timeout S] [--batch-window S] [--once] [-j] [-v]`}
-        desc="Harness mode: sparrow holds the loop and spawns your agent. With --url it enrolls exactly as `sparrow enroll` does, then runs; without --url it runs on the resolved profile. It holds /me/events for the life of the process, and on each work event peeks the inbox (never pops), groups waiting items by room or email thread, collects a short --batch-window burst, and hands each group to ONE serialized runner whose final text is posted back as the reply. Items are acked only after the runner exits 0 and the reply lands — at-least-once, so a crash or timeout retries instead of losing the message; a failed group backs off exponentially and the third consecutive failure posts a one-line “couldn’t handle this” note and acks it. The room shows working while a runner runs, idle after. Harness mode does not host your agent — the machine still has to stay up; what it removes is the chat session and the agent’s discretion about checking."
+        desc="Harness mode: sparrow holds the loop and spawns your agent. With --url it enrolls exactly as `sparrow enroll` does, then runs; without --url it runs on the resolved profile. It holds /me/events for the life of the process, and on each work event peeks the inbox (never pops), groups waiting items by room or email thread, collects a short --batch-window burst, and hands each group to ONE serialized runner whose final text is posted back as the reply. Items are acked only after the run succeeds and the reply lands — at-least-once, so a crash or timeout retries instead of losing the message; a failed group backs off exponentially and the third consecutive failure posts a one-line “couldn’t handle this” note and acks it. Success is usually exit 0, but a runner that reports its own failure is believed over its exit status: `codex exec` publishes no exit-code contract, so a `turn.failed` on its --json stream is a failed run whatever the process exited with. claude and codex keep one conversation per room or email thread, so the agent picks up where it left off (--no-resume turns that off). The room shows working while a runner runs, idle after. Harness mode does not host your agent — the machine still has to stay up; what it removes is the chat session and the agent’s discretion about checking."
         flags={[
           ['--url URL', 'Invite URL to enroll through first (omit when already enrolled).'],
           [
@@ -440,10 +440,14 @@ sparrow status list --room R`}
             '--permission-mode MODE',
             'Passed through to `claude` (default acceptEdits). In -p mode Claude denies rather than prompts, so a run can fail but never hang.',
           ],
-          ['--yolo', 'Shorthand for --permission-mode bypassPermissions.'],
+          [
+            '--sandbox MODE',
+            'codex only: read-only | workspace-write | danger-full-access (default workspace-write, the codex analogue of claude’s acceptEdits). The harness passes -s on every run rather than inheriting codex’s own default, which has moved between versions. Rejected with an error on any other runner.',
+          ],
+          ['--yolo', 'Bypass permissions in the runner: claude bypassPermissions, gemini -y, codex --dangerously-bypass-approvals-and-sandbox.'],
           [
             '--no-resume',
-            'Disable per-(profile, room-or-thread) Claude session continuity (kept in <state>/harness/sessions.json).',
+            'Disable per-(profile, room-or-thread) session continuity for claude and codex (kept in <state>/harness/sessions.json).',
           ],
           ['--context N', 'Recent transcript messages prepended to the prompt (default 20).'],
           [

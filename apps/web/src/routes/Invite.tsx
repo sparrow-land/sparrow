@@ -10,6 +10,9 @@ import { serverOrigin } from '../lib/origin.js';
 import { INSTALL_COMMAND } from '../lib/docsUrl.js';
 import { Logo } from '../components/Logo.js';
 import { LoopModeArt } from '../components/LoopModeArt.js';
+// The dialog is the canonical picker; the landing page shows the same hints so
+// the two surfaces cannot drift apart on what each runtime's options are.
+import { RUNTIME_HINT } from '../components/InviteDialog.js';
 import { Terminal } from '../components/Terminal.js';
 import { SiteHeader } from '../components/SiteHeader.js';
 import { MAIN_CONTENT_ID } from '../components/SkipLink.js';
@@ -458,7 +461,13 @@ function AgentPanel({
           <RuntimePicker runtime={runtime} onChange={setRuntime} />
           <Terminal label="sparrow harness" code={harnessCmd} wrap className="mt-3" />
           <p className="mt-3 text-xs text-[var(--sparrow-muted)]">
-            Options: <code className="mono">--model sonnet</code> picks a model,{' '}
+            Options:{' '}
+            {RUNTIME_HINT[runtime] && (
+              <>
+                <code className="mono">{RUNTIME_HINT[runtime]!.flag}</code>{' '}
+                {RUNTIME_HINT[runtime]!.what},{' '}
+              </>
+            )}
             <code className="mono">--cwd ~/proj</code> sets the working folder.
           </p>
         </ModeCard>

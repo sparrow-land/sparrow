@@ -43,7 +43,15 @@ import {
   type BannerInfo,
   type HarnessEvent,
 } from './render.js';
-import type { RunnerConfig, RunnerKind } from './runner.js';
+import {
+  RUNNERS,
+  CODEX_DEFAULT_SANDBOX,
+  SANDBOX_MODES,
+  resolveSandbox,
+  runnerAdapter,
+  type RunnerConfig,
+  type RunnerKind,
+} from './runner.js';
 import { streamWorkSource } from './stream-source.js';
 
 const BATCH_WINDOW_DEFAULT = 3;
@@ -90,13 +98,21 @@ function tildify(dir: string): string {
   return dir.startsWith(`${home}${path.sep}`) ? `~${dir.slice(home.length)}` : dir;
 }
 
-/** Which runner the flags selected — and a clear error when they selected two. */
+/**
+ * Which runner the flags selected — and a clear error when they selected two.
+ * The set of runners is {@link RUNNERS}, so a new adapter brings its own flag.
+ */
 function resolveRunner(opts: Record<string, unknown>): { kind: RunnerKind; command?: string } {
   const chosen: Array<{ kind: RunnerKind; command?: string }> = [];
-  if (opts.claude) chosen.push({ kind: 'claude' });
-  if (opts.codex) chosen.push({ kind: 'codex' });
-  if (opts.gemini) chosen.push({ kind: 'gemini' });
-  if (typeof opts.exec === 'string') chosen.push({ kind: 'exec', command: opts.exec });
+  for (const kind of Object.keys(RUNNERS) as RunnerKind[]) {
+    // `--exec` is the one runner named by a VALUE (the command line) rather
+    // than by a bare switch.
+    if (kind === 'exec') {
+      if (typeof opts.exec === 'string') chosen.push({ kind, command: opts.exec });
+    } else if (opts[kind] === true) {
+      chosen.push({ kind });
+    }
+  }
   if (chosen.length > 1) {
     throw new CliError('Pick ONE runner: --claude (the default), --codex, --gemini, or --exec <cmd>.');
   }
@@ -210,13 +226,18 @@ export function registerHarnessCommand(program: Cmd, deps: HarnessDeps): void {
       `claude --permission-mode (default ${PERMISSION_MODE_DEFAULT}); with -p claude DENIES rather than prompts, so a run can fail but never hangs`,
     )
     .option(
+      '--sandbox <mode>',
+      `codex --sandbox (default ${CODEX_DEFAULT_SANDBOX}; one of ${SANDBOX_MODES.join(', ')}). ` +
+        'the harness always passes one, so the posture never moves under you when codex changes its own default',
+    )
+    .option(
       '--yolo',
       'bypass permissions in the runner (claude bypassPermissions, gemini -y, codex full access)',
     )
-    .option('--no-resume', 'never reuse a claude session — every run starts fresh')
+    .option('--no-resume', 'never reuse a runner session — every run starts fresh')
     .option(
       '--context <n>',
-      `prepend this many recent transcript messages to the prompt (default ${CONTEXT_DEFAULT}; for claude only on a session's first run)`,
+      `prepend this many recent transcript messages to the prompt (default ${CONTEXT_DEFAULT}; with claude/codex only on a session's first run)`,
       (v) => Number.parseInt(v, 10),
     )
     .option(
@@ -246,12 +267,18 @@ export function registerHarnessCommand(program: Cmd, deps: HarnessDeps): void {
         '',
         'The runner is spawned unattended, so permissions are a decision you make here, once:',
         '`claude -p` DENIES anything it would otherwise prompt for, so a run can fail but never',
-        'hangs. --permission-mode acceptEdits (the default) lets it edit files; --yolo removes the',
-        'guard rails entirely and belongs on a sandbox or a repo you can revert.',
+        'hangs. --permission-mode acceptEdits (the default) lets it edit files; for --codex the',
+        `same posture is --sandbox ${CODEX_DEFAULT_SANDBOX}, which the harness passes explicitly on`,
+        "every run rather than inheriting codex's own default. --yolo removes the guard rails",
+        'entirely and belongs on a sandbox or a repo you can revert.',
+        '',
+        'claude and codex each keep one conversation per room or email thread, so the agent',
+        'remembers what was said last time; --no-resume turns that off.',
         '',
         'Examples:',
         '  sparrow harness --url https://sparrow.example.com/invite/ivk_... --cwd ~/proj',
-        '  sparrow harness --codex --model gpt-5',
+        '  sparrow harness --codex --model gpt-5-codex',
+        '  sparrow harness --codex --sandbox read-only --once',
         '  sparrow harness --exec "my-agent --stdin" --once',
       ].join('\n'),
     )
@@ -261,6 +288,10 @@ export function registerHarnessCommand(program: Cmd, deps: HarnessDeps): void {
         const verbose = Boolean(opts.verbose);
         const runnerChoice = resolveRunner(opts);
         const cwd = (opts.cwd as string | undefined) ?? process.cwd();
+        // Rejected here, before enrollment: a flag the chosen runner cannot use
+        // must not cost a round trip to the server to find out.
+        const sandbox = resolveSandbox(runnerChoice.kind, opts.sandbox as string | undefined);
+        if (sandbox.error) throw new CliError(sandbox.error);
 
         /* ------------------------------ output ------------------------------ */
         // Resolved ONCE, from this run's env and stdout — not re-sniffed per
@@ -370,6 +401,7 @@ export function registerHarnessCommand(program: Cmd, deps: HarnessDeps): void {
           model: opts.model as string | undefined,
           cwd,
           permissionMode: (opts.permissionMode as string | undefined) ?? PERMISSION_MODE_DEFAULT,
+          sandbox: sandbox.value,
           yolo: Boolean(opts.yolo),
           runTimeoutMs: positiveInt(opts.runTimeout, RUN_TIMEOUT_DEFAULT) * 1000,
         };
@@ -382,7 +414,9 @@ export function registerHarnessCommand(program: Cmd, deps: HarnessDeps): void {
           runner:
             runnerChoice.kind === 'exec' ? (runnerChoice.command ?? 'exec') : runnerChoice.kind,
           model: runner.model,
-          permissionMode: runner.yolo ? 'bypassPermissions' : runner.permissionMode,
+          // Each runner names its own posture: claude a permission mode, codex
+          // a sandbox. Showing "acceptEdits" over a codex run would be fiction.
+          permissionMode: runnerAdapter(runner.kind).posture(runner),
           cwd: tildify(cwd),
           once,
         };

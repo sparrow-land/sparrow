@@ -279,6 +279,18 @@ describe('sparrow harness — enroll then run', () => {
     expect(cap.err()).toContain('--url');
     expect(cap.err()).toContain('Invite dialog');
   });
+
+  it('--sandbox on a runner that has none is refused before anything else is tried', async () => {
+    const cap = capture();
+    // Ahead of the credential check on purpose: a flag the chosen runner cannot
+    // use should not cost a round trip to the server to find out.
+    expect(await runCli(['harness', '--sandbox', 'read-only', '--once'], env, cap.io)).toBe(1);
+    expect(cap.err()).toContain('--sandbox is a codex flag');
+
+    const bad = capture();
+    expect(await runCli(['harness', '--codex', '--sandbox', 'wide-open'], env, bad.io)).toBe(1);
+    expect(bad.err()).toContain('workspace-write');
+  });
 });
 
 /* ================================================================== *

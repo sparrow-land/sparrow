@@ -32,6 +32,9 @@ describe('CLI reference — sparrow harness', () => {
     // Semantics: who holds the loop, and the at-least-once ack.
     expect(section.textContent).toMatch(/holds the loop/i);
     expect(section.textContent).toMatch(/at-least-once/i);
+    // …and that "did it fail?" is not the exit code alone any more.
+    expect(section.textContent).toMatch(/turn\.failed/i);
+    expect(section.textContent).toMatch(/claude and codex keep one conversation/i);
 
     // Flags table.
     const flags = [...section.querySelectorAll('td code')].map((c) => c.textContent ?? '');
@@ -42,6 +45,7 @@ describe('CLI reference — sparrow harness', () => {
       '--name N',
       '--cwd DIR',
       '--permission-mode MODE',
+      '--sandbox MODE',
       '--yolo',
       '--no-resume',
       '--context N',

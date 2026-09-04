@@ -54,9 +54,11 @@ describe('LoopModeArt', () => {
     expect(container.querySelectorAll('[data-part="machine-frame"]')).toHaveLength(2);
     expect(screen.getAllByText('your machine')).toHaveLength(2);
 
-    // command labels under each arrow
+    // command labels under each arrow — the harness side names no runtime,
+    // because the figure is true of every runner the harness can spawn.
     expect(screen.getByText('read()')).toBeInTheDocument();
-    expect(screen.getByText('claude -p')).toBeInTheDocument();
+    expect(screen.getByText('spawn runner')).toBeInTheDocument();
+    expect(container.textContent).not.toContain('claude');
 
     // one sentence of caption per half (line-broken by hand — SVG text never wraps)
     const caption = (half: string) =>

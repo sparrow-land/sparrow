@@ -330,6 +330,18 @@ describe('Invite landing page (/invite/:token)', () => {
     expect(terminalCode('sparrow harness')).toContain("--exec '<your command>'");
   });
 
+  it('the option hint under the harness command follows the runtime', async () => {
+    fetchCtl.set(inviteFetchMock({ signedIn: false }));
+    renderInvite();
+    await userEvent.click(await screen.findByRole('tab', { name: /connect an agent/i }));
+    const hint = (): string => screen.getByText(/sets the working folder/i).textContent ?? '';
+
+    expect(hint()).toContain('--model sonnet');
+    await userEvent.click(screen.getByRole('radio', { name: /codex/i }));
+    expect(hint()).toContain('--sandbox read-only');
+    expect(hint()).not.toContain('sonnet');
+  });
+
   it('tucks the onboarding doc behind a closed disclosure', async () => {
     fetchCtl.set(inviteFetchMock({ signedIn: false }));
     renderInvite();

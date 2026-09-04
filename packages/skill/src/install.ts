@@ -434,7 +434,11 @@ function findGitDir(startDir: string): string | undefined {
     const candidate = path.join(dir, '.git');
     try {
       const st = fs.statSync(candidate);
-      if (st.isDirectory()) return candidate;
+      // A directory merely NAMED .git is not a repo (debris in /tmp once made
+      // the walk — and then the exclude writer — treat all of /tmp as a repo).
+      // HEAD is present in every real .git dir, bare or not, from `git init` on.
+      if (st.isDirectory() && fs.existsSync(path.join(candidate, 'HEAD'))) return candidate;
+      if (st.isDirectory()) return undefined;
       if (st.isFile()) {
         const m = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(candidate, 'utf8'));
         if (m?.[1]) return path.resolve(dir, m[1].trim());

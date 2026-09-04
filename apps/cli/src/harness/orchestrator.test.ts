@@ -101,12 +101,17 @@ function result(over: Partial<RunResult> = {}): RunResult {
     timedOut: false,
     ms: 10,
     text: 'ok',
+    // The runner classifies its own failure (a codex turn can fail on exit 0);
+    // for these fakes the exit code says it, unless a test says otherwise.
+    failed: (over.code ?? 0) !== 0,
+    resumeBroken: false,
     ...over,
   };
 }
 
 interface RunOpts {
   spawn: (cmd: RunnerCommand) => Promise<RunResult>;
+  runner?: RunnerConfig;
   once?: boolean;
   batchWindowMs?: number;
   backoff?: (n: number) => number;
@@ -126,7 +131,7 @@ async function run(fake: Fake, opts: RunOpts): Promise<HarnessEvent[]> {
     profileName: 'work',
     agent: { name: 'bot', orgName: 'Acme' },
     server: 'https://s',
-    runner,
+    runner: opts.runner ?? runner,
     batchWindowMs: opts.batchWindowMs ?? 0,
     contextCount: 0,
     resumeSessions: opts.resumeSessions ?? false,
@@ -284,6 +289,7 @@ describe('harness orchestrator', () => {
               code: 1,
               text: '',
               stderr: 'No conversation found with session ID: sess-dead',
+              resumeBroken: true,
             })
           : result({ text: 'recovered', sessionId: 'sess-new' });
       },
@@ -300,6 +306,133 @@ describe('harness orchestrator', () => {
     await run(fake, { spawn: async () => result({ text: '' }) });
     expect(fake.sent).toEqual([]);
     expect(fake.read).toEqual(['msg_1']);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * codex: the runner mints its own thread id, so continuity runs the
+   * other way round — the FIRST run reports the id, later runs resume it.
+   * ------------------------------------------------------------------ */
+
+  const codex: RunnerConfig = { ...runner, kind: 'codex' };
+
+  it('codex: the first run names no session, the next resumes the thread codex reported', async () => {
+    const env = stateEnv();
+    const seen: string[][] = [];
+    const spawn = async (cmd: RunnerCommand): Promise<RunResult> => {
+      seen.push(cmd.args);
+      return result({ text: 'ok', sessionId: 'thr-abc' });
+    };
+    await run(fakeClient([chatEntry('msg_1', 'one')]), { runner: codex, resumeSessions: true, env, spawn });
+    await run(fakeClient([chatEntry('msg_2', 'two')]), { runner: codex, resumeSessions: true, env, spawn });
+
+    expect(seen[0]).not.toContain('resume');
+    expect(seen[1]!.slice(0, 3)).toEqual(['exec', 'resume', 'thr-abc']);
+    fs.rmSync(env.SPARROW_STATE_DIR!, { recursive: true, force: true });
+  });
+
+  it('codex: the standing framing rides only the FIRST turn of a thread', async () => {
+    const env = stateEnv();
+    const stdins: string[] = [];
+    const spawn = async (cmd: RunnerCommand): Promise<RunResult> => {
+      stdins.push(cmd.stdin);
+      return result({ text: 'ok', sessionId: 'thr-abc' });
+    };
+    await run(fakeClient([chatEntry('msg_1', 'one')]), { runner: codex, resumeSessions: true, env, spawn });
+    await run(fakeClient([chatEntry('msg_2', 'two')]), { runner: codex, resumeSessions: true, env, spawn });
+
+    expect(stdins[0]).toContain('YOUR FINAL TEXT RESPONSE IS YOUR REPLY');
+    expect(stdins[1]).not.toContain('YOUR FINAL TEXT RESPONSE IS YOUR REPLY');
+    expect(stdins[1]).toContain('two');
+    fs.rmSync(env.SPARROW_STATE_DIR!, { recursive: true, force: true });
+  });
+
+  it('a runner that fails while exiting 0 still fails the group, and says why', async () => {
+    const fake = fakeClient([chatEntry('msg_1', 'hello')]);
+    const events = await run(fake, {
+      runner: codex,
+      spawn: async () => result({ code: 0, failed: true, error: 'model stream closed', text: '' }),
+      once: false,
+      backoff: () => 60_000,
+      stopWhen: (ev) => ev.type === 'harness.run.failed',
+    });
+    expect(fake.sent).toEqual([]);
+    expect(fake.read).toEqual([]);
+    expect(events.filter((e) => e.type === 'harness.note')).toContainEqual({
+      type: 'harness.note',
+      message: 'runner: model stream closed',
+    });
+  });
+
+  it('codex: a dead thread drops the stored id and retries fresh, exactly once', async () => {
+    const env = stateEnv();
+    await run(fakeClient([chatEntry('msg_1', 'one')]), {
+      runner: codex,
+      resumeSessions: true,
+      env,
+      spawn: async () => result({ text: 'ok', sessionId: 'thr-dead' }),
+    });
+
+    const attempts: string[][] = [];
+    const again = fakeClient([chatEntry('msg_2', 'two')]);
+    await run(again, {
+      runner: codex,
+      resumeSessions: true,
+      env,
+      spawn: async (cmd) => {
+        attempts.push(cmd.args);
+        return attempts.length === 1
+          ? result({
+              code: 1,
+              text: '',
+              stderr: 'thread/resume failed: no rollout found for thread id thr-dead',
+              resumeBroken: true,
+            })
+          : result({ text: 'recovered', sessionId: 'thr-new' });
+      },
+    });
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toContain('resume');
+    expect(attempts[1]).not.toContain('resume');
+    expect(again.sent[0]!.body).toBe('recovered');
+    fs.rmSync(env.SPARROW_STATE_DIR!, { recursive: true, force: true });
+  });
+
+  it('a failed first run leaves no session behind to resume into', async () => {
+    const env = stateEnv();
+    await run(fakeClient([chatEntry('msg_1', 'one')]), {
+      runner: codex,
+      resumeSessions: true,
+      env,
+      // codex announces its thread id before it does any work, so a failed run
+      // still reports one.
+      spawn: async () => result({ code: 1, text: '', sessionId: 'thr-stillborn' }),
+    });
+    const seen: string[][] = [];
+    await run(fakeClient([chatEntry('msg_2', 'two')]), {
+      runner: codex,
+      resumeSessions: true,
+      env,
+      spawn: async (cmd) => {
+        seen.push(cmd.args);
+        return result({ text: 'ok', sessionId: 'thr-real' });
+      },
+    });
+    expect(seen[0]).not.toContain('resume');
+    fs.rmSync(env.SPARROW_STATE_DIR!, { recursive: true, force: true });
+  });
+
+  it('gemini keeps no session at all: every run is a first run', async () => {
+    const env = stateEnv();
+    const seen: string[][] = [];
+    const gemini: RunnerConfig = { ...runner, kind: 'gemini' };
+    const spawn = async (cmd: RunnerCommand): Promise<RunResult> => {
+      seen.push(cmd.args);
+      return result({ text: 'ok', sessionId: 'ignored' });
+    };
+    await run(fakeClient([chatEntry('msg_1', 'one')]), { runner: gemini, resumeSessions: true, env, spawn });
+    await run(fakeClient([chatEntry('msg_2', 'two')]), { runner: gemini, resumeSessions: true, env, spawn });
+    expect(seen[1]!.join(' ')).toContain('YOUR FINAL TEXT RESPONSE IS YOUR REPLY');
+    fs.rmSync(env.SPARROW_STATE_DIR!, { recursive: true, force: true });
   });
 
   it('surfaces a fatal work-source error instead of exiting quietly', async () => {

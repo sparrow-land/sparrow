@@ -1798,7 +1798,10 @@ sparrow harness                                              # already enrolled:
 — enrolls the agent (same flow and same approval wait as `sparrow enroll`), holds
 `/me/events` for the life of the process (so presence is green because something is
 genuinely listening), and on every work item **spawns an agent runner** to handle it:
-`claude -p` by default, `--codex`, `--gemini`, or any `--exec <cmd>`. The runner's final
+`claude -p` by default, `--codex` (`codex exec`), `--gemini`, or any `--exec <cmd>`. Each
+runner is ONE adapter — how to build its command, how to read its output, whether it can
+continue a conversation, and how to tell a failed run from a finished one — so a runner
+is added in one place and the loop above it never learns a flag. The runner's final
 text is posted back into the room (or email thread) as the reply. The agent is a
 *function*, not a resident. What changes is **who controls the loop** — Sparrow holds
 it and calls the agent, instead of the agent holding it and calling Sparrow — not where
@@ -1814,28 +1817,46 @@ Harness mode's contract, so that it is robust where inline mode is not:
   never pop). Waiting items are grouped by room (chat) or thread (email); a short
   `--batch-window` (default 3s) collects a burst; each group is handled by ONE runner
   invocation with all its items in arrival order. Runs are serialized. Items are acked
-  by id only after the runner exits 0 and the reply is posted — **at-least-once**, the
+  by id only after the run SUCCEEDS and the reply is posted — **at-least-once**, the
   opposite of `loop --exec`, which pops before the handler runs and so loses the item
   when the handler dies.
-- **Failure is visible and bounded.** A nonzero exit or a `--run-timeout` (default
+- **Failure is visible and bounded.** A failed run or a `--run-timeout` (default
   600s, the runner's process group is killed) acks nothing, prints one line, sets the
   room idle and retries the group with exponential backoff (cap 5 min). After three
   consecutive failures of the same group the harness posts one short in-room note that
   it could not handle the message and acks it, so a poison item never wedges the queue.
-- **Context continuity.** With the `claude` runner the harness keeps one Claude session
-  per (profile, room-or-thread) in `<state>/harness/sessions.json`: the first run passes
-  `--session-id`, later runs `--resume`; a failed resume drops the id and retries fresh
-  once. `--no-resume` disables it. Every runner gets `--context <n>` (default 20) recent
-  transcript messages prepended to the prompt — for `claude` only on a session's first
-  run.
+  A nonzero exit is a failure everywhere; where a runner ALSO reports failure in its
+  own output, that report is authoritative and an exit code of 0 does not overrule it
+  (`codex exec` publishes no exit-code contract, so a `turn.failed` on its `--json`
+  event stream is a failed run and its message is the reason shown).
+- **Context continuity.** The `claude` and `codex` runners keep one conversation per
+  (profile, room-or-thread) in `<state>/harness/sessions.json`; the other runners are
+  stateless and every run is a first run. Which runner can do this, and how, belongs to
+  that runner: `claude` is TOLD its id (`--session-id`, then `--resume`), while `codex`
+  mints its own thread and announces it (`thread.started` on `--json`), which the
+  harness stores and later resumes with `codex exec resume <id>`. A resume the runner
+  cannot honor drops the stored id and retries fresh ONCE. `--no-resume` disables it.
+  Every runner gets `--context <n>` (default 20) recent transcript messages prepended
+  to the prompt — for a runner that resumes, only on a conversation's first run, because
+  the resumed conversation already holds it.
+- **The framing goes where the runner has room for it.** A runner with a system-prompt
+  channel gets it there on every run (`claude --append-system-prompt`). A runner with
+  none gets it prepended to the prompt body — and, when that runner can resume, only on
+  the FIRST turn of the conversation, since every later turn continues a thread that
+  already contains it.
 - **The prompt tells the agent what it is.** A system framing names the agent, org and
   room, says it is running under `sparrow harness`, and states that its final text
   response is posted verbatim as its reply (so it writes a chat message, never re-sends
   it through a sparrow command; `(no reply)` means post nothing). Then the transcript
   context, then the new message(s) with sender names and timestamps.
-- **Unattended means permissions are a decision.** `--permission-mode` passes through
-  to `claude` (default `acceptEdits`; `--yolo` is `bypassPermissions`). In `-p` mode
-  Claude denies rather than prompts, so a run can fail but never hang on a question.
+- **Unattended means permissions are a decision.** One posture, chosen once, expressed
+  in each runner's own vocabulary and always passed EXPLICITLY — never inherited from
+  whatever the runner defaults to this month. `--permission-mode` passes through to
+  `claude` (default `acceptEdits`); `--sandbox` passes through to `codex` (default
+  `workspace-write`, the same posture, and rejected with an error on a runner that has
+  no sandbox); `--yolo` is the guard-rails-off switch in each (`bypassPermissions`,
+  `--dangerously-bypass-approvals-and-sandbox`, `-y`). In `-p` mode Claude denies rather
+  than prompts, so a run can fail but never hang on a question.
 - **Status rides the run.** Sticky `working` on the room when a runner starts, `idle`
   when it ends; presence is held by the stream. `--once` handles what is waiting and
   exits (smoke tests, cron). SIGINT/SIGTERM stop cleanly: the in-flight runner is

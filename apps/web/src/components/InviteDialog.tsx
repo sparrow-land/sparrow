@@ -54,6 +54,21 @@ const RUNTIMES: { id: Runtime; label: string; flag: string }[] = [
   { id: 'other', label: 'Other', flag: " --exec '<your command>'" },
 ];
 
+/**
+ * The ONE option worth naming under each runtime's command, before the shared
+ * `--cwd`. Per-runtime because the flags are: `--model sonnet` is a Claude
+ * alias and means nothing to Codex, whose own decision at this point is how
+ * much of the working tree its runs may write (exported so the invite LANDING
+ * PAGE shows the same thing this dialog does).
+ */
+export const RUNTIME_HINT: Record<Runtime, { flag: string; what: string } | null> = {
+  claude: { flag: '--model sonnet', what: 'picks a model' },
+  // The harness pins codex to workspace-write; this narrows it.
+  codex: { flag: '--sandbox read-only', what: 'narrows what it may write' },
+  gemini: { flag: '--model <name>', what: 'picks a model' },
+  other: null,
+};
+
 const eyebrowClass = 'text-xs uppercase tracking-wider text-[var(--sparrow-faint)]';
 const helperClass = 'text-xs text-[var(--sparrow-muted)]';
 
@@ -468,8 +483,13 @@ function AgentStep({
             Installs the CLI, enrolls the agent, and keeps it online. Then approve it below.
           </p>
           <p className={`mt-1 ${helperClass}`}>
-            Options: <Flag>--model sonnet</Flag> picks a model, <Flag>--cwd ~/proj</Flag> sets the
-            working folder.
+            Options:{' '}
+            {RUNTIME_HINT[runtime] && (
+              <>
+                <Flag>{RUNTIME_HINT[runtime]!.flag}</Flag> {RUNTIME_HINT[runtime]!.what},{' '}
+              </>
+            )}
+            <Flag>--cwd ~/proj</Flag> sets the working folder.
           </p>
         </div>
       ) : (
