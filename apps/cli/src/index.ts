@@ -1651,6 +1651,32 @@ export function serverSkewNote(clientVersion: string, serverVersion: string | un
   return `note: this client (${clientVersion}) is newer than the server (${serverVersion}) — the server may be behind.`;
 }
 
+/* ------------------------ the canonical install home ------------------------ */
+
+/**
+ * Where the client bundles come from. The installer and the docs have ONE home
+ * each, independent of which instance you talk to (SPEC → *Canonical public
+ * homes*): a per-instance installer teaches every reader a different command,
+ * and instances therefore serve neither — `GET /install.sh` and `GET /install/*`
+ * answer `302` here. `SPARROW_INSTALL_URL` lets a self-hoster point at their own
+ * mirror (an instance URL still works: the download follows redirects).
+ */
+export const INSTALL_URL_DEFAULT = 'https://sparrow.land';
+
+/** The canonical installer one-liner — the only install instruction the CLI prints. */
+export const INSTALL_COMMAND = `curl -fsSL ${INSTALL_URL_DEFAULT}/install.sh | sh`;
+
+/**
+ * Resolve the install home for this run: `SPARROW_INSTALL_URL` when set to
+ * something non-blank, else the canonical home. Trailing slashes are stripped so
+ * callers can join paths naively. The active profile's `server` is deliberately
+ * NOT consulted.
+ */
+export function installBaseUrl(env: Record<string, string | undefined>): string {
+  const raw = env.SPARROW_INSTALL_URL?.trim();
+  return (raw && raw.length > 0 ? raw : INSTALL_URL_DEFAULT).replace(/\/+$/, '');
+}
+
 /* -------------------------- the email medium --------------------------- */
 
 /**
@@ -3450,27 +3476,37 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     );
 
   /* ============================ upgrade ============================ */
-  // Re-download the CLI + MCP bundles from the active profile's server into
-  // $SPARROW_BIN_DIR (default ~/.local/bin — the install.sh layout), then report
-  // old → new. Only meaningful for an install.sh install; a workspace/dev
-  // checkout has no installed bundle.
+  // Re-download the CLI + MCP bundles from the CANONICAL install home (see
+  // {@link installBaseUrl}) into $SPARROW_BIN_DIR (default ~/.local/bin — the
+  // install.sh layout), then report old → new. Deliberately independent of the
+  // active profile: the bundles do not come from your instance (which 302s
+  // /install/* to sparrow.land), so `upgrade` works with no profile at all.
+  // Only meaningful for an install.sh install; a workspace/dev checkout has no
+  // installed bundle.
   withCommon(program.command('upgrade'))
+    .alias('update')
     .description(
-      're-download the sparrow CLI + MCP bundles from your server into $SPARROW_BIN_DIR (default ~/.local/bin)',
+      're-download the sparrow CLI + MCP bundles from https://sparrow.land into $SPARROW_BIN_DIR (default ~/.local/bin)',
     )
     .addHelpText(
       'after',
       [
         '',
-        'Installs over the bundles install.sh wrote. Set SPARROW_BIN_DIR to the same',
-        'directory you installed into if it was not the default ~/.local/bin.',
+        'Also available as `sparrow update` (same command).',
+        '',
+        'Bundles come from the canonical install home, https://sparrow.land — not from',
+        'your instance — so this works whatever server your profile points at, and',
+        '--server/--profile are accepted but unused here. Set SPARROW_INSTALL_URL to',
+        'pull from a mirror instead. Installs over the bundles',
+        'install.sh wrote: set SPARROW_BIN_DIR to the same directory you installed into',
+        'if it was not the default ~/.local/bin.',
       ].join('\n'),
     )
     .action(
-      action(async (opts) => {
-        // Server only — the /install/* endpoints are unauthenticated (and never gated).
-        const { server } = buildClient(opts, env, false);
-        const base = server.replace(/\/+$/, '');
+      action(async () => {
+        // The canonical install home — never the profile's server. The /install/*
+        // endpoints are unauthenticated (and never gated).
+        const base = installBaseUrl(env);
         const home = env.HOME ?? os.homedir();
         // Same resolution order as install.sh: $SPARROW_BIN_DIR, else ~/.local/bin.
         const binDir = env.SPARROW_BIN_DIR?.trim() || path.join(home, '.local', 'bin');
@@ -3480,7 +3516,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           throw new CliError(
             `sparrow does not appear to be installed via install.sh (no ${cliPath}). ` +
               `If you installed somewhere else, set SPARROW_BIN_DIR to that directory. ` +
-              `Install it with: curl -fsSL ${base}/install.sh | sh`,
+              `Install it with: ${INSTALL_COMMAND}`,
           );
         }
         // Read a bundle's own version by executing it (`--version`); best-effort.
@@ -3496,11 +3532,19 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         const download = async (url: string, dest: string): Promise<void> => {
           let res: Response;
           try {
-            res = await fetch(url);
+            // `redirect: 'follow'` is the default and is stated here on purpose:
+            // an instance URL in SPARROW_INSTALL_URL answers /install/* with a
+            // 302 to the canonical home, and that must still install.
+            res = await fetch(url, { redirect: 'follow' });
           } catch {
-            throw new CliError(`Could not reach ${base} to download bundles (server unreachable).`);
+            throw new CliError(
+              `Could not reach ${url} to download the sparrow bundles (network unreachable). ` +
+                `The install home is ${base}` +
+                (env.SPARROW_INSTALL_URL?.trim() ? ' (from SPARROW_INSTALL_URL)' : '') +
+                '.',
+            );
           }
-          if (!res.ok) throw new CliError(`Server returned ${res.status} for ${url}.`);
+          if (!res.ok) throw new CliError(`Install home returned ${res.status} for ${url}.`);
           fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()), { mode: 0o755 });
         };
 
@@ -3508,7 +3552,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         await download(`${base}/install/sparrow-mcp.js`, mcpPath);
         const newVersion = readVersion(cliPath);
         print(
-          { old: oldVersion ?? null, new: newVersion ?? null, server: base, cli: cliPath, mcp: mcpPath },
+          { old: oldVersion ?? null, new: newVersion ?? null, installUrl: base, cli: cliPath, mcp: mcpPath },
           `Upgraded sparrow: ${oldVersion ?? '?'} → ${newVersion ?? '?'} (from ${base}).`,
         );
       }),

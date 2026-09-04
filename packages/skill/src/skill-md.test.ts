@@ -411,3 +411,37 @@ describe('SKILL.md — credential resolution', () => {
     expect(section.indexOf('SPARROW_PROFILE')).toBeLessThan(section.indexOf('defaultProfile'));
   });
 });
+
+/**
+ * Canonical public homes (SPEC → *Canonical public homes*): the installer and
+ * the docs have ONE home each, independent of which instance the agent talks
+ * to. An instance serves neither (it `302`s), so a `<your-server>/docs/...`
+ * example in this file teaches every reader a URL that only redirects — and
+ * `curl <your host>/install.sh` teaches every reader a different command.
+ */
+describe('SKILL.md — canonical install + docs homes', () => {
+  it('gives the canonical one-line installer for the CLI', () => {
+    expect(skillMd).toContain('curl -fsSL https://sparrow.land/install.sh | sh');
+  });
+
+  it('never points docs or the installer at the instance', () => {
+    for (const line of skillMd.split('\n')) {
+      expect(line).not.toMatch(/<your-server>\/docs/);
+      expect(line).not.toMatch(/\$SPARROW_SERVER\/docs/);
+      expect(line).not.toMatch(/(<your-server>|\$SPARROW_SERVER)\/install/);
+    }
+  });
+
+  it('shows docs links under the canonical docs home', () => {
+    expect(skillMd).toContain('https://sparrow.land/docs/');
+  });
+
+  /**
+   * API paths stay RELATIVE — they are the instance's, and the agent already
+   * has `$SPARROW_SERVER`.
+   */
+  it('keeps API examples server-relative', () => {
+    expect(skillMd).toContain('/api/v1/');
+    expect(skillMd).toContain('"$SPARROW_SERVER/api/v1/capabilities"');
+  });
+});

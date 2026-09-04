@@ -14,7 +14,15 @@ import {
 } from '@sparrow/common-types';
 import { clientBuildVersion } from '@sparrow/client';
 import { PassThrough, Writable } from 'node:stream';
-import { runCli, loadUndici, transportFactory, serverSkewNote, makePrompt, type CliIO } from './index.js';
+import {
+  runCli,
+  loadUndici,
+  transportFactory,
+  serverSkewNote,
+  installBaseUrl,
+  makePrompt,
+  type CliIO,
+} from './index.js';
 
 /**
  * Isolated loop-state dir for every CLI run in this file. `watch`/`await`/`loop`
@@ -4237,57 +4245,138 @@ describe('sparrow CLI — client versioning', () => {
     }
   });
 
-  it('upgrade re-downloads bundles into ~/.local/bin and reports old → new', async () => {
-    const newBundle = 'console.log("9.9.9+new");\n';
+  /**
+   * The install home is CANONICAL, not per-instance: bundles come from
+   * `https://sparrow.land` (overridable with `SPARROW_INSTALL_URL`) no matter
+   * which server the active profile talks to — instances 302 `/install/*`
+   * there rather than serving it.
+   */
+  it('installBaseUrl: canonical home by default; SPARROW_INSTALL_URL overrides; profile server never does', () => {
+    expect(installBaseUrl({})).toBe('https://sparrow.land');
+    expect(installBaseUrl({ SPARROW_INSTALL_URL: 'https://mirror.test' })).toBe('https://mirror.test');
+    // Trailing slashes and stray whitespace are trimmed before paths are joined.
+    expect(installBaseUrl({ SPARROW_INSTALL_URL: '  https://mirror.test//  ' })).toBe('https://mirror.test');
+    // An empty/blank override is not an override.
+    expect(installBaseUrl({ SPARROW_INSTALL_URL: '   ' })).toBe('https://sparrow.land');
+    // The instance the profile points at is irrelevant to where bundles come from.
+    expect(installBaseUrl({ SPARROW_SERVER: 'https://instance.test' })).toBe('https://sparrow.land');
+  });
+
+  /** A stub install home serving (or redirecting to) the two bundles. */
+  async function installHome(opts?: { redirect?: boolean }): Promise<{
+    url: string;
+    body: string;
+    hits: () => string[];
+    close: () => void;
+  }> {
+    const body = 'console.log("9.9.9+new");\n';
+    const hits: string[] = [];
     const stub = http.createServer((req, res) => {
-      if (req.url && req.url.startsWith('/install/')) {
-        res.writeHead(200, { 'content-type': 'text/javascript' });
-        res.end(newBundle);
-      } else {
-        res.writeHead(404);
-        res.end('nope');
+      const u = req.url ?? '';
+      hits.push(u);
+      if (opts?.redirect && u.startsWith('/install/')) {
+        res.writeHead(302, { location: `/bundles/${u.slice('/install/'.length)}` });
+        res.end();
+        return;
       }
+      if (u.startsWith('/install/') || u.startsWith('/bundles/')) {
+        res.writeHead(200, { 'content-type': 'text/javascript' });
+        res.end(body);
+        return;
+      }
+      res.writeHead(404);
+      res.end('nope');
     });
     await new Promise<void>((r) => stub.listen(0, '127.0.0.1', () => r()));
-    const stubUrl = `http://127.0.0.1:${(stub.address() as AddressInfo).port}`;
+    return {
+      url: `http://127.0.0.1:${(stub.address() as AddressInfo).port}`,
+      body,
+      hits: () => hits,
+      close: () => stub.close(),
+    };
+  }
 
+  /** A `~/.local/bin` holding an old bundle, as install.sh would have left it. */
+  function installedHome(): { home: string; cliPath: string; binDir: string } {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-cli-home-'));
     const binDir = path.join(home, '.local', 'bin');
     fs.mkdirSync(binDir, { recursive: true });
     const cliPath = path.join(binDir, 'sparrow.mjs');
     fs.writeFileSync(cliPath, 'console.log("0.0.1+old");\n');
+    return { home, cliPath, binDir };
+  }
 
+  it('upgrade downloads from the install home (NOT the profile server) and reports old → new', async () => {
+    const stub = await installHome();
+    const { home, cliPath, binDir } = installedHome();
     const cap = capture();
-    const code = await runCli(['upgrade', '--server', stubUrl], { ...env, HOME: home }, cap.io);
+    const code = await runCli(
+      ['upgrade'],
+      // The profile server is a dead port: if upgrade consulted it, this fails.
+      { ...env, HOME: home, SPARROW_INSTALL_URL: stub.url, SPARROW_SERVER: 'http://127.0.0.1:1' },
+      cap.io,
+    );
     expect(code).toBe(0);
     expect(cap.out()).toContain('0.0.1+old');
     expect(cap.out()).toContain('9.9.9+new');
-    expect(fs.readFileSync(cliPath, 'utf8')).toBe(newBundle);
+    expect(fs.readFileSync(cliPath, 'utf8')).toBe(stub.body);
     expect(fs.existsSync(path.join(binDir, 'sparrow-mcp.mjs'))).toBe(true);
+    expect(stub.hits()).toEqual(['/install/sparrow.js', '/install/sparrow-mcp.js']);
 
     stub.close();
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it('upgrade errors clearly when not installed via install.sh', async () => {
+  it('upgrade follows redirects (an install home may 302 elsewhere)', async () => {
+    const stub = await installHome({ redirect: true });
+    const { home, cliPath } = installedHome();
+    const cap = capture();
+    const code = await runCli(['upgrade'], { ...env, HOME: home, SPARROW_INSTALL_URL: stub.url }, cap.io);
+    expect(code).toBe(0);
+    expect(fs.readFileSync(cliPath, 'utf8')).toBe(stub.body);
+    expect(stub.hits()).toContain('/bundles/sparrow.js');
+
+    stub.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('`sparrow update` is an alias of `sparrow upgrade` — same code path', async () => {
+    const stub = await installHome();
+    const { home, cliPath } = installedHome();
+    const cap = capture();
+    const code = await runCli(['update'], { ...env, HOME: home, SPARROW_INSTALL_URL: stub.url }, cap.io);
+    expect(code).toBe(0);
+    expect(cap.out()).toContain('9.9.9+new');
+    expect(fs.readFileSync(cliPath, 'utf8')).toBe(stub.body);
+    expect(stub.hits()).toEqual(['/install/sparrow.js', '/install/sparrow-mcp.js']);
+    // The alias is discoverable in help, not a hidden synonym.
+    const help = capture();
+    await runCli(['--help'], env, help.io);
+    expect(help.out()).toContain('upgrade|update');
+
+    stub.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('upgrade errors clearly when not installed via install.sh, naming the canonical installer', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-cli-home-'));
     const cap = capture();
     const code = await runCli(['upgrade', '--server', url], { ...env, HOME: home }, cap.io);
     expect(code).toBe(1);
-    expect(cap.err()).toContain('install.sh');
+    expect(cap.err()).toContain('curl -fsSL https://sparrow.land/install.sh | sh');
+    // Never the instance's own host — instances do not serve the installer.
+    expect(cap.err()).not.toContain(url);
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it('upgrade errors when the server is unreachable', async () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-cli-home-'));
-    const binDir = path.join(home, '.local', 'bin');
-    fs.mkdirSync(binDir, { recursive: true });
-    fs.writeFileSync(path.join(binDir, 'sparrow.mjs'), 'console.log("0.0.1+old");\n');
+  it('upgrade errors when the install home is unreachable, naming the URL it tried', async () => {
+    const { home } = installedHome();
     const cap = capture();
     // Port 1 refuses connections → fetch throws → a clear "unreachable" error.
-    const code = await runCli(['upgrade', '--server', 'http://127.0.0.1:1'], { ...env, HOME: home }, cap.io);
+    const code = await runCli(['upgrade'], { ...env, HOME: home, SPARROW_INSTALL_URL: 'http://127.0.0.1:1' }, cap.io);
     expect(code).toBe(1);
-    expect(cap.err()).toMatch(/unreachable|reach/i);
+    expect(cap.err()).toMatch(/unreachable|could not reach/i);
+    expect(cap.err()).toContain('http://127.0.0.1:1/install/sparrow.js');
     fs.rmSync(home, { recursive: true, force: true });
   });
 
@@ -4789,9 +4878,9 @@ describe('sparrow CLI — hints arrive at the pause', () => {
     expect(await runCli(['pop'], env, cap.io)).toBe(0);
     const lines = hintLines(cap);
     expect(lines).toContain('[hint]   -> GET /api/v1/me/events');
-    // `docs` is an absolute URL the SERVER builds from its own origin — print
-    // it verbatim so a self-hosted instance links to itself.
-    expect(lines).toContain('[hint]   docs: http://localhost:8722/docs/api/me/events');
+    // `docs` is the absolute canonical-home URL the SERVER builds (DOCS_URL,
+    // default https://sparrow.land/docs) — print it verbatim.
+    expect(lines).toContain('[hint]   docs: https://sparrow.land/docs/api/me/events.md');
   });
 
   it('--json needs no extra rendering: the hint already rides the envelope', async () => {
