@@ -38,6 +38,21 @@ import { LevelMeter } from './LevelMeter.js';
  * seconds later with no gesture anywhere near it.
  */
 
+/**
+ * One exchanged turn, as the overlay's conversation column renders it. Kept for
+ * the life of the mode (a fresh mount is a fresh conversation) so the screen
+ * after Send reads like a short chat you can glance at, instead of the blank
+ * "waiting…" it used to be.
+ */
+export interface HandsFreeTurn {
+  /** The message id — the send's own for a 'you' turn, the arrival's for 'them'. */
+  id: string;
+  who: 'you' | 'them';
+  /** Sender's display name; only 'them' turns carry one. */
+  name?: string;
+  text: string;
+}
+
 /** A message from ANOTHER member that arrived while the mode was open. */
 export interface HandsFreeIncoming {
   id: string;
@@ -140,7 +155,10 @@ export function HandsFreeOverlay({
   const [error, setError] = useState<string | null>(null);
   const [seconds, setSeconds] = useState(0);
   const [micStream, setMicStream] = useState<MediaStream | null>(null);
-  const [lastReply, setLastReply] = useState<HandsFreeIncoming | null>(null);
+  /** The session's conversation, oldest first. */
+  const [turns, setTurns] = useState<HandsFreeTurn[]>([]);
+  /** Which turn is being read aloud right now (a subtle marker, not a state). */
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
 
   // Live capture handles. Refs, not state: teardown must be able to run from an
   // unmount cleanup, where no render will follow.
@@ -175,6 +193,22 @@ export function HandsFreeOverlay({
    * an AudioContext open, all owned by a component that no longer exists.
    */
   const runRef = useRef(0);
+  /** The sentinel the column scrolls to whenever a turn lands. */
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  const addTurn = useCallback((turn: HandsFreeTurn) => {
+    setTurns((cur) => (cur.some((t) => t.id === turn.id) ? cur : [...cur, turn]));
+  }, []);
+
+  // Keep the newest turn in view. Scrolling on `length` rather than on the array
+  // means a re-render that only re-flags what is speaking does not yank the
+  // column while someone is reading further up it.
+  useEffect(() => {
+    if (turns.length === 0) return;
+    // Optional call: an engine without `scrollIntoView` (jsdom, some embedded
+    // webviews) must lose the scroll, never the overlay.
+    bottomRef.current?.scrollIntoView?.({ block: 'end' });
+  }, [turns.length]);
 
   /* ---------------------------------------------------------------- *
    * Teardown primitives
@@ -202,6 +236,7 @@ export function HandsFreeOverlay({
 
   const stopAudio = useCallback(() => {
     speakingRef.current = false;
+    setSpeakingId(null);
     const audio = audioRef.current;
     if (audio) {
       audio.onended = null;
@@ -514,10 +549,13 @@ export function HandsFreeOverlay({
         setPhase('listening');
         return;
       }
+      // The words move out of the live slot and into the column — same place on
+      // screen, now part of the conversation rather than in progress.
+      addTurn({ id, who: 'you', text });
       resetTranscript();
       setPhase('awaiting');
     })();
-  }, [unlockAudio, closeStt, stopCapture, onSend, resetTranscript]);
+  }, [unlockAudio, closeStt, stopCapture, onSend, resetTranscript, addTurn]);
 
   /* ---------------------------------------------------------------- *
    * speaking
@@ -525,16 +563,17 @@ export function HandsFreeOverlay({
 
   const speak = useCallback(
     (message: HandsFreeIncoming) => {
-      setLastReply(message);
       speakingRef.current = true;
       setPhase('speaking');
 
-      // No TTS registered: the reply is READ, not heard, and the turn ends.
+      // No TTS registered: the reply is READ, not heard, and the turn ends. Its
+      // text is already in the column, which is the whole affordance here.
       if (!voice.tts) {
         speakingRef.current = false;
         setPhase('ready');
         return;
       }
+      setSpeakingId(message.id);
 
       void (async () => {
         try {
@@ -547,6 +586,7 @@ export function HandsFreeOverlay({
           audio.src = url;
           audio.onended = () => {
             stopAudio();
+            setSpeakingId(null);
             setPhase((p) => (p === 'speaking' ? 'ready' : p));
           };
           await audio.play();
@@ -554,6 +594,7 @@ export function HandsFreeOverlay({
           // A vendor failure must not strand the mode: the text is on screen and
           // the mic is one tap away.
           stopAudio();
+          setSpeakingId(null);
           setPhase((p) => (p === 'speaking' ? 'ready' : p));
         }
       })();
@@ -569,12 +610,14 @@ export function HandsFreeOverlay({
       if (seenRef.current.has(m.id)) continue;
       seenRef.current.add(m.id);
       queueRef.current.push(m);
+      // Readable as soon as it is queued — before, and while, it is spoken.
+      addTurn({ id: m.id, who: 'them', name: m.from, text: m.body });
     }
     if (speakingRef.current) return;
     if (phase !== 'ready' && phase !== 'awaiting') return;
     const next = queueRef.current.shift();
     if (next) speak(next);
-  }, [incoming, phase, speak]);
+  }, [incoming, phase, speak, addTurn]);
 
   /* ---------------------------------------------------------------- *
    * Render
@@ -598,12 +641,15 @@ export function HandsFreeOverlay({
     </button>
   );
 
+  /** The newest 'them' turn — what "the last thing said" means on screen. */
+  const lastThemId = [...turns].reverse().find((t) => t.who === 'them')?.id ?? null;
+
   return createPortal(
     <div
       role="dialog"
       aria-modal="true"
       aria-label="Hands-free voice mode"
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-6 bg-[var(--sparrow-bg)] px-6 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] text-center"
+      className="fixed inset-0 z-50 flex flex-col bg-[var(--sparrow-bg)] px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
     >
       <button
         type="button"
@@ -614,146 +660,203 @@ export function HandsFreeOverlay({
         <X size={16} aria-hidden="true" /> Done
       </button>
 
-      {phase === 'ready' && (
-        <>
-          {bigMic('Tap to talk', startListening)}
-          <span className="text-lg font-medium text-[var(--sparrow-text)]">Tap to talk</span>
-          {lastReply && (
-            <p
-              data-testid="hands-free-last-reply"
-              className="max-w-md text-sm text-[var(--sparrow-muted)]"
+      {/* The conversation. Fills everything above the controls and scrolls, so a
+          long session stays glanceable instead of collapsing to "waiting…".
+          Older turns recede; the newest reads at full contrast. The live region
+          is NOT here — it stays on the in-progress transcript below, so a screen
+          reader hears the words forming once, not the whole column again. */}
+      <div
+        data-testid="hands-free-conversation"
+        className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-end gap-3 overflow-y-auto pb-4 pt-16 text-left"
+      >
+        {turns.map((turn, i) => {
+          const newest = i === turns.length - 1;
+          const speaking = turn.id === speakingId;
+          return (
+            <div
+              key={turn.id}
+              data-testid="hands-free-turn"
+              data-who={turn.who}
+              {...(speaking ? { 'data-speaking': 'true' } : {})}
+              className={turn.who === 'you' ? 'self-end text-right' : 'self-start'}
             >
-              <span className="font-medium text-[var(--sparrow-text)]">{lastReply.from}: </span>
-              {lastReply.body}
+              <p
+                className={`text-[11px] font-medium uppercase tracking-wide ${
+                  speaking ? 'text-[var(--sparrow-accent)]' : 'text-[var(--sparrow-muted)]'
+                }`}
+              >
+                {turn.who === 'you' ? 'You' : (turn.name ?? 'Them')}
+                {speaking && (
+                  <span
+                    data-testid="hands-free-speaking"
+                    className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-[var(--sparrow-accent)] align-middle motion-safe:animate-pulse motion-reduce:animate-none"
+                  >
+                    <span className="sr-only">speaking</span>
+                  </span>
+                )}
+              </p>
+              <p
+                {...(turn.who === 'them' && turn.id === lastThemId
+                  ? { 'data-testid': 'hands-free-last-reply' }
+                  : {})}
+                className={`max-w-xl whitespace-pre-wrap leading-snug ${
+                  newest
+                    ? 'text-lg text-[var(--sparrow-text)]'
+                    : 'text-sm text-[var(--sparrow-muted)]'
+                }`}
+              >
+                {turn.text}
+              </p>
+            </div>
+          );
+        })}
+
+        {/* The turn in progress: the live transcript sits at the BOTTOM of the
+            column, exactly where it will settle once Send lands. */}
+        {listening && (
+          <div className="self-end text-right">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--sparrow-accent)]">
+              You
             </p>
-          )}
-        </>
-      )}
-
-      {listening && (
-        <>
-          <LevelMeter stream={micStream} />
-          <span
-            role="timer"
-            aria-live="off"
-            className="mono text-2xl font-semibold tabular-nums text-[var(--sparrow-text)]"
-          >
-            {formatElapsed(seconds)}
-          </span>
-          <p
-            data-testid="hands-free-transcript"
-            aria-live="polite"
-            className="min-h-[3rem] max-w-2xl text-xl leading-snug text-[var(--sparrow-text)]"
-          >
-            {committed}
-            {partial && (
-              <span data-testid="hands-free-partial" className="text-[var(--sparrow-muted)]">
-                {committed ? ' ' : ''}
-                {partial}
-              </span>
-            )}
-            {!showTranscript && capture !== 'review' && (
-              <span className="text-[var(--sparrow-muted)]">
-                {capture === 'recording' ? 'Recording…' : 'Listening…'}
-              </span>
-            )}
-          </p>
-
-          <div className="flex w-full max-w-md items-center justify-center gap-3">
-            {capture === 'recording' ? (
-              <button
-                type="button"
-                onClick={stopRecording}
-                className="flex-1 rounded-lg bg-[var(--sparrow-accent)] px-6 py-4 text-lg font-semibold text-black"
-              >
-                Stop
-              </button>
-            ) : capture === 'transcribing' ? (
-              <span
-                role="status"
-                data-testid="transcribing-indicator"
-                className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-[var(--sparrow-border-strong)] px-6 py-4 text-lg text-[var(--sparrow-muted)]"
-              >
-                <Loader2
-                  size={18}
-                  aria-hidden="true"
-                  className="motion-safe:animate-spin motion-reduce:animate-none"
-                />
-                Transcribing…
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={doSend}
-                disabled={!hasText}
-                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[var(--sparrow-accent)] px-6 py-4 text-lg font-semibold text-black disabled:opacity-50"
-              >
-                <Send size={18} aria-hidden="true" /> Send
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={cancelListening}
-              className="flex-1 rounded-lg border border-[var(--sparrow-border-strong)] px-6 py-4 text-lg font-semibold text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)]"
-            >
-              Cancel
-            </button>
-          </div>
-        </>
-      )}
-
-      {phase === 'sending' && (
-        <>
-          <span role="status" className="text-lg text-[var(--sparrow-muted)]">
-            Sending…
-          </span>
-          {showTranscript && (
             <p
               data-testid="hands-free-transcript"
               aria-live="polite"
-              className="max-w-2xl text-xl leading-snug text-[var(--sparrow-text)]"
+              className="min-h-[2rem] max-w-xl text-lg leading-snug text-[var(--sparrow-text)]"
+            >
+              {committed}
+              {partial && (
+                <span data-testid="hands-free-partial" className="text-[var(--sparrow-muted)]">
+                  {committed ? ' ' : ''}
+                  {partial}
+                </span>
+              )}
+              {!showTranscript && capture !== 'review' && (
+                <span className="text-[var(--sparrow-muted)]">
+                  {capture === 'recording' ? 'Recording…' : 'Listening…'}
+                </span>
+              )}
+            </p>
+          </div>
+        )}
+
+        {phase === 'sending' && showTranscript && (
+          <div className="self-end text-right">
+            <p
+              data-testid="hands-free-transcript"
+              aria-live="polite"
+              className="max-w-xl text-lg leading-snug text-[var(--sparrow-text)]"
             >
               {transcriptText}
             </p>
-          )}
-        </>
-      )}
+          </div>
+        )}
 
-      {phase === 'awaiting' && (
-        <p
-          data-testid="hands-free-awaiting"
-          role="status"
-          aria-live="polite"
-          className="max-w-md text-lg text-[var(--sparrow-muted)]"
-        >
-          {awaitingNote
-            ? `${counterpartName ?? 'They'} — ${awaitingNote}`
-            : `Waiting for ${counterpartName ?? 'a reply'}…`}
-        </p>
-      )}
+        {/* Waiting sits UNDER the turn just sent, not instead of it. */}
+        {phase === 'awaiting' && (
+          <p
+            data-testid="hands-free-awaiting"
+            role="status"
+            aria-live="polite"
+            className="self-end text-right text-sm text-[var(--sparrow-muted)]"
+          >
+            {awaitingNote
+              ? `${counterpartName ?? 'They'} — ${awaitingNote}`
+              : `Waiting for ${counterpartName ?? 'a reply'}…`}
+          </p>
+        )}
 
-      {phase === 'speaking' && (
-        <>
-          {bigMic('Interrupt and talk', startListening, true)}
-          <span className="text-sm text-[var(--sparrow-muted)]">
-            Speaking… tap the mic to reply
-          </span>
-          {lastReply && (
-            <p
-              data-testid="hands-free-last-reply"
-              className="max-w-md text-lg text-[var(--sparrow-text)]"
-            >
-              {lastReply.body}
-            </p>
-          )}
-        </>
-      )}
+        <div ref={bottomRef} aria-hidden="true" />
+      </div>
 
       {error && (
-        <p role="alert" className="max-w-md text-sm text-[var(--sparrow-danger)]">
+        <p role="alert" className="mx-auto max-w-2xl pb-2 text-center text-sm text-[var(--sparrow-danger)]">
           {error}
         </p>
       )}
+
+      {/* The controls. Unchanged in size, placement and labels — the column grew
+          above them, nothing here shrank to make room. */}
+      <div
+        data-testid="hands-free-controls"
+        className="mx-auto flex w-full max-w-md shrink-0 flex-col items-center justify-center gap-4 pb-4 pt-2 text-center"
+      >
+        {phase === 'ready' && (
+          <>
+            {bigMic('Tap to talk', startListening)}
+            <span className="text-lg font-medium text-[var(--sparrow-text)]">Tap to talk</span>
+          </>
+        )}
+
+        {listening && (
+          <>
+            <LevelMeter stream={micStream} />
+            <span
+              role="timer"
+              aria-live="off"
+              className="mono text-2xl font-semibold tabular-nums text-[var(--sparrow-text)]"
+            >
+              {formatElapsed(seconds)}
+            </span>
+            <div className="flex w-full items-center justify-center gap-3">
+              {capture === 'recording' ? (
+                <button
+                  type="button"
+                  onClick={stopRecording}
+                  className="flex-1 rounded-lg bg-[var(--sparrow-accent)] px-6 py-4 text-lg font-semibold text-black"
+                >
+                  Stop
+                </button>
+              ) : capture === 'transcribing' ? (
+                <span
+                  role="status"
+                  data-testid="transcribing-indicator"
+                  className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-[var(--sparrow-border-strong)] px-6 py-4 text-lg text-[var(--sparrow-muted)]"
+                >
+                  <Loader2
+                    size={18}
+                    aria-hidden="true"
+                    className="motion-safe:animate-spin motion-reduce:animate-none"
+                  />
+                  Transcribing…
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={doSend}
+                  disabled={!hasText}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[var(--sparrow-accent)] px-6 py-4 text-lg font-semibold text-black disabled:opacity-50"
+                >
+                  <Send size={18} aria-hidden="true" /> Send
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={cancelListening}
+                className="flex-1 rounded-lg border border-[var(--sparrow-border-strong)] px-6 py-4 text-lg font-semibold text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)]"
+              >
+                Cancel
+              </button>
+            </div>
+          </>
+        )}
+
+        {phase === 'sending' && (
+          <span role="status" className="text-lg text-[var(--sparrow-muted)]">
+            Sending…
+          </span>
+        )}
+
+        {phase === 'awaiting' && bigMic('Tap to talk', startListening)}
+
+        {phase === 'speaking' && (
+          <>
+            {bigMic('Interrupt and talk', startListening, true)}
+            <span className="text-sm text-[var(--sparrow-muted)]">
+              Speaking… tap the mic to reply
+            </span>
+          </>
+        )}
+      </div>
     </div>,
     document.body,
   );

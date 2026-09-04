@@ -234,6 +234,13 @@ beforeEach(() => {
   vi.stubGlobal('Audio', FakeAudio as unknown as typeof Audio);
   Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:x') });
   Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+  // jsdom has no layout, so no scrollIntoView — the overlay's conversation
+  // column scrolls to its newest turn and would throw without one.
+  Object.defineProperty(Element.prototype, 'scrollIntoView', {
+    configurable: true,
+    writable: true,
+    value: vi.fn(),
+  });
 });
 afterEach(() => {
   restoreFetch();

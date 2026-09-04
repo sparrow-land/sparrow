@@ -11,6 +11,7 @@ import { HandsFreeOverlay, type HandsFreeIncoming } from './HandsFreeOverlay.js'
  * ================================================================== */
 
 const trackStop = vi.fn();
+const scrollIntoView = vi.fn();
 const audioPlay = vi.fn(async () => {});
 const audioPause = vi.fn();
 
@@ -173,7 +174,9 @@ interface Options {
 }
 
 function renderOverlay(opts: Options = {}) {
-  const onSend = opts.onSend ?? vi.fn(async () => 'msg_sent');
+  // Real sends return a fresh message id per turn; the column keys on it.
+  let sendSeq = 0;
+  const onSend = opts.onSend ?? vi.fn(async () => `msg_sent_${++sendSeq}`);
   const onClose = opts.onClose ?? vi.fn();
   const view = render(
     <CapabilitiesProvider initial={caps(opts.voice ?? {})}>
@@ -227,7 +230,8 @@ function stubApi(opts: { transcript?: string; transcribeStatus?: number; speechS
  * that follows it settle.
  */
 async function startListening() {
-  await userEvent.click(screen.getByRole('button', { name: /tap to talk/i }));
+  FakeWorkletNode.last = null;
+  await userEvent.click(screen.getByRole('button', { name: /tap to talk|interrupt and talk/i }));
   await waitFor(() => expect(FakeWorkletNode.last).not.toBeNull());
   await act(async () => {
     await Promise.resolve();
@@ -254,6 +258,11 @@ beforeEach(() => {
     value: vi.fn(() => 'blob:mock'),
   });
   Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+  Object.defineProperty(Element.prototype, 'scrollIntoView', {
+    configurable: true,
+    writable: true,
+    value: scrollIntoView,
+  });
   stubApi();
 });
 
@@ -261,6 +270,7 @@ afterEach(() => {
   restoreFetch();
   vi.unstubAllGlobals();
   trackStop.mockClear();
+  scrollIntoView.mockClear();
   audioPlay.mockClear();
   audioPause.mockClear();
   document.body.style.overflow = '';
@@ -738,6 +748,129 @@ describe('HandsFreeOverlay speaking', () => {
     rerenderWith([reply('msg_a', 'unspeakable')]);
     expect(await screen.findByRole('button', { name: /tap to talk/i })).toBeInTheDocument();
     expect(screen.getByTestId('hands-free-last-reply')).toHaveTextContent('unspeakable');
+  });
+});
+
+/* ================================================================== *
+ * The conversation column
+ * ================================================================== */
+
+/** Every turn currently in the column, oldest first. */
+function turns(): HTMLElement[] {
+  return screen.queryAllByTestId('hands-free-turn');
+}
+
+describe('HandsFreeOverlay conversation column', () => {
+  it('a successful send moves the spoken words up into the column as a "you" turn', async () => {
+    renderOverlay();
+    await startListening();
+    expect(turns()).toHaveLength(0);
+    await speakAndSend('ship the release');
+
+    await waitFor(() => expect(turns()).toHaveLength(1));
+    expect(turns()[0]).toHaveTextContent('ship the release');
+    expect(turns()[0]).toHaveAttribute('data-who', 'you');
+    // It left the live slot: the in-progress transcript is empty again.
+    expect(screen.queryByTestId('hands-free-partial')).toBeNull();
+  });
+
+  it('a send that failed leaves the column untouched', async () => {
+    renderOverlay({ onSend: vi.fn(async () => null) });
+    await startListening();
+    await speakAndSend('undeliverable');
+    await screen.findByRole('alert');
+    expect(turns()).toHaveLength(0);
+  });
+
+  it('a reply becomes a "them" turn as it is QUEUED, and is flagged while it speaks', async () => {
+    // Readable while it is being read aloud — the point of the column.
+    const { rerenderWith } = renderOverlay();
+    await sendOneTurn();
+    rerenderWith([reply('msg_a', 'the release is out')]);
+
+    const them = await waitFor(() => {
+      const t = turns().find((el) => el.getAttribute('data-who') === 'them');
+      expect(t).toBeDefined();
+      return t!;
+    });
+    expect(them).toHaveTextContent('the release is out');
+    expect(them).toHaveTextContent('Ada');
+    await waitFor(() => expect(them).toHaveAttribute('data-speaking', 'true'));
+
+    await act(async () => FakeAudio.instances[0]!.end());
+    await waitFor(() => expect(them).not.toHaveAttribute('data-speaking', 'true'));
+  });
+
+  it('keeps three turns in the order they happened', async () => {
+    const { rerenderWith } = renderOverlay();
+    await startListening();
+    await speakAndSend('first question');
+    await screen.findByTestId('hands-free-awaiting');
+
+    rerenderWith([reply('msg_a', 'an answer')]);
+    await waitFor(() => expect(turns()).toHaveLength(2));
+    await act(async () => FakeAudio.instances[0]!.end());
+
+    await startListening();
+    await speakAndSend('second question');
+    await waitFor(() => expect(turns()).toHaveLength(3));
+
+    expect(turns().map((t) => t.getAttribute('data-who'))).toEqual(['you', 'them', 'you']);
+    expect(turns()[0]).toHaveTextContent('first question');
+    expect(turns()[1]).toHaveTextContent('an answer');
+    expect(turns()[2]).toHaveTextContent('second question');
+  });
+
+  it('scrolls the column to the newest turn on every append', async () => {
+    const { rerenderWith } = renderOverlay();
+    await startListening();
+    await speakAndSend('scroll me');
+    await waitFor(() => expect(turns()).toHaveLength(1));
+    const afterSend = scrollIntoView.mock.calls.length;
+    expect(afterSend).toBeGreaterThan(0);
+
+    rerenderWith([reply('msg_a', 'and again')]);
+    await waitFor(() => expect(turns()).toHaveLength(2));
+    expect(scrollIntoView.mock.calls.length).toBeGreaterThan(afterSend);
+  });
+
+  it('awaiting shows the sent turn AND the waiting line — never a blank screen', async () => {
+    renderOverlay({ counterpartName: 'Ada' });
+    await startListening();
+    await speakAndSend('are you there');
+
+    const awaiting = await screen.findByTestId('hands-free-awaiting');
+    expect(awaiting).toHaveTextContent(/waiting for ada/i);
+    // The words that were just sent are still on screen above it.
+    expect(turns()).toHaveLength(1);
+    expect(turns()[0]).toHaveTextContent('are you there');
+  });
+
+  it('a new session starts with an empty column (close/reopen)', async () => {
+    const first = renderOverlay();
+    await startListening();
+    await speakAndSend('from the last session');
+    await waitFor(() => expect(turns()).toHaveLength(1));
+
+    // Closing the mode unmounts the overlay (MicButton renders it conditionally),
+    // so reopening is a fresh mount — and must be a fresh conversation.
+    first.unmount();
+    renderOverlay();
+    expect(turns()).toHaveLength(0);
+    expect(screen.queryByText(/from the last session/)).toBeNull();
+  });
+
+  it('the control bar keeps the big mic, Send and Cancel exactly where they were', async () => {
+    renderOverlay();
+    // ready: the big mic.
+    expect(screen.getByRole('button', { name: /tap to talk/i })).toBeInTheDocument();
+    await startListening();
+    // listening: meter, timer, Send + Cancel — none of it shrank into the column.
+    expect(screen.getByTestId('voice-level-meter')).toBeInTheDocument();
+    expect(screen.getByRole('timer')).toBeInTheDocument();
+    const bar = screen.getByTestId('hands-free-controls');
+    expect(within(bar).getByRole('button', { name: /^send$/i })).toBeInTheDocument();
+    expect(within(bar).getByRole('button', { name: /^cancel$/i })).toBeInTheDocument();
   });
 });
 

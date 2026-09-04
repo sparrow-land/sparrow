@@ -14,6 +14,19 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-09-04
+
+### Changed
+
+- **Hands-free mode reads like a chat.** After Send, your words stay on screen as a
+  turn in a running conversation column and the reply appears beneath them while it
+  is read aloud; each new turn stacks below, older turns fade, and the column keeps
+  itself scrolled to the newest. The "waiting" state shows the sent turn with the
+  counterpart's working note instead of a blank screen. The big mic, Send and Cancel
+  controls are unchanged. (Jake's first live session, 2026-09-04.)
+
+Client floor: minimum 0.1.1, recommended 0.1.11.
+
 ## [0.1.10] — 2026-09-04
 
 ### Added
