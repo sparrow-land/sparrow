@@ -154,7 +154,11 @@ export function Room() {
       ? `@${counterpart?.displayName ?? 'direct message'}`
       : `#${room.name || 'room'}`
     : null;
-  useDocumentTitle(pageTitle(conversationTitle));
+  // `null` while the room read is in flight, so the tab keeps whatever it had
+  // instead of flashing the bare product name for the length of the fetch —
+  // routing the not-yet-known subject through `pageTitle` would turn "still
+  // loading" into a real title ("sparrow") and defeat the hook's null contract.
+  useDocumentTitle(conversationTitle === null ? null : pageTitle(conversationTitle));
 
   // The conversation pane is an ACTIVITY STREAM (SPEC v4). The timeline is
   // anchored to an AGENT, not a room, so non-chat entries interleave only in a

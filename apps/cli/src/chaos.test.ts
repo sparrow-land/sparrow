@@ -126,11 +126,23 @@ const sinceOf = (u: string): number => Number(new URL(u, 'http://x').searchParam
  * read, and `/me/inbox/pop`. Returns handles the test mutates to time server
  * behavior precisely.
  */
-async function startUpstream(opts?: { heartbeat?: boolean }): Promise<Upstream> {
+async function startUpstream(opts?: {
+  heartbeat?: boolean;
+  /**
+   * Hold each `/me/events/log` read open this long before answering, with the
+   * body computed at ANSWER time (as a real server computes it when the request
+   * finally reaches its handler). Models a loaded CI runner, where a poll's
+   * request/response straddles many event-loop turns instead of completing in
+   * one — so a poll dialed BEFORE a test snapshot routinely returns journal
+   * entries written AFTER it. Assertions must survive that.
+   */
+  logDelayMs?: number;
+}): Promise<Upstream> {
   const journal: JournalEntry[] = [];
   const inbox: Array<{ message: unknown; room: unknown }> = [];
   const gap = { value: false };
   const beats = new Set<NodeJS.Timeout>();
+  const slowLogs = new Set<NodeJS.Timeout>();
   let activeSse: http.ServerResponse | undefined;
   const state = { sseConns: 0, logReqs: 0, popReqs: 0 };
 
@@ -139,14 +151,24 @@ async function startUpstream(opts?: { heartbeat?: boolean }): Promise<Upstream> 
     if (u.startsWith('/api/v1/me/events/log')) {
       state.logReqs += 1;
       const since = sinceOf(u);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          events: journal.filter((e) => e.id > since),
-          latest: journal.length ? journal[journal.length - 1]!.id : 0,
-          gap: gap.value,
-        }),
-      );
+      const answer = (): void => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            events: journal.filter((e) => e.id > since),
+            latest: journal.length ? journal[journal.length - 1]!.id : 0,
+            gap: gap.value,
+          }),
+        );
+      };
+      if (opts?.logDelayMs) {
+        const t = setTimeout(answer, opts.logDelayMs);
+        slowLogs.add(t);
+        res.on('close', () => {
+          clearTimeout(t);
+          slowLogs.delete(t);
+        });
+      } else answer();
       return;
     }
     if (u.startsWith('/api/v1/me/events')) {
@@ -213,6 +235,7 @@ async function startUpstream(opts?: { heartbeat?: boolean }): Promise<Upstream> 
     close: () =>
       new Promise<void>((r) => {
         for (const hb of beats) clearInterval(hb);
+        for (const t of slowLogs) clearTimeout(t);
         server.closeAllConnections?.();
         server.close(() => r());
       }),
@@ -280,7 +303,10 @@ describe('sparrow CLI — chaos: /me/events reliability under a hostile edge', (
   // a healthy path and deliver within the poll floor. Modeled by wedging ONLY the
   // stream's (already-live) connection; connections opened afterwards are healthy.
   it('midstream-black-hole: the poll punches through on a fresh conn after the stream wedges', async () => {
-    upstream = await startUpstream();
+    // The log read answers SLOWLY (a loaded runner): a poll is routinely already
+    // in flight when the test looks, which is precisely the case a snapshot-and-
+    // compare connection count gets wrong.
+    upstream = await startUpstream({ logDelayMs: 120 });
     proxy = new ChaosProxy({ upstreamPort: upstream.port });
     await proxy.start();
     const env = baseEnv(proxy.url, configDir, { SPARROW_RECONCILE_POLL_MS: '80' });
@@ -288,25 +314,61 @@ describe('sparrow CLI — chaos: /me/events reliability under a hostile edge', (
     // Watchdog + max-age OFF: recovery here is the POLL alone, not a reconnect.
     const watch = runCli(['watch', '--stale-seconds', '0', '--max-stream-age', '0', '--json'], env, cap.io);
     try {
+      // Wait until the stream is live AND the reconcile poll has dialed at least
+      // once, so the run is in its steady state (a poll in flight) before the
+      // wedge — the state a loaded runner is almost always in, and the one this
+      // scenario's assertions have to survive.
+      let deadline = Date.now() + 5000;
+      while (Date.now() < deadline && !(upstream.sseConns >= 1 && upstream.logReqs >= 1))
+        await nap(10);
+      expect(upstream.sseConns).toBe(1);
+
       // The stream delivers a first frame live.
       upstream.journal.push({ id: 1, event: 'message.new', data: messageNewData('via-stream') });
       upstream.pushMessage(1, 'via-stream');
-      let deadline = Date.now() + 5000;
+      deadline = Date.now() + 5000;
       while (Date.now() < deadline && !cap.out().includes('via-stream')) await nap(25);
       expect(cap.out()).toContain('via-stream');
 
       const opensBeforeWedge = proxy.connectionsOpened;
+      const logReqsBeforeWedge = upstream.logReqs;
       // Bytes stop mid-stream: black-hole ONLY the stream's connection (id 1).
       proxy.wedge((c) => c.id === 1);
       // A message journals during the wedge — the wedged stream can never carry it.
       upstream.journal.push({ id: 2, event: 'message.new', data: messageNewData('via-poll-after-wedge') });
 
+      // Wait for BOTH observable facts, not just the first: the frame arrives,
+      // and the poll dials a connection that did not exist before the wedge.
+      // Snapshotting the dial count and comparing it the instant the frame lands
+      // is a RACE — the poll that carried the frame was often already in flight
+      // when the snapshot was taken, so its connection is counted on both sides
+      // and the next dial is still up to one interval away. (That is exactly how
+      // this read "expected 2 to be greater than 2" on a loaded CI runner.)
+      // A poll that dialed and reached upstream entirely AFTER the wedge. Both
+      // counters are needed and neither may be sampled instantaneously: the poll
+      // that carried the frame was often already dialed AND already counted
+      // upstream before the wedge (its answer merely landed later), so at the
+      // moment of delivery both counters can still read exactly what they read
+      // before it.
+      const polledSinceWedge = (): boolean =>
+        proxy!.connectionsOpened > opensBeforeWedge && upstream!.logReqs > logReqsBeforeWedge;
       deadline = Date.now() + 5000;
-      while (Date.now() < deadline && !cap.out().includes('via-poll-after-wedge')) await nap(25);
+      while (
+        Date.now() < deadline &&
+        !(cap.out().includes('via-poll-after-wedge') && polledSinceWedge())
+      )
+        await nap(25);
       expect(cap.out()).toContain('via-poll-after-wedge'); // delivered by the reconcile poll
-      // Proof it came through FRESH connections, not the wedged stream.
-      expect(proxy.connectionsOpened).toBeGreaterThan(opensBeforeWedge);
+      // Proof it did NOT come down the stream: the one and only SSE connection
+      // ever opened is the wedged one (watchdog and max-age are off, so nothing
+      // reconnects it), and a wedged connection carries zero bytes in either
+      // direction. The reconcile poll's log reads are the only door left.
+      expect(upstream.sseConns).toBe(1);
       expect(proxy.stats().find((s) => s.id === 1)?.wedged).toBe(true);
+      expect(upstream.logReqs).toBeGreaterThan(logReqsBeforeWedge);
+      // And the poll keeps dialing FRESH connections rather than reusing a pool
+      // that the dead path poisoned.
+      expect(proxy.connectionsOpened).toBeGreaterThan(opensBeforeWedge);
     } finally {
       process.emit('SIGINT');
       expect(await watch).toBe(0);

@@ -2,6 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach } from 'vitest';
 import { meEvents } from '../lib/meEvents.js';
 import { roomStreams } from '../lib/roomStreams.js';
+import { presenceStore } from '../lib/presenceStore.js';
 
 // The app holds ONE process-wide `/me/events` connection (lib/meEvents), kept
 // alive across route changes on purpose. Module state outlives a test file, so
@@ -14,6 +15,13 @@ import { roomStreams } from '../lib/roomStreams.js';
 afterEach(() => {
   roomStreams.dispose();
   meEvents.dispose();
+  // `presenceStore` is the app-wide principal → online singleton, and the app
+  // deliberately never forgets what it learned. Across tests that is a leak: a
+  // test that drives `presence.changed → online` leaves that principal online
+  // for every later test in the file, so the next one that expects an OFFLINE
+  // agent (the wake notice, a gray dot) silently sees a green one. Order-
+  // dependent, so it hides until a runner shuffles or a file grows a new test.
+  presenceStore.reset();
 });
 
 // jsdom has no layout engine and no ResizeObserver. Provide a benign no-op so

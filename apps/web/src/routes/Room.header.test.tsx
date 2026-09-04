@@ -28,6 +28,7 @@ vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
+import { DEFAULT_TITLE } from '../lib/title.js';
 import { Room } from './Room.js';
 
 const SELF: Member = {
@@ -73,6 +74,37 @@ function stubRoom(room: RoomResource, history: Message[] = []) {
     if (/\/rooms\/room_abc$/.test(url)) return json(room);
     return errorJson('not_found', 404);
   });
+}
+
+/**
+ * `stubRoom`, but the room read is HELD OPEN until the returned `release()` is
+ * called. Every other read answers immediately, so the component renders its
+ * header chrome while the room itself is still in flight — the state a loaded
+ * runner spends real time in, and the one anything asserting on the tab title
+ * has to be explicit about.
+ */
+function stubRoomDeferred(room: RoomResource): { release: () => void } {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  useFetch(async (input, init) => {
+    const url = String(input).split('?')[0]!;
+    const method = init?.method ?? 'GET';
+    if (url.includes('/capabilities')) return json({ voice: { stt: false, tts: false } });
+    if (url.includes('/whoami')) return json(SELF);
+    if (url.includes('/members')) return json({ items: [SELF, BOT], nextCursor: null });
+    if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
+    if (url.includes('/drafts')) return json({ items: [] });
+    if (url.endsWith('/messages') && method === 'GET') return json({ items: [], nextBefore: null });
+    if (url.endsWith('/status')) return json({ items: [], presence: { online: [] } });
+    if (/\/rooms\/room_abc$/.test(url)) {
+      await gate;
+      return json(room);
+    }
+    return errorJson('not_found', 404);
+  });
+  return { release: () => release() };
 }
 
 function renderRoom() {
@@ -171,8 +203,11 @@ describe('Room — document title', () => {
   it('names the broadcast room', async () => {
     stubRoom(PROJECT_ROOM);
     renderRoom();
-    await screen.findByRole('button', { name: 'Add people' });
-    expect(document.title).toBe('#general — sparrow');
+    // Wait for the TITLE, not for chrome that paints before the room read
+    // lands: "Add people" is on screen from the first render (it is gated on
+    // `!archived`, which is true while `room` is still null), so awaiting it
+    // proves nothing about the fetch the title actually depends on.
+    await waitFor(() => expect(document.title).toBe('#general — sparrow'));
   });
 
   it('names the counterpart in a DM', async () => {
@@ -186,8 +221,24 @@ describe('Room — document title', () => {
     ];
     stubRoom({ ...PROJECT_ROOM, kind: 'dm', name: '' });
     renderRoom();
-    await screen.findByText('qa-bot');
-    expect(document.title).toBe('@qa-bot — sparrow');
+    // Likewise: the counterpart's name comes from the workspace list, which is
+    // mocked and therefore present on the first paint — it says nothing about
+    // whether the room resolved.
+    await waitFor(() => expect(document.title).toBe('@qa-bot — sparrow'));
+  });
+
+  // The hook's `null` contract exists so a page whose subject has not loaded
+  // leaves the tab alone. Routing a still-loading subject through `pageTitle`
+  // defeats it: `pageTitle(null)` is the bare product name, so opening a room
+  // used to blank the tab to "sparrow" for as long as the room read took.
+  it('leaves the tab alone until the room resolves — no bare-product flash', async () => {
+    document.title = DEFAULT_TITLE;
+    const gate = stubRoomDeferred(PROJECT_ROOM);
+    renderRoom();
+    await screen.findByRole('button', { name: 'Add people' });
+    expect(document.title).toBe(DEFAULT_TITLE);
+    gate.release();
+    await waitFor(() => expect(document.title).toBe('#general — sparrow'));
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderBanner, renderEvent } from './render.js';
+import { renderBanner, renderEvent, resolveColors } from './render.js';
 
 const ESC = '';
 const at = new Date('2026-09-03T14:05:09.000Z');
@@ -170,3 +170,38 @@ describe('harness timeline lines', () => {
     expect(out.split(ESC).join('').replace(/\[[0-9;]*m/g, '')).toContain('reconnected');
   });
 });
+
+/**
+ * Colors are resolved ONCE, from the environment the CLI was handed — never
+ * re-sniffed per line. CI runners set `FORCE_COLOR`, which is exactly why the
+ * harness must not decide "colorful" from a global picocolors probe: the
+ * command passes an explicit flag so its output is a function of its inputs.
+ */
+describe('resolveColors', () => {
+  it('is off without a TTY', () => {
+    expect(resolveColors({}, false)).toBe(false);
+  });
+
+  it('is on for a plain interactive terminal', () => {
+    expect(resolveColors({}, true)).toBe(true);
+  });
+
+  it('honors NO_COLOR over a TTY', () => {
+    expect(resolveColors({ NO_COLOR: '1' }, true)).toBe(false);
+    expect(resolveColors({ NO_COLOR: '' }, true)).toBe(true);
+  });
+
+  it('is off under CI even when the runner fakes a TTY', () => {
+    expect(resolveColors({ CI: 'true' }, true)).toBe(false);
+  });
+
+  it('FORCE_COLOR wins over CI and a missing TTY', () => {
+    expect(resolveColors({ CI: 'true', FORCE_COLOR: '1' }, false)).toBe(true);
+    expect(resolveColors({ FORCE_COLOR: '0' }, true)).toBe(false);
+  });
+
+  it('NO_COLOR beats FORCE_COLOR (the stricter opt-out wins)', () => {
+    expect(resolveColors({ NO_COLOR: '1', FORCE_COLOR: '1' }, true)).toBe(false);
+  });
+});
+

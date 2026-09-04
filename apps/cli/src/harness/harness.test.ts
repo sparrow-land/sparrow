@@ -77,16 +77,35 @@ afterEach(async () => {
 
 interface Capture {
   io: CliIO;
+  /** Captured stdout with ANSI stripped — see {@link stripAnsi}. */
   out(): string;
+  /** Captured stderr with ANSI stripped. */
   err(): string;
+  /** Captured stdout exactly as written, escapes and all. */
+  rawOut(): string;
 }
+
+/**
+ * Drop ANSI escape sequences so assertions read the TEXT the harness printed.
+ *
+ * Whether the timeline is colorful is an environment decision (a TTY, or
+ * `FORCE_COLOR` — which every CI runner sets); whether it says the right thing
+ * is not. Asserting on stripped output keeps these tests about the product
+ * rather than about the terminal that happened to run them.
+ */
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\u001b\[[0-9;]*m/g, '');
+}
+
 function capture(): Capture {
   const outChunks: string[] = [];
   const errChunks: string[] = [];
   return {
     io: { out: (s) => outChunks.push(s), err: (s) => errChunks.push(s) },
-    out: () => outChunks.join(''),
-    err: () => errChunks.join(''),
+    out: () => stripAnsi(outChunks.join('')),
+    err: () => stripAnsi(errChunks.join('')),
+    rawOut: () => outChunks.join(''),
   };
 }
 

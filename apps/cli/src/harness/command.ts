@@ -36,7 +36,13 @@ import {
   saveApprovedProfile,
 } from './enroll-flow.js';
 import { runHarness } from './orchestrator.js';
-import { renderBanner, renderEvent, type BannerInfo, type HarnessEvent } from './render.js';
+import {
+  renderBanner,
+  renderEvent,
+  resolveColors,
+  type BannerInfo,
+  type HarnessEvent,
+} from './render.js';
 import type { RunnerConfig, RunnerKind } from './runner.js';
 import { streamWorkSource } from './stream-source.js';
 
@@ -257,6 +263,12 @@ export function registerHarnessCommand(program: Cmd, deps: HarnessDeps): void {
         const cwd = (opts.cwd as string | undefined) ?? process.cwd();
 
         /* ------------------------------ output ------------------------------ */
+        // Resolved ONCE, from this run's env and stdout — not re-sniffed per
+        // line by picocolors' global probe. Piped or captured output is plain
+        // text; a real terminal (or an explicit FORCE_COLOR) stays colorful.
+        const useColors = resolveColors(env, process.stdout.isTTY === true);
+        const renderOpts = { colors: useColors };
+        const c = pc.createColors(useColors);
         let banner: BannerInfo | undefined;
         let bannerShown = false;
         const emit = (ev: HarnessEvent): void => {
@@ -271,11 +283,11 @@ export function registerHarnessCommand(program: Cmd, deps: HarnessDeps): void {
           if (ev.type === 'harness.online') {
             if (banner && !bannerShown) {
               bannerShown = true;
-              io.out(`${renderBanner(banner)}\n`);
+              io.out(`${renderBanner(banner, renderOpts)}\n`);
             }
             return;
           }
-          const line = renderEvent(ev);
+          const line = renderEvent(ev, renderOpts);
           if (line !== null) io.out(`${line}\n`);
         };
 
@@ -379,7 +391,7 @@ export function registerHarnessCommand(program: Cmd, deps: HarnessDeps): void {
         // that is already drained by the time the socket opens.
         if (once && !json) {
           bannerShown = true;
-          io.out(`${renderBanner(banner)}\n`);
+          io.out(`${renderBanner(banner, renderOpts)}\n`);
         }
 
         /* ------------------------------- signals ------------------------------- */
@@ -431,7 +443,7 @@ export function registerHarnessCommand(program: Cmd, deps: HarnessDeps): void {
             // subordinate to the timeline rather than competing with it.
             onRunnerStderr: verbose
               ? (chunk): void =>
-                  io.err(pc.dim(chunk.replace(/^/gm, '    ').replace(/\s+$/, '')) + '\n')
+                  io.err(c.dim(chunk.replace(/^/gm, '    ').replace(/\s+$/, '')) + '\n')
               : undefined,
           });
         } finally {

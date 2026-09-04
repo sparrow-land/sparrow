@@ -9,8 +9,10 @@
  *
  * Rendering is pure (a clock and a color switch are injected), so every line in
  * the product is a unit test rather than a screenshot. Colors go through
- * picocolors' `createColors`, which means `NO_COLOR`/`FORCE_COLOR` and a piped
- * stdout are all honored by construction.
+ * picocolors' `createColors` with an EXPLICIT flag the command resolves once
+ * (see `resolveColors`) — never picocolors' global probe, which reads
+ * `FORCE_COLOR` from the ambient environment and would put ANSI into output
+ * nobody is looking at through a terminal.
  */
 // picocolors is CJS: `isColorSupported` lives on the created colors object, so
 // only the DEFAULT import sees it (a named ESM import of it fails at runtime).
@@ -78,6 +80,26 @@ export interface BannerInfo {
 
 function colors(opts?: RenderOptions): ReturnType<typeof pc.createColors> {
   return pc.createColors(opts?.colors ?? pc.isColorSupported);
+}
+
+/**
+ * Decide ONCE whether this harness run is colorful, from the environment the
+ * CLI was handed plus whether stdout is a real terminal.
+ *
+ * picocolors' own `isColorSupported` is a global probe of `process.env` at
+ * import time, and CI runners routinely set `FORCE_COLOR=1` — which made the
+ * harness emit ANSI into captured, non-terminal output and turned every
+ * substring assertion into a coin flip. Resolving here makes the timeline a
+ * pure function of (env, tty), so the same inputs always render the same bytes.
+ *
+ * Precedence: `NO_COLOR` (the strict opt-out) beats everything, then an
+ * explicit `FORCE_COLOR`, then `CI`, then the TTY.
+ */
+export function resolveColors(env: Record<string, string | undefined>, isTTY: boolean): boolean {
+  if (env.NO_COLOR) return false;
+  if (env.FORCE_COLOR !== undefined && env.FORCE_COLOR !== '') return env.FORCE_COLOR !== '0';
+  if (env.CI) return false;
+  return isTTY;
 }
 
 /** `HH:MM:SS` in the configured zone — the dim prefix on every timeline line. */
