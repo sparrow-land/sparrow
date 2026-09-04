@@ -363,7 +363,7 @@ export function Composer({
           rows={2}
           disabled={disabled}
           placeholder={placeholder}
-          className="block w-full max-w-full resize-none rounded border border-[var(--sparrow-border)] bg-[var(--sparrow-bg)] px-3 py-2 text-sm outline-none focus:border-[var(--sparrow-accent)] disabled:opacity-50"
+          className="block w-full max-w-full resize-none rounded border border-[var(--sparrow-border)] bg-[var(--sparrow-bg)] px-3 py-2 text-base outline-none focus:border-[var(--sparrow-accent)] disabled:opacity-50 md:text-sm"
         />
         <input
           ref={fileInputRef}

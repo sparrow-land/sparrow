@@ -35,6 +35,8 @@ interface Opts {
   role?: 'owner' | 'admin' | 'member';
   /** When true, `/me/rooms` also carries a PROJECT room (`room_p`, "deploys"). */
   projectRoom?: boolean;
+  /** Overrides that project room's name — for the narrow-header overflow test. */
+  roomName?: string;
   /** When true, /me/events pushes a wrapped member.joined for a NEW DM room and
    * the HUMANS source starts empty then gains the counterpart on reload. */
   liveJoin?: boolean;
@@ -204,7 +206,7 @@ function shellFetchMock(opts: Opts, rec: Recorder) {
         items.push({
           room: {
             id: 'room_p',
-            name: 'deploys',
+            name: opts.roomName ?? 'deploys',
             orgId: 'org_1',
             kind: 'project',
             archivedAt: null,
@@ -803,16 +805,23 @@ describe('AppShell — mobile top-bar title', () => {
   });
 
   // jsdom lays nothing out, so this asserts the flex sizing contract: the title
-  // takes the remaining space AND reserves a floor, instead of being a zero-basis
+  // takes the remaining space and reserves a floor, instead of being a zero-basis
   // `min-w-0 flex-1` that a wide account nav squeezed down to a ~5px sliver.
-  it('reserves a readable minimum width for the active room title', async () => {
+  //
+  // That floor is now `sm`-and-up only. At phone widths it was itself part of
+  // the overflow (Jake's iPhone session: 413px of content in a 390px viewport),
+  // and the room title is no longer the thing that has to give — the nav drops
+  // the "Sign out" label to an icon instead, which buys back more than the
+  // floor ever protected.
+  it('reserves a readable minimum width for the active room title from sm up', async () => {
     useFetch(shellFetchMock({ ownedAgent: true, dmUnread: 0 }, rec));
     renderShell(undefined, 'room_dm');
     const title = await screen.findByText('@Botty');
     const holder = title.parentElement!;
     expect(holder.className).toContain('flex-1');
-    expect(holder.className).toMatch(/min-w-\[\d/);
-    expect(holder.className).not.toContain('min-w-0');
+    expect(holder.className).toMatch(/sm:min-w-\[\d/);
+    // Below `sm` it must be free to shrink — nothing may outrank the viewport.
+    expect(holder.className).toContain('min-w-0');
   });
 
   // The nav is still the shrinkable side, but its two always-present items now
@@ -850,5 +859,67 @@ describe('AppShell — mobile top-bar title', () => {
     const signOut = await screen.findByRole('button', { name: 'Sign out' });
     expect(signOut.className).toContain('whitespace-nowrap');
     expect(signOut.className).toContain('shrink-0');
+  });
+});
+
+/* ================================================================== *
+ * The top bar at 390px (Jake's iPhone session, 2026-09-04)
+ * ================================================================== */
+
+const LONG_TITLE =
+  'quarterly deployment coordination and incident review — europe west';
+
+describe('AppShell — the top bar cannot widen the page', () => {
+  let rec: Recorder;
+  beforeEach(() => {
+    rec = { calls: [], urls: [] };
+    localStorage.clear();
+    useFetch(shellFetchMock({ projectRoom: true, roomName: LONG_TITLE }, rec));
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    (api as unknown as WithFetch)._fetch = REAL_FETCH;
+  });
+
+  it('caps the shell so no child can push the document wider than the viewport', async () => {
+    // The measured symptom was scrollWidth 413 against clientWidth 390: one
+    // over-wide row is enough to make the WHOLE page scroll sideways, which on
+    // a phone reads as "the app is broken", not "this row is long".
+    const { container } = renderShell(undefined, 'room_p');
+    await screen.findByText('ROOM');
+    const shell = container.firstElementChild as HTMLElement;
+    expect(shell.className).toContain('overflow-x-hidden');
+    expect(shell.className).toContain('max-w-full');
+  });
+
+  it('truncates a long room title instead of shouldering the account nav off-screen', async () => {
+    const { container } = renderShell(undefined, 'room_p');
+    // The sidebar lists the room too; this is about the TOP BAR.
+    const header = container.querySelector('header') as HTMLElement;
+    const title = await within(header).findByText(`#${LONG_TITLE}`);
+    expect(title.className).toContain('truncate');
+    expect(title.className).toContain('min-w-0');
+    // Its container must be free to shrink too — a min-width floor on the title
+    // is exactly what pushed the nav past the right edge.
+    const holder = title.parentElement as HTMLElement;
+    expect(holder.className).toContain('min-w-0');
+  });
+
+  it('keeps Sign out reachable — icon-only on a phone, still named', async () => {
+    renderShell(undefined, 'room_p');
+    const signOut = await screen.findByRole('button', { name: /sign out/i });
+    // Below `md` the label is an icon; the accessible name never goes away.
+    expect(signOut.className).toContain('shrink-0');
+    const label = within(signOut).getByText('Sign out');
+    expect(label.className).toContain('md:inline');
+    expect(label.className).toContain('hidden');
+  });
+
+  it('still signs out when the icon-only control is tapped', async () => {
+    renderShell(undefined, 'room_p');
+    const signOut = await screen.findByRole('button', { name: /sign out/i });
+    await userEvent.click(signOut);
+    await waitFor(() => expect(rec.urls.some((u) => u.includes('/logout'))).toBe(true));
   });
 });

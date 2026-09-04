@@ -7,7 +7,7 @@ import {
   useNavigate,
   useOutletContext,
 } from 'react-router-dom';
-import { ChevronDown, Plus } from 'lucide-react';
+import { ChevronDown, LogOut, Plus } from 'lucide-react';
 import { Logo, Gear } from './Logo.js';
 import { RoomBusyGlyph } from './StatusIndicator.js';
 import { PresenceAvatar } from './PresenceAvatar.js';
@@ -177,7 +177,11 @@ export function AppShell() {
   }, []);
 
   return (
-    <div className="relative flex app-height flex-col">
+    // `overflow-x-hidden` + `max-w-full` are a FLOOR, not a layout: every row
+    // below is individually shrinkable, and this only guarantees that a future
+    // one that isn't cannot make the whole document scroll sideways on a phone
+    // (measured 413px against a 390px viewport before the header was fixed).
+    <div className="relative flex app-height max-w-full flex-col overflow-x-hidden">
       {/* Ahead of the hamburger and the whole sidebar: without it, reaching the
           conversation meant re-tabbing every human, agent and room. */}
       <SkipLink />
@@ -197,13 +201,14 @@ export function AppShell() {
         </Link>
 
         {activeRoom ? (
-          // The title takes the remaining space AND reserves a floor: as a bare
-          // zero-basis `min-w-0 flex-1` the account nav next to it squeezed the
-          // room name down to a single-glyph sliver on a phone. The nav is the
-          // shrinkable side (its caller-name link truncates), never the title.
-          // The floor itself relaxes below `sm` so the three claims on the bar
-          // — title, caller name, Sign out — all fit at 375px (issue #58).
-          <div className="flex min-w-[5rem] flex-1 items-center gap-2 sm:min-w-[7rem] sm:gap-3">
+          // The title takes the remaining space and truncates. It used to
+          // reserve a min-width floor as well (issue #58, so the nav could not
+          // squeeze the room name to a single-glyph sliver) — but a floor here
+          // plus the nav's own floors is precisely what pushed Sign out off a
+          // 390px screen. Below `sm` the title is fully shrinkable and the nav
+          // gives up its label instead (the icon-only Sign out below); from
+          // `sm` up, where there is room for both, the floor comes back.
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:min-w-[7rem] sm:gap-3">
             <span className="h-4 w-px shrink-0 bg-[var(--sparrow-border-strong)]" aria-hidden="true" />
             <span className="min-w-0 truncate text-sm font-semibold">{activeTitle}</span>
             {activeRoom.room.kind !== 'dm' && activeRoom.room.archivedAt !== null && (
@@ -264,8 +269,12 @@ export function AppShell() {
               name truncates DOWN TO A FLOOR — as a `min-w-0` flex item it was
               free to shrink to a single glyph, which is what the bug report
               showed — and Sign out neither shrinks nor wraps: a two-line
-              control in a one-line bar reads as breakage, and it is short
-              enough that giving it its natural width costs the name nothing. */}
+              control in a one-line bar reads as breakage.
+
+              Below `md` the words "Sign out" become the door glyph instead.
+              That is ~50px back for the room title on a phone, and the control
+              keeps its accessible name either way — it is the label that goes,
+              never the affordance. */}
           <Link
             to="/me/settings"
             className="min-w-[3.5rem] max-w-[8rem] truncate rounded px-1 text-xs text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)] sm:max-w-[10rem]"
@@ -275,9 +284,12 @@ export function AppShell() {
           </Link>
           <button
             onClick={() => void signOut()}
-            className="shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)]"
+            aria-label="Sign out"
+            title="Sign out"
+            className="flex h-8 shrink-0 items-center whitespace-nowrap rounded-md px-2 text-xs text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)] md:px-2.5 md:py-1.5"
           >
-            Sign out
+            <LogOut size={16} aria-hidden="true" className="md:hidden" />
+            <span className="hidden md:inline">Sign out</span>
           </button>
         </nav>
       </header>

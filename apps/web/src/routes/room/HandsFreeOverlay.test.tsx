@@ -5,6 +5,24 @@ import type { CapabilitiesResponse } from '@sparrow/common-types';
 import { useFetch, restoreFetch, json, errorJson, binary } from '../../test/apiStub.js';
 import { CapabilitiesProvider } from '../../lib/capabilities.js';
 import { HandsFreeOverlay, type HandsFreeIncoming } from './HandsFreeOverlay.js';
+import { WORKING_CUE_KEY } from '../../lib/workingCue.js';
+
+/**
+ * The working cue is tested for what it SOUNDS like in `lib/workingCue.test.ts`;
+ * here the question is only when the overlay starts and stops it, so the module
+ * is spied rather than run.
+ */
+const { cueStart, cueStop } = vi.hoisted(() => ({ cueStart: vi.fn(), cueStop: vi.fn() }));
+vi.mock('../../lib/workingCue.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/workingCue.js')>();
+  return {
+    ...actual,
+    startWorkingCue: (_ctx: AudioContext, style: string) => {
+      cueStart(style);
+      return { stop: cueStop };
+    },
+  };
+});
 
 /* ================================================================== *
  * Browser fakes — jsdom has no media stack at all.
@@ -258,6 +276,12 @@ beforeEach(() => {
     value: vi.fn(() => 'blob:mock'),
   });
   Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+  // Cleared HERE, not in `afterEach`: React Testing Library's own cleanup hook
+  // unmounts the overlay after ours runs, and that unmount stops the cue — a
+  // call that would otherwise be counted against the NEXT test.
+  cueStart.mockClear();
+  cueStop.mockClear();
+  localStorage.clear();
   Object.defineProperty(Element.prototype, 'scrollIntoView', {
     configurable: true,
     writable: true,
@@ -871,6 +895,111 @@ describe('HandsFreeOverlay conversation column', () => {
     const bar = screen.getByTestId('hands-free-controls');
     expect(within(bar).getByRole('button', { name: /^send$/i })).toBeInTheDocument();
     expect(within(bar).getByRole('button', { name: /^cancel$/i })).toBeInTheDocument();
+  });
+});
+
+describe('HandsFreeOverlay at 390px', () => {
+  it('cannot scroll sideways, and long unbroken words wrap inside a turn', async () => {
+    const { rerenderWith } = renderOverlay();
+    const dialog = screen.getByRole('dialog', { name: /hands-free/i });
+    expect(dialog.className).toContain('overflow-x-hidden');
+
+    await sendOneTurn();
+    rerenderWith([
+      reply('msg_a', 'https://example.com/a/very/long/unbreakable/url/that/would/overflow'),
+    ]);
+    const them = await screen.findByTestId('hands-free-last-reply');
+    // A pasted URL read aloud is still a URL on screen; it must wrap, not push
+    // the column past the viewport.
+    expect(them.className).toContain('break-words');
+  });
+
+  it('lets the control bar shrink with the viewport instead of forcing a width', () => {
+    renderOverlay();
+    const bar = screen.getByTestId('hands-free-controls');
+    // `w-full` + a max, never a min: at 390px the max simply does not apply.
+    expect(bar.className).toContain('w-full');
+    expect(bar.className).not.toMatch(/\bmin-w-\[/);
+  });
+});
+
+/* ================================================================== *
+ * The working cue — "is it thinking, or is it broken?"
+ * ================================================================== */
+
+describe('HandsFreeOverlay working cue', () => {
+  it('sounds while awaiting a reply, in the stored style', async () => {
+    renderOverlay();
+    expect(cueStart).not.toHaveBeenCalled(); // silence until there is a wait
+    await sendOneTurn();
+    expect(cueStart).toHaveBeenCalledWith('tick'); // the default
+  });
+
+  it('stops the moment the reply starts speaking — it never talks over the voice', async () => {
+    const { rerenderWith } = renderOverlay();
+    await sendOneTurn();
+    expect(cueStop).not.toHaveBeenCalled();
+
+    rerenderWith([reply('msg_a', 'here it is')]);
+    await waitFor(() => expect(cueStop).toHaveBeenCalled());
+  });
+
+  it('stops when the wait is abandoned by tapping the mic', async () => {
+    renderOverlay();
+    await sendOneTurn();
+    await startListening();
+    expect(cueStop).toHaveBeenCalled();
+  });
+
+  it('stops when the mode is left', async () => {
+    const { unmount } = renderOverlay();
+    await sendOneTurn();
+    unmount();
+    expect(cueStop).toHaveBeenCalled();
+  });
+
+  it('never starts for a send that failed — there is nothing to wait for', async () => {
+    renderOverlay({ onSend: vi.fn(async () => null) });
+    await startListening();
+    await speakAndSend('undeliverable');
+    await screen.findByRole('alert');
+    expect(cueStart).not.toHaveBeenCalled();
+  });
+
+  it('"Off" schedules nothing at all', async () => {
+    localStorage.setItem(WORKING_CUE_KEY, 'off');
+    renderOverlay();
+    await sendOneTurn();
+    expect(cueStart).not.toHaveBeenCalled();
+  });
+
+  it('offers a Working sound selector, and remembers the choice per browser', async () => {
+    const first = renderOverlay();
+    const group = screen.getByRole('radiogroup', { name: /working sound/i });
+    expect(within(group).getByRole('radio', { name: 'Tick' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+
+    await userEvent.click(within(group).getByRole('radio', { name: 'Chime' }));
+    expect(localStorage.getItem(WORKING_CUE_KEY)).toBe('chime');
+
+    // A later session restores it.
+    first.unmount();
+    renderOverlay();
+    await sendOneTurn();
+    expect(cueStart).toHaveBeenCalledWith('chime');
+  });
+
+  it('changing the style mid-wait swaps the cue rather than layering it', async () => {
+    renderOverlay();
+    await sendOneTurn();
+    expect(cueStart).toHaveBeenCalledWith('tick');
+
+    const group = screen.getByRole('radiogroup', { name: /working sound/i });
+    await userEvent.click(within(group).getByRole('radio', { name: 'Pulse' }));
+    expect(cueStop).toHaveBeenCalled();
+    expect(cueStart).toHaveBeenLastCalledWith('pulse');
   });
 });
 

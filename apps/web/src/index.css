@@ -203,6 +203,36 @@ pre,
   --app-header-h: 3rem;
 }
 
+/*
+ * --- iOS auto-zoom: every text field is >= 16px on phones ------------------
+ *
+ * Mobile Safari ZOOMS the page in when a focused input/textarea/select computes
+ * to a font-size under 16px, and it does NOT zoom back out when the field
+ * blurs. One tap on the 14px composer left the whole app scaled up for the rest
+ * of the session: the header's Sign out and the composer's own Send button
+ * sheared off the right edge at 390px — and so did the welcome page, which has
+ * no input on it at all. That the clipping outlives the screen that caused it
+ * is what identifies the culprit.
+ *
+ * The fix belongs on the FIELD. `maximum-scale=1` / `user-scalable=no` on the
+ * viewport meta would also stop the zoom, at the price of pinch-zoom for
+ * everyone who needs it; that trade is not ours to make.
+ *
+ * Deliberately UNLAYERED: Tailwind's `text-sm` and friends live in the
+ * `utilities` layer, and an unlayered declaration outranks every layered one
+ * regardless of specificity — which is the only way one rule can cover every
+ * field in the app (composer, sidebar search, org settings, invite forms, docs
+ * search) without touching each component. Desktop keeps the 14px scale: this
+ * applies only below the `md` breakpoint.
+ */
+@media (max-width: 767px) {
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']),
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
 /* Keyboard focus — a warm ring, honored everywhere. */
 :where(a, button, input, textarea, [tabindex]):focus-visible {
   outline: 2px solid var(--sparrow-accent);

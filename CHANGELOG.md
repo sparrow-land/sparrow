@@ -14,6 +14,28 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-09-04
+
+### Fixed
+
+- **iPhone: the page no longer overflows sideways.** Two causes: Safari zooms the
+  page when a focused field is under 16px and keeps that zoom, so every input,
+  textarea and select is now 16px below 768px (the viewport meta is untouched —
+  pinch-zoom still works); and the app header could be pushed wider than the screen
+  by a room title, so the title truncates, Sign out becomes an icon on narrow
+  screens, and the shell can no longer widen the document. The hands-free column
+  wraps long words at 390px.
+
+### Added
+
+- **Hands-free working sound.** While a reply is pending, a subtle audible cue says
+  the system is working: **Tick** (a soft click every 1.5 s, default), **Chime** (two
+  soft notes every 4 s) or **Pulse** (a low swell every 2 s), or Off — chosen under the
+  controls and remembered per browser. It stops the instant the reply starts
+  speaking, or on Cancel, error or leaving the mode.
+
+Client floor: minimum 0.1.1, recommended 0.1.12.
+
 ## [0.1.11] — 2026-09-04
 
 ### Changed

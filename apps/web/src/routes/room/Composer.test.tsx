@@ -341,6 +341,18 @@ describe('Composer autosize (DOM effect)', () => {
   });
 });
 
+describe('Composer on a phone', () => {
+  it('renders the textarea at 16px below md, so iOS never zooms the page', () => {
+    // The global stylesheet rule covers every field; the composer states it
+    // outright as well, because it is the one field the whole app funnels
+    // through and the one that actually bit (Jake's iPhone session).
+    setup();
+    const ta = screen.getByRole('textbox');
+    expect(ta.className).toContain('text-base');
+    expect(ta.className).toContain('md:text-sm');
+  });
+});
+
 describe('Composer voice', () => {
   const wiring = { roomId: 'room_1', onSend: vi.fn(async () => 'msg_1') };
 

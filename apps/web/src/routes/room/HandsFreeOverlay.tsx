@@ -5,6 +5,14 @@ import { ApiError, openTranscriptionStream, type TranscriptionStream } from '@sp
 import { api } from '../../lib/client.js';
 import { useCapabilities } from '../../lib/capabilities.js';
 import { startPcmCapture, type PcmCapture } from '../../lib/pcmCapture.js';
+import {
+  WORKING_CUE_LABELS,
+  WORKING_CUE_STYLES,
+  loadWorkingCueStyle,
+  saveWorkingCueStyle,
+  startWorkingCue,
+  type WorkingCueStyle,
+} from '../../lib/workingCue.js';
 import { LevelMeter } from './LevelMeter.js';
 
 /**
@@ -159,6 +167,8 @@ export function HandsFreeOverlay({
   const [turns, setTurns] = useState<HandsFreeTurn[]>([]);
   /** Which turn is being read aloud right now (a subtle marker, not a state). */
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  /** The audible "still working" heartbeat during `awaiting` (per-browser choice). */
+  const [cueStyle, setCueStyle] = useState<WorkingCueStyle>(loadWorkingCueStyle);
 
   // Live capture handles. Refs, not state: teardown must be able to run from an
   // unmount cleanup, where no render will follow.
@@ -179,6 +189,12 @@ export function HandsFreeOverlay({
   // Playback. ONE element for the life of the overlay (see the autoplay note).
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  /**
+   * The cue's AudioContext. Built in the same tap as the `Audio` element and for
+   * the same reason: iOS only lets a context started from a gesture make sound,
+   * and the wait it fills begins long after the last one.
+   */
+  const cueCtxRef = useRef<AudioContext | null>(null);
   const queueRef = useRef<HandsFreeIncoming[]>([]);
   const seenRef = useRef<Set<string>>(new Set());
   const speakingRef = useRef(false);
@@ -266,6 +282,20 @@ export function HandsFreeOverlay({
     void Promise.resolve(audio.play()).catch(() => {
       /* a browser that refuses the silent frame will refuse the clip too */
     });
+
+    // Same gesture, same reason: the working cue needs a context that was born
+    // inside a tap. It is tiny and idle until `awaiting` asks it for a sound.
+    if (cueCtxRef.current) return;
+    try {
+      const Ctor = (globalThis as unknown as { AudioContext?: new () => AudioContext })
+        .AudioContext;
+      if (!Ctor) return;
+      const ctx = new Ctor();
+      cueCtxRef.current = ctx;
+      void Promise.resolve(ctx.resume?.()).catch(() => {});
+    } catch {
+      /* no Web Audio here — the mode works, just silently */
+    }
   }, []);
 
   const resetTranscript = useCallback(() => {
@@ -619,6 +649,35 @@ export function HandsFreeOverlay({
     if (next) speak(next);
   }, [incoming, phase, speak, addTurn]);
 
+  /**
+   * The cue runs for exactly as long as the wait does. Scoping it to the phase
+   * means every way OUT of `awaiting` — the reply speaking, tapping the mic to
+   * start another turn, an error, leaving the mode, unmounting — stops it
+   * through the same cleanup, with no exit path left to forget.
+   */
+  useEffect(() => {
+    if (phase !== 'awaiting' || error || cueStyle === 'off') return;
+    const ctx = cueCtxRef.current;
+    if (!ctx) return;
+    const cue = startWorkingCue(ctx, cueStyle);
+    return () => cue.stop();
+  }, [phase, error, cueStyle]);
+
+  // Release the cue's context with the overlay (the capture graph has its own).
+  useEffect(
+    () => () => {
+      const ctx = cueCtxRef.current;
+      cueCtxRef.current = null;
+      if (ctx && ctx.state !== 'closed') void Promise.resolve(ctx.close?.()).catch(() => {});
+    },
+    [],
+  );
+
+  const chooseCue = useCallback((style: WorkingCueStyle) => {
+    setCueStyle(style);
+    saveWorkingCueStyle(style);
+  }, []);
+
   /* ---------------------------------------------------------------- *
    * Render
    * ---------------------------------------------------------------- */
@@ -649,7 +708,7 @@ export function HandsFreeOverlay({
       role="dialog"
       aria-modal="true"
       aria-label="Hands-free voice mode"
-      className="fixed inset-0 z-50 flex flex-col bg-[var(--sparrow-bg)] px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+      className="fixed inset-0 z-50 flex flex-col overflow-x-hidden bg-[var(--sparrow-bg)] px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
     >
       <button
         type="button"
@@ -699,7 +758,7 @@ export function HandsFreeOverlay({
                 {...(turn.who === 'them' && turn.id === lastThemId
                   ? { 'data-testid': 'hands-free-last-reply' }
                   : {})}
-                className={`max-w-xl whitespace-pre-wrap leading-snug ${
+                className={`max-w-full whitespace-pre-wrap break-words leading-snug sm:max-w-xl ${
                   newest
                     ? 'text-lg text-[var(--sparrow-text)]'
                     : 'text-sm text-[var(--sparrow-muted)]'
@@ -721,7 +780,7 @@ export function HandsFreeOverlay({
             <p
               data-testid="hands-free-transcript"
               aria-live="polite"
-              className="min-h-[2rem] max-w-xl text-lg leading-snug text-[var(--sparrow-text)]"
+              className="min-h-[2rem] max-w-full break-words text-lg leading-snug text-[var(--sparrow-text)] sm:max-w-xl"
             >
               {committed}
               {partial && (
@@ -744,7 +803,7 @@ export function HandsFreeOverlay({
             <p
               data-testid="hands-free-transcript"
               aria-live="polite"
-              className="max-w-xl text-lg leading-snug text-[var(--sparrow-text)]"
+              className="max-w-full break-words text-lg leading-snug text-[var(--sparrow-text)] sm:max-w-xl"
             >
               {transcriptText}
             </p>
@@ -856,6 +915,39 @@ export function HandsFreeOverlay({
             </span>
           </>
         )}
+      </div>
+
+      {/* The cue's style, parked below the controls: a preference you set once
+          and then never look at, so it gets the smallest type on the screen and
+          none of the tap targets' room. */}
+      <div
+        role="radiogroup"
+        aria-label="Working sound"
+        data-testid="hands-free-cue-picker"
+        className="mx-auto flex w-full max-w-md shrink-0 flex-wrap items-center justify-center gap-1 pb-2 text-[11px]"
+      >
+        <span className="mr-1 text-[var(--sparrow-muted)]" aria-hidden="true">
+          Working sound
+        </span>
+        {WORKING_CUE_STYLES.map((style) => {
+          const on = style === cueStyle;
+          return (
+            <button
+              key={style}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              onClick={() => chooseCue(style)}
+              className={`rounded-full px-2 py-1 transition-colors ${
+                on
+                  ? 'bg-[var(--sparrow-accent-soft)] text-[var(--sparrow-accent)]'
+                  : 'text-[var(--sparrow-muted)] hover:text-[var(--sparrow-text)]'
+              }`}
+            >
+              {WORKING_CUE_LABELS[style]}
+            </button>
+          );
+        })}
       </div>
     </div>,
     document.body,
