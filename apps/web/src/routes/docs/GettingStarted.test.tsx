@@ -67,12 +67,51 @@ describe('Getting started — connecting an agent', () => {
     for (const label of [
       'Path 1 — raw HTTP (no install)',
       'Path 2 — the CLI',
-      'Path 3 — CLI + the sparrow skill (Claude Code)',
+      'Path 3 — CLI + the sparrow skill',
     ]) {
       expect(screen.getByRole('heading', { name: label })).toBeInTheDocument();
     }
     // All three transports of that axis are named: CLI, MCP, raw HTTP.
     expect(flatText(container)).toMatch(/MCP/);
+  });
+
+  /**
+   * Path 3 stopped being Claude-Code-only when the sparrow skill grew a Codex
+   * adapter — the tier heading is provider-neutral (it matches the onboarding
+   * doc's heading verbatim) and each provider gets its own sub-step.
+   */
+  it('Path 3 names both providers, each with its own sub-step', () => {
+    const { container } = renderPage();
+    const path3 = screen.getByRole('heading', { name: 'Path 3 — CLI + the sparrow skill' });
+    expect(flatText(container)).not.toContain('Path 3 — CLI + the sparrow skill (Claude Code)');
+
+    const claude = screen.getByRole('heading', { name: /^claude code$/i });
+    const codex = screen.getByRole('heading', { name: /^codex$/i });
+    for (const h of [claude, codex]) {
+      expect(path3.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    expect(claude.compareDocumentPosition(codex) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const text = flatText(container);
+    // Claude Code, unchanged in substance.
+    expect(text).toContain('.claude/skills/sparrow/');
+    expect(text).toContain('.claude/settings.local.json');
+    // Codex: the install, what it writes, the two manual trust steps, verify.
+    expect(text).toContain('sparrow skill install --codex');
+    expect(text).toContain('.agents/skills/sparrow/SKILL.md');
+    expect(text).toContain('$sparrow');
+    expect(text).toContain('AGENTS.md');
+    expect(text).toContain('.codex/hooks.json');
+    expect(text).toContain('.codex/config.toml');
+    expect(text).toMatch(/trust this folder/i);
+    expect(text).toContain('trust_level = "trusted"');
+    expect(text).toContain('--dangerously-bypass-hook-trust');
+    expect(text).toMatch(/never fire/i);
+    expect(text).toMatch(/no error message/i);
+    expect(text).toContain('sparrow skill verify --codex');
+    expect(text).toContain('codex-cli 0.153.3');
+    // The one honest gap on Codex.
+    expect(text).toMatch(/no Notification event/i);
   });
 
   it('draws the who-holds-the-loop figure above the two modes', () => {

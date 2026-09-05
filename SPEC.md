@@ -1874,6 +1874,90 @@ stdout, `-v` also streams the runner's stderr. Tokens never appear in either.
 The `sparrow` skill remains the inline-mode robustness layer (hooks, `await`, the Stop
 check); harness mode needs none of it, because there is no session to keep honest.
 
+### The inline skill (`sparrow skill`) — one core, per-harness adapters
+
+`sparrow skill install` (also `sparrow-skill` / `npx sparrow-skill`) is inline mode's
+robustness layer, and it supports **two agent harnesses**. Almost all of it is shared:
+the rendered playbook, the loop switch and heartbeat under `<project>/.sparrow` (or
+`~/.sparrow` at user scope), the credential ladder, the profile stamp, the shell hook
+scripts, the `.git/info/exclude` entries. Only four questions have per-harness answers —
+where the playbook goes and how it is invoked, where hooks register and in what shape,
+what those hooks receive and may print back, and what else must be true before any of it
+runs — so the package is a provider-neutral core plus one adapter per harness. The
+playbook is likewise ONE document (`assets/skill/base.md`) with per-provider fragments,
+never a forked copy: an agent on either harness reads the same queue, rhythm, register and
+wake lessons.
+
+Subcommands: `install` | `uninstall` | `pause` | `resume` | `status` | `verify`.
+Flags: `--user`, `--shared` (Claude Code only), `--profile <name>`, `--claude` | `--codex`.
+Without a provider flag the harness is **detected**: an existing sparrow install wins
+(so an upgrade never switches harness), else whichever of `.claude/`/`CLAUDE.md` or
+`.codex/`/`AGENTS.md` is present ALONE; if both are present the command refuses and asks
+for the flag; if neither is, it defaults to Claude Code (the historical behavior).
+
+**Claude Code adapter** — unchanged from v3. Playbook + hooks at
+`.claude/skills/sparrow/`; registrations merged into `.claude/settings.local.json`
+(personal; `--shared` targets the committed `.claude/settings.json`, `--user` targets
+`~/.claude/settings.json`), with BOTH files swept every time so exactly one registration
+survives. Events: `Stop` (the loop-drift / online-but-deaf block), `UserPromptSubmit`,
+`PostToolUse`, `Notification`. The settings `env` block also gets
+`CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, without which Claude Code's
+memory-pressure reaper kills the background `sparrow await` during exactly the idle
+stretch in which it is the agent's only wake path.
+
+**Codex adapter** (`--codex`; built and live-verified against **codex-cli 0.153.3**):
+
+- **Playbook** → `.agents/skills/sparrow/SKILL.md` (`~/.agents/…` at user scope) — Codex's
+  own skills system, YAML frontmatter `name` + `description`, invoked as `$sparrow` —
+  plus a SHORT marker-delimited section appended to the project's `AGENTS.md`
+  (`$CODEX_HOME/AGENTS.md` at user scope). Short on purpose: `AGENTS.md` has a 32KiB
+  budget and truncation is silent at a file boundary, so the fragment is a pointer.
+- **Hooks** → `.codex/hooks.json`. **The schema is not Claude Code's**: events nest under
+  a top-level `hooks` key — `{description?, hooks: {<Event>: [{hooks: [{type, command,
+  timeout?}]}]}}`. A Claude-shaped file is valid JSON, fails to deserialize, produces one
+  stderr warning, and then runs NO hooks. Foreign hooks in the same file are preserved;
+  ours are merged and removed by marker.
+- **Events** → `Stop` (`{"decision":"block"}` re-arms the turn and the retry carries
+  `stop_hook_active`, so the mechanical guarantee survives), `SessionStart` (whose
+  `hookSpecificOutput.additionalContext` injects the come-online protocol — Codex has no
+  per-turn system channel), `UserPromptSubmit` (plain stdout is injected, as on Claude
+  Code) and `PostToolUse`. Codex has **no `Notification` event**, so nothing sets
+  *blocked — needs your input*; the playbook says so instead of pretending. Payloads are
+  snake_case with PascalCase event values — byte-identical to what the shared shell hooks
+  already parse, so those scripts are reused unmodified.
+- **Paths are baked ABSOLUTE at install time**: a Codex hook payload has no
+  `$CLAUDE_PROJECT_DIR` equivalent, so a moved checkout needs a re-install. Nothing is
+  written to `[shell_environment_policy]`; the credential-file ladder stays the only
+  credential path.
+- **Config** → a marker-delimited managed block in `.codex/config.toml` carrying the two
+  documented inline prerequisites: `sandbox_workspace_write.network_access = true`
+  (without it every model-run command sits in a private network namespace and cannot
+  reach the server, localhost included) and a `writable_roots` entry for the state dir
+  when it lives outside the workspace (`$HOME` is read-only under `workspace-write`). A
+  file that already declares `[sandbox_workspace_write]` is left alone with a printed
+  warning — a second table would be invalid TOML. Note the TOML footgun: a bare key after
+  a `[table]` header joins that table, so the block writer emits top-level keys first.
+- **Trust — two silent gates the installer CANNOT open.** Project-scoped `.codex/` files
+  are ignored outright until the project is trusted (`[projects."<abs>"] trust_level =
+  "trusted"` in `~/.codex/config.toml`, or answering *trust this folder*), and a
+  non-managed hook additionally needs per-hook review (`/hooks` in the TUI, or
+  `--dangerously-bypass-hook-trust` headless). Neither gate reports anything when unmet.
+  The install therefore PRINTS both steps verbatim, and:
+- **`sparrow skill verify` reports FIRING, not existence.** Every installed Codex hook
+  runs through a wrapper that stamps `<state dir>/hooks-fired/<Event>`. `verify`
+  parse-validates the hooks file against the real schema, confirms our registration and
+  the playbook, and then reports which events have actually been observed firing. An
+  event that never fired is reported **UNVERIFIED**, never green, and any unverified or
+  failed check makes the command exit non-zero — so a script can never read "we don't
+  know" as "fine". It takes one real Codex turn to go green. `status` states trust as
+  UNVERIFIED on the same evidence.
+- **Uninstall and re-install are idempotent for both harnesses**: markers in `AGENTS.md`
+  and `config.toml`, entry-level merge in `hooks.json`. Files that held nothing but our
+  block are removed; everything foreign survives byte-identical.
+- `.git/info/exclude` gains `.sparrow/`, `.agents/skills/sparrow/` and `.codex/`.
+  `AGENTS.md` is deliberately left out — it is small, shared and marker-delimited, so it
+  is meant to be committed.
+
 ## The email medium
 
 Email is the second medium (chat is the first). It gives every **agent** a real,

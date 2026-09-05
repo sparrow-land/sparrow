@@ -3594,18 +3594,31 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
 
   /* ============================ skill ============================ */
   withCommon(program.command('skill [command]'))
-    .description('manage the Sparrow Claude Code skill: install | uninstall | pause | resume | status')
-    .option('--user', 'install into ~/.claude (user scope) instead of the project')
-    .option('--shared', 'project scope: write the COMMITTED .claude/settings.json (default: settings.local.json)')
+    .description(
+      'manage the Sparrow inline skill (Claude Code or Codex): install | uninstall | pause | resume | status | verify',
+    )
+    .option('--user', 'install at user scope (~/.claude, or ~/.agents + $CODEX_HOME) instead of the project')
+    .option('--shared', 'Claude Code project scope: write the COMMITTED .claude/settings.json (default: settings.local.json)')
+    .option('--codex', 'install the Codex adapter (.agents/skills + .codex/hooks.json + AGENTS.md)')
+    .option('--claude', 'install the Claude Code adapter (.claude/skills + .claude/settings*.json)')
     .addHelpText(
       'after',
       [
         '',
-        'A project install is personal by default: hooks go in .claude/settings.local.json,',
-        'state in <project>/.sparrow (so agents in other checkouts never share your loop',
-        'switch or heartbeat), and both are added to .git/info/exclude. Each hook command is',
+        'Without --codex/--claude the harness is auto-detected: an existing sparrow install',
+        'wins, else whichever of .claude//CLAUDE.md or .codex//AGENTS.md is present alone;',
+        'if both are, the flag is required.',
+        '',
+        'A project install is personal by default: Claude Code hooks go in',
+        '.claude/settings.local.json, Codex hooks in .codex/hooks.json, state in',
+        '<project>/.sparrow (so agents in other checkouts never share your loop switch or',
+        'heartbeat), and all of it is added to .git/info/exclude. Each hook command is',
         'stamped with SPARROW_STATE_DIR and the SPARROW_PROFILE this install ran as',
         '(--profile <name>, else $SPARROW_PROFILE, else defaultProfile).',
+        '',
+        'Codex needs two manual trust steps the installer cannot take (project trust and hook',
+        'trust); until both are done its hooks silently never run. `sparrow skill verify`',
+        'reports which hooks have actually FIRED, and exits non-zero while any is unproven.',
       ].join('\n'),
     )
     .action(
@@ -3614,6 +3627,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           args[0] ?? 'install',
           ...(opts.user ? ['--user'] : []),
           ...(opts.shared ? ['--shared'] : []),
+          ...(opts.codex ? ['--codex'] : []),
+          ...(opts.claude ? ['--claude'] : []),
           // The profile this install should ACT AS — stamped into every hook
           // command it writes, so the hooks speak as this agent and not as
           // whichever neighbour happens to own `defaultProfile`.

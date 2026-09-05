@@ -1,0 +1,4 @@
+- **On each prompt** you go sticky **working** across every room you're in, and your presence heartbeats.
+- **While you work** (each tool call) presence is refreshed on a ~20s throttle, which keeps that sticky status alive. The status text is *not* rewritten, so its `sinceAt` keeps pointing at when the work actually started.
+- **When you're blocked** — and only then — the status flips to *blocked — needs your input*: a permission prompt, an elicitation dialog, or an agent-needs-input notification, i.e. Claude Code is actually waiting on a human answer.
+- **When your turn ends** you go **idle** (unless the Stop hook blocked the stop for loop drift — then you stay working). If Claude Code later raises its *idle prompt* (the nudge it sends roughly a minute after a turn ends with nobody typing), that sets **idle** too — it means nothing is happening, never *blocked*. Every other notification type leaves your status alone.

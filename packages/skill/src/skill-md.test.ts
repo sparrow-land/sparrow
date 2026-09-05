@@ -8,18 +8,21 @@
  *   (on an instance without the medium the file must not pretend it exists);
  * - carry the register lesson — an email is a document, not a turn.
  *
- * These assertions run against BOTH the shipped `assets/SKILL.md` and the
- * embedded copy `src/assets-gen.ts` installs from a single-file bundle, so the
- * two can never drift.
+ * These assertions run against the RENDERED Claude Code playbook — the exact
+ * bytes an install writes — which is `assets/skill/base.md` with the
+ * `assets/skill/claude/*` fragments substituted in. The Codex playbook renders
+ * from the same base and is pinned by `skill-md-codex.test.ts`; everything
+ * asserted in both files is, by construction, the provider-neutral core.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { EMBEDDED_ASSETS } from './assets-gen.js';
+import { renderSkillMd } from './skill-md.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const skillMd = fs.readFileSync(path.join(here, '..', 'assets', 'SKILL.md'), 'utf8');
+const skillMd = renderSkillMd('claude');
 
 /**
  * The canonical register paragraph lives in `packages/common-types`
@@ -374,19 +377,60 @@ describe('SKILL.md — auto-status notification semantics', () => {
   });
 });
 
+/**
+ * The embedded map is what a single-file bundle (the API-served `sparrow.js`
+ * CLI) installs from, and it is now also what {@link renderSkillMd} reads — so a
+ * fragment edited on disk without `pnpm gen-assets` would ship the OLD playbook
+ * while every assertion above still read the new one. This sweep is the guard.
+ */
 describe('SKILL.md — the embedded copy', () => {
-  it('matches the shipped asset byte for byte (run `pnpm gen-assets`)', () => {
-    expect(EMBEDDED_ASSETS['SKILL.md']).toBe(skillMd);
+  const assetsRoot = path.join(here, '..', 'assets');
+  const walk = (dir: string, prefix = ''): string[] =>
+    fs.readdirSync(dir).flatMap((name) => {
+      const full = path.join(dir, name);
+      const rel = prefix ? `${prefix}/${name}` : name;
+      return fs.statSync(full).isDirectory() ? walk(full, rel) : [rel];
+    });
+
+  it('matches every shipped asset byte for byte (run `pnpm gen-assets`)', () => {
+    const shipped = walk(assetsRoot).sort();
+    expect(Object.keys(EMBEDDED_ASSETS).sort()).toEqual(shipped);
+    for (const rel of shipped) {
+      expect(EMBEDDED_ASSETS[rel]).toBe(
+        fs.readFileSync(path.join(assetsRoot, ...rel.split('/')), 'utf8'),
+      );
+    }
   });
 
-  it('embeds every shipped hook script too, byte for byte', () => {
-    const hooksDir = path.join(here, '..', 'assets', 'hooks');
-    const shipped = fs.readdirSync(hooksDir).filter((f) => f.endsWith('.sh')).sort();
-    // v2's two hooks: the loop-check and the auto-status hook that absorbed the
-    // standalone presence heartbeat.
-    expect(shipped).toEqual(['sparrow-auto-status.sh', 'sparrow-stop-check.sh']);
-    for (const f of shipped) {
-      expect(EMBEDDED_ASSETS[`hooks/${f}`]).toBe(fs.readFileSync(path.join(hooksDir, f), 'utf8'));
+  it('ships exactly the hook scripts the two adapters install', () => {
+    const shipped = fs
+      .readdirSync(path.join(assetsRoot, 'hooks'))
+      .filter((f) => f.endsWith('.sh'))
+      .sort();
+    // The two shared hooks (the loop-check and the auto-status hook that
+    // absorbed the standalone presence heartbeat), plus Codex's two: the
+    // SessionStart injector and the wrapper that stamps "this hook really fired".
+    expect(shipped).toEqual([
+      'sparrow-auto-status.sh',
+      'sparrow-codex-hook.sh',
+      'sparrow-session-start.sh',
+      'sparrow-stop-check.sh',
+    ]);
+  });
+
+  it('gives both providers a fragment for every placeholder in the base', () => {
+    const base = EMBEDDED_ASSETS['skill/base.md']!;
+    const used = [...base.matchAll(/\{\{sparrow:([a-z-]+)\}\}/g)].map((m) => m[1]!);
+    expect(new Set(used).size).toBe(used.length); // no placeholder used twice
+    for (const provider of ['claude', 'codex']) {
+      for (const key of used) {
+        expect(EMBEDDED_ASSETS[`skill/${provider}/${key}.md`]).toBeTypeOf('string');
+      }
+      // …and no orphan fragments left behind by a removed placeholder.
+      const owned = Object.keys(EMBEDDED_ASSETS)
+        .filter((k) => k.startsWith(`skill/${provider}/`))
+        .map((k) => k.slice(`skill/${provider}/`.length, -'.md'.length));
+      expect(owned.sort()).toEqual([...used].sort());
     }
   });
 

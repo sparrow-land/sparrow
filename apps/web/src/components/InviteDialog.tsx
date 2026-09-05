@@ -11,6 +11,16 @@ import { Modal } from './Modal.js';
 import { Terminal } from './Terminal.js';
 import { InviteByEmail } from './InviteByEmail.js';
 import { LoopModeArt } from './LoopModeArt.js';
+// One home for what each runtime is and needs — shared with the invite LANDING
+// PAGE, so the two surfaces cannot drift apart on it (see AgentRuntimes).
+import {
+  CodexInlineSteps,
+  INLINE_RUNTIMES,
+  RUNTIMES,
+  RUNTIME_HINT,
+  type InlineRuntime,
+  type Runtime,
+} from './AgentRuntimes.js';
 
 /**
  * THE invite dialog — one door, three entry points, one step at a time.
@@ -43,31 +53,6 @@ export type InviteStep = 'who' | 'person' | 'agent';
 
 /** How the agent will be driven — the one real choice on the `agent` step. */
 type LoopMode = 'harness' | 'inline';
-
-/** Which runner the harness spawns; only changes one flag on the command. */
-type Runtime = 'claude' | 'codex' | 'gemini' | 'other';
-
-const RUNTIMES: { id: Runtime; label: string; flag: string }[] = [
-  { id: 'claude', label: 'Claude Code', flag: '' },
-  { id: 'codex', label: 'Codex', flag: ' --codex' },
-  { id: 'gemini', label: 'Gemini', flag: ' --gemini' },
-  { id: 'other', label: 'Other', flag: " --exec '<your command>'" },
-];
-
-/**
- * The ONE option worth naming under each runtime's command, before the shared
- * `--cwd`. Per-runtime because the flags are: `--model sonnet` is a Claude
- * alias and means nothing to Codex, whose own decision at this point is how
- * much of the working tree its runs may write (exported so the invite LANDING
- * PAGE shows the same thing this dialog does).
- */
-export const RUNTIME_HINT: Record<Runtime, { flag: string; what: string } | null> = {
-  claude: { flag: '--model sonnet', what: 'picks a model' },
-  // The harness pins codex to workspace-write; this narrows it.
-  codex: { flag: '--sandbox read-only', what: 'narrows what it may write' },
-  gemini: { flag: '--model <name>', what: 'picks a model' },
-  other: null,
-};
 
 const eyebrowClass = 'text-xs uppercase tracking-wider text-[var(--sparrow-faint)]';
 const helperClass = 'text-xs text-[var(--sparrow-muted)]';
@@ -392,7 +377,7 @@ export function harnessCommand(url: string, runtime: Runtime): string {
   return [
     '# on a machine that stays up',
     INSTALL_COMMAND,
-    `sparrow harness${flag} \\`,
+    `sparrow harness${flag ? ` ${flag}` : ''} \\`,
     `  --url ${url}`,
   ].join('\n');
 }
@@ -414,6 +399,10 @@ function AgentStep({
 }) {
   const [mode, setMode] = useState<LoopMode>('harness');
   const [runtime, setRuntime] = useState<Runtime>('claude');
+  // Inline keeps its OWN pick: the two lists are different (the skill installs
+  // for two providers; the harness execs anything), so one shared piece of state
+  // would answer a question the other mode never asked.
+  const [inlineRuntime, setInlineRuntime] = useState<InlineRuntime>('claude');
 
   const code =
     url === null
@@ -494,11 +483,37 @@ function AgentStep({
         </div>
       ) : (
         <div className="mt-4">
-          <InviteTerminal url={url} error={error} label="invitation" code={code} wrap />
+          {/* Which agent is open on the other side decides what comes AFTER the
+              paste: on Codex the skill needs a flag and two trust steps only a
+              human can do. Same picker shape as the harness branch above. */}
+          <div
+            role="tablist"
+            aria-label="Inline agent runtime"
+            className="inline-flex flex-wrap rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-bg)] p-0.5 text-xs"
+          >
+            {INLINE_RUNTIMES.map((r) => (
+              <TabButton
+                key={r.id}
+                active={inlineRuntime === r.id}
+                onClick={() => setInlineRuntime(r.id)}
+              >
+                {r.label}
+              </TabButton>
+            ))}
+          </div>
+          <div className="mt-3">
+            <InviteTerminal url={url} error={error} label="invitation" code={code} wrap />
+          </div>
           <p className={`mt-2 ${helperClass}`}>
             Paste this into your agent. It fetches the URL, reads the onboarding doc, asks you for a
             name, and enrolls. Then approve it below.
           </p>
+          {inlineRuntime === 'codex' && (
+            <div className="mt-3 border-t border-[var(--sparrow-border)] pt-3">
+              <p className={eyebrowClass}>Then, on Codex</p>
+              <CodexInlineSteps className={`mt-1.5 ${helperClass}`} />
+            </div>
+          )}
         </div>
       )}
 

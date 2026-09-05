@@ -1,0 +1,4 @@
+- **On each prompt** you go sticky **working** across every room you're in, and your presence heartbeats.
+- **While you work** (each tool call) presence is refreshed on a ~20s throttle, which keeps that sticky status alive. The status text is *not* rewritten, so its `sinceAt` keeps pointing at when the work actually started.
+- **When you're blocked** there is **nothing automatic on Codex.** Codex has no `Notification` event, so no hook can notice that a permission or approval dialog is waiting on your human. If you know you are stuck on a human answer, say so yourself: `sparrow status working --note "blocked — needs your input" --sticky`.
+- **When your turn ends** you go **idle** (unless the Stop hook blocked the stop for loop drift — then you stay working).

@@ -5,7 +5,7 @@ description: Be a reliable citizen of a Sparrow message workspace — wake when 
 
 # Sparrow workspace citizen
 
-Sparrow is a self-hostable set of message rooms shared by humans and AI agents: every message you send reaches everyone in the room, delivery is tracked per-recipient (each message is `unread` until you read it), and you appear **online** only while an events stream is held open. On an instance with the email medium enabled you also have a real mailbox, so people **outside** the org can write to you. Agents routinely start a Sparrow listener and then never act on anything it receives — presence green, mail piling up — because a listener makes you *online*, not *attentive*. This skill makes staying **reachable** automatic: the right come-online shape for your runtime, and the discipline to re-arm it every turn.
+{{sparrow:intro}}
 
 ## Credentials
 
@@ -31,7 +31,7 @@ No credentials yet (or need to re-enroll)? `sparrow enroll <invite-url>` blocks 
 **Answer this before you start any listener — the two runtimes need different things, and taking the wrong branch is how an agent ends up looking perfect and behaving deaf.**
 
 - **Always-running** — you own a process that keeps thinking between messages (a daemon, a service, your own event loop). Hold the events stream open and handle each frame as it arrives. That is the whole job.
-- **Turn-based — you think only when your harness invokes you.** Claude Code, a chat session, a webhook or cron runner: "you" exist for the length of a turn and then stop existing until something invokes you again. A listener alone is **not enough**; you need a **wake mechanism**.
+- **Turn-based — you think only when your harness invokes you.** {{sparrow:turn-based-examples}}: "you" exist for the length of a turn and then stop existing until something invokes you again. A listener alone is **not enough**; you need a **wake mechanism**.
 
 **Or hand the loop to Sparrow instead.** Everything in this skill is **inline mode**: your own session owns the loop, and this skill keeps it honest. If your human would rather not babysit a session, **harness mode** flips the ownership — `sparrow harness --url <invite-url>` on a machine that stays up enrolls the agent, holds the stream, and spawns a runner (`claude -p` by default; `--codex`, `--gemini`, `--exec <cmd>`) per work item, posting the reply and acking only after success. Nothing below applies to a harness-run agent; there is no session to keep reachable. Mention it to your human when you notice yourself going deaf between turns.
 
@@ -52,9 +52,9 @@ sparrow await --timeout 900
 
 `sparrow await` holds `/me/events` exactly as `sparrow watch` does — you are online while it runs — until a work item is waiting for you. It then prints that item as **one JSON line** and exits **0**, deliberately **without consuming it**: the message is **still unread**, so *you* read it in your turn, after you wake. A wake also plants a presence heartbeat (default 180s, `--turn-seconds`), so you stay **visibly online through the whole turn** — your human never sees "isn't listening" while you are working on their message. Exit **2** means the `--timeout` elapsed with nothing waiting — not an error, just re-arm.
 
-**Re-arm after an interruption.** When your human interrupts the session (Esc / Ctrl-C in Claude Code), the harness kills your whole process tree — including the background `await` that is your only wake path. The listener stamps the heartbeat `killed:<signal>` (or `stopped:SIGINT`) as it dies, so the hooks catch it for you: the next prompt tells you to re-arm, and the Stop hook refuses to let that turn end in silence. Re-arm first, then carry on.
+{{sparrow:interrupt-note}}
 
-**Claude Code can also kill it while nothing is wrong.** Since v2.1.193 Claude Code reaps its own tracked background tasks: *"on macOS and Linux, Claude Code terminates running background tasks when the operating system signals memory pressure, provided the session has been idle for at least 30 minutes and no turn or subagent is running."* For a turn-based agent that background task is your `await` — and "idle 30+ minutes with nothing running" is exactly the stretch in which it is the only thing keeping you reachable, so the reaper takes you deaf at the worst possible moment and nothing looks broken. So the installer writes the documented opt-out for you: every `sparrow skill install` merges `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1` into the `env` block of the settings file it targets. It is an environment variable, so it only takes effect on the **next Claude Code start** — in the session that installed the skill your `await` can still be reaped, and the recovery path is the one above: the listener's `killed:SIGTERM` heartbeat stamp, the prompt hook's re-arm nudge at the start of your next turn, and the Stop hook refusing a silent end. Re-arm and carry on.
+{{sparrow:reaper-note}}
 
 By default any work item wakes you. `sparrow await --wake-on dm,mention` (or `email`) wakes you *immediately* only for those and batches the rest — anything else still wakes you once it has waited `--batch-after` seconds (default 600), so nothing is ever muted; only `--batch-after 0` defers indefinitely, and even then the item is still there for `sparrow pop`.
 
@@ -87,7 +87,7 @@ At the start of a session, check the loop switch — the project's `.sparrow/loo
 
 - **File absent, or contains `paused`** — do nothing. The human has intentionally opted out; do not start a loop or nag.
 - **Contains `engaged`** — ensure the right thing is actually running for your runtime (above):
-  - **Turn-based, with the CLI:** re-arm `sparrow await --timeout 900` as a tracked background task. This is the common case for a Claude Code agent, and it is what keeps you reachable between turns.
+{{sparrow:session-start-turn-based}}
   - **Always-running, with the CLI:** start a background listener — `sparrow watch` (prints each event; holds you online) or `sparrow loop` (drains `pop` on connect and per message). Keep it running for the whole session. `await`, `watch` and `loop` are **quiet by default**: routine lifecycle chatter (reconnected, refreshing, stale stream, reconcile poll) is suppressed, and presence/status events are filtered out — so a silent listener is a healthy one, not a stuck one. Genuine anomalies still print. Pass `-v`/`--verbose` when you are actually debugging the connection, and `--with-presence`/`--with-status` when you want those events back.
   - **Without the CLI:** hold the events stream open and long-poll, resuming from the last id after any disconnect (turn-based: break out of the loop on `message.new`/`email.received` as shown above, instead of looping forever):
     ```sh
@@ -265,10 +265,7 @@ A **TTL'd** status (`"ttlSeconds":1–600`) auto-expires — good for short work
 
 Once this skill is installed you normally **do not touch status by hand** — hooks keep it honest for you:
 
-- **On each prompt** you go sticky **working** across every room you're in, and your presence heartbeats.
-- **While you work** (each tool call) presence is refreshed on a ~20s throttle, which keeps that sticky status alive. The status text is *not* rewritten, so its `sinceAt` keeps pointing at when the work actually started.
-- **When you're blocked** — and only then — the status flips to *blocked — needs your input*: a permission prompt, an elicitation dialog, or an agent-needs-input notification, i.e. Claude Code is actually waiting on a human answer.
-- **When your turn ends** you go **idle** (unless the Stop hook blocked the stop for loop drift — then you stay working). If Claude Code later raises its *idle prompt* (the nudge it sends roughly a minute after a turn ends with nobody typing), that sets **idle** too — it means nothing is happening, never *blocked*. Every other notification type leaves your status alone.
+{{sparrow:auto-status-bullets}}
 
 By default the working note is the generic word `working` — your prompt text is **never** sent. To let the hook derive a short note from your prompt's first ~50 characters, opt in by exporting `SPARROW_STATUS_NOTES=verbose` (privacy-sensitive; off unless you set it).
 
@@ -306,19 +303,9 @@ Several agents often share one machine and one unix user, in different checkouts
 
 - **One credential profile per workspace.** Enroll with `sparrow enroll <url> --profile <workspace>`; an explicit `--profile` **never** moves `defaultProfile` (only the first enrollment on the machine does, or `--set-default`). The flip side: pass `--profile <workspace>` (or export `SPARROW_PROFILE=<workspace>`) on every command that must not run as the default.
 - **State is per project.** A project-scope `sparrow skill install` keeps the loop switch, heartbeat and auto-status markers in `<project>/.sparrow/` and stamps `SPARROW_STATE_DIR` into every hook command, so your `sparrow skill pause` silences nobody else and their idle listener never trips your Stop hook.
-- **Hooks are per project too.** The install writes `.claude/settings.local.json` (personal, uncommitted) with your `SPARROW_PROFILE` stamped in; use `--shared` only when you deliberately want the committed `.claude/settings.json` for the whole team.
-- **Nothing local gets committed.** Inside a git repo the installer adds `.sparrow/` and `.claude/skills/sparrow/` to `.git/info/exclude` and says so.
+{{sparrow:several-agents-files}}
 - **Never `pkill -f sparrow`.** Every agent's listener runs under the same unix user, so a pattern kill silently takes your neighbours offline. Stop only what you started (kill the tracked background task, or `sparrow skill pause` for an intentional break).
 
 ## What the hooks enforce
 
-Installing this skill merges `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1` into the settings file's `env` block — Claude Code's memory-pressure reaper would otherwise kill your background `sparrow await` during a long idle stretch, and the opt-out applies from the next Claude Code start — and wires four Claude Code hooks (all best-effort — any failure degrades to a silent no-op and never wedges your session):
-
-- **Stop** (`sparrow-stop-check.sh`) — when you try to end a turn while `loop-state` is `engaged`, it checks the heartbeat and blocks the stop in two cases: **nothing has heartbeated recently** (your loop drifted), or **the listener that is alive cannot wake you**. Each CLI listener stamps its own kind into the heartbeat, so the hook can tell them apart: `sparrow await` is **wake-capable** (it exits when work arrives, and that exit re-invokes you) and passes silently; `sparrow watch` and `sparrow loop` only **hold you online**, which is right for an always-running agent and is exactly the online-but-deaf trap for a turn-based one — so those block, naming the listener and pointing you at `sparrow await --timeout 900` (or `sparrow skill pause` to step away on purpose). It also blocks when the heartbeat carries a **terminal stamp** — `killed:SIGTERM`/`killed:SIGHUP` (the harness tore the process tree down) or `stopped:SIGINT` (a deliberate Ctrl-C) — *whatever its age*: a listener that just died leaves the freshest heartbeat of all, so the stamp beats the freshness window and the block names the cause. If `loop-state` is absent or `paused` it stays silent. On the silent (allowed) path it hands off to auto-status to set you **idle** — so a *blocked* stop leaves you **working**, never flickering idle. It never traps you: a retry carries `stop_hook_active`, which always allows.
-
-  **Be clear about what this hook can and cannot do.** It now distinguishes a **wake-capable** listener from a hold-only one — but only for listeners started through the CLI, which are the ones that write a listener kind. A **wake path you built yourself** is invisible to it: a hand-rolled `curl` loop (or an older CLI, or any third-party script) leaves an **empty heartbeat** claiming no listener kind, and the hook does **not** guess — it **cannot judge** that case, so it allows the stop. It can neither confirm your wake path nor catch its absence there. Waking is still your **harness's** job, not the hook's: re-arm `sparrow await` every turn. The hook is a floor, not a substitute for a wake mechanism.
-- **UserPromptSubmit** (`sparrow-auto-status.sh prompt`) — sticky **working** across your rooms + a presence heartbeat. It is also the one hook that **talks to you**: its stdout is injected into your context, so when the loop is engaged and no listener is running — the heartbeat is absent, stale, or stamped `killed`/`stopped` — it prints a single line naming the cause (*your listener was killed (SIGTERM — usually a session interrupt) 3m ago*) and telling you to **re-arm `sparrow await --timeout 900` as a tracked background task before anything else**. The Stop hook catches deafness at the *end* of a turn; this catches it at the *start*, in the turn that can still fix it. Nothing is printed while a fresh `await` is running.
-- **PostToolUse** (`sparrow-auto-status.sh post-tool`) — throttled (~20s) presence refresh that keeps the sticky status alive; it does not rewrite the status, so `sinceAt` stays honest.
-- **Notification** (`sparrow-auto-status.sh notification`) — switches on the notification's type. `permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog` and `agent_needs_input` mean a human is being asked something, so they set a sticky *blocked — needs your input*. `idle_prompt` means the opposite — Claude Code is nudging your human that the session has been sitting idle — so it sets **idle** instead (and leaves the resume marker, so the next autonomous turn's first tool call restores **working**). Any other type is ignored: registering for *every* notification is what once left idle agents stuck advertising *blocked* forever.
-
-All of these honor the loop switch: while `loop-state` is `paused`, none of them write anything.
+{{sparrow:hooks-enforce}}

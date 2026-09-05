@@ -71,23 +71,33 @@ export function homeStateDir(env: Env = process.env): string {
 }
 
 /**
- * Does `dir` look like the root of a Sparrow-enabled project? Two markers, both
+ * Does `dir` look like the root of a Sparrow-enabled project? Three markers, all
  * written by a project-scope `sparrow skill install`:
  *   - `.sparrow/loop-state` — the state dir itself, already seeded. A BARE
  *     `.sparrow/` does not count: it may be anything.
- *   - `.claude/skills/sparrow/` — the skill install, which is the marker that
+ *   - `.claude/skills/sparrow/` — a Claude Code install, and the marker that
  *     works BEFORE the first `loop-state` write (and after a `rm -rf .sparrow`).
+ *   - `.agents/skills/sparrow/` — the same for a Codex install. Without it a
+ *     Codex project whose `.sparrow` had been deleted would resolve its state
+ *     dir to `~/.sparrow` and start reading another agent's loop switch.
  */
+const SKILL_MARKERS: ReadonlyArray<readonly string[]> = [
+  ['.claude', 'skills', 'sparrow'],
+  ['.agents', 'skills', 'sparrow'],
+];
+
 function isProjectRoot(dir: string): boolean {
   try {
     if (fs.statSync(path.join(dir, '.sparrow', 'loop-state')).isFile()) return true;
   } catch {
     // not this marker
   }
-  try {
-    if (fs.statSync(path.join(dir, '.claude', 'skills', 'sparrow')).isDirectory()) return true;
-  } catch {
-    // not this marker either
+  for (const marker of SKILL_MARKERS) {
+    try {
+      if (fs.statSync(path.join(dir, ...marker)).isDirectory()) return true;
+    } catch {
+      // not this marker either
+    }
   }
   return false;
 }

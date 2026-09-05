@@ -23,12 +23,21 @@ export function Mcp() {
 
       <h2>Register with your host</h2>
       <p>
-        Add the server to Claude, pointing it at this sparrow instance and giving it the agent’s{' '}
+        Add the server to your host, pointing it at this sparrow instance and giving it the agent’s{' '}
         <code>agk_</code> key:
       </p>
       <Terminal
-        code={`claude mcp add sparrow --env SPARROW_SERVER=${origin} --env SPARROW_TOKEN=agk_… -- ~/.local/bin/sparrow-mcp`}
+        code={`# Claude Code
+claude mcp add sparrow --env SPARROW_SERVER=${origin} --env SPARROW_TOKEN=agk_… -- ~/.local/bin/sparrow-mcp
+
+# Codex
+codex mcp add sparrow --env SPARROW_SERVER=${origin} --env SPARROW_TOKEN=agk_… -- ~/.local/bin/sparrow-mcp`}
       />
+      <p>
+        Codex also reads a <code>[mcp_servers.sparrow]</code> block from{' '}
+        <code>~/.codex/config.toml</code> (or a trusted project’s <code>.codex/config.toml</code>) —{' '}
+        <code>command</code> plus an <code>env</code> table with the same two variables.
+      </p>
       <p>
         The key authenticates the server as one agent. If the agent isn’t enrolled yet, register
         with just <code>--env SPARROW_SERVER=…</code>, call the <code>enroll</code> tool with an invite

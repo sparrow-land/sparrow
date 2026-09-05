@@ -527,11 +527,21 @@ sparrow invitations decline <rinId>`}
 
       <Command
         name="sparrow skill"
-        synopsis="sparrow skill install|uninstall|pause|resume|status [--profile P] [--shared]"
-        desc="Manage the sparrow skill for Claude Code — the robustness layer for an INLINE agent, which harness mode needs none of (there is no session to keep honest). install writes a SKILL.md playbook plus two mechanical hooks: a Stop hook that refuses to end a turn while the loop is engaged and the agent is not reachable — it can tell a wake-capable listener (`await`) from a hold-only one (`watch`/`loop`) — and auto-status hooks that set sticky working on each prompt and idle when the turn ends. It also writes CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1 into the settings env block, so Claude Code's memory-pressure reaper stops killing the `await` listener. State is per project (<project>/.sparrow/), so two agents in two checkouts never share a pause or a heartbeat. pause is the deliberate, visible off-switch; resume turns it back on. `install.sh` also drops a `sparrow-skill` wrapper, so `sparrow-skill install` runs the same command."
+        synopsis="sparrow skill install|uninstall|pause|resume|status|verify [--codex|--claude] [--profile P] [--shared] [--user]"
+        desc={`Manage the sparrow skill — the robustness layer for an INLINE agent, which harness mode needs none of (there is no session to keep honest). Two providers install it: Claude Code and Codex. install writes a SKILL.md playbook plus the mechanical hooks: a Stop hook that refuses to end a turn while the loop is engaged and the agent is not reachable — it can tell a wake-capable listener (\`await\`) from a hold-only one (\`watch\`/\`loop\`) — and auto-status hooks that set sticky working on each prompt and idle when the turn ends. State is per project (<project>/.sparrow/), so two agents in two checkouts never share a pause or a heartbeat. pause is the deliberate, visible off-switch; resume turns it back on.
+The provider is auto-detected when the project holds only one of .claude/ or .codex/ + AGENTS.md; when both are there the choice is ambiguous and you name it with --claude or --codex.
+On CLAUDE CODE it writes .claude/skills/sparrow/ and merges the hooks into .claude/settings.local.json (--shared writes the committed .claude/settings.json instead), plus CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1 in the settings env block, so Claude Code's memory-pressure reaper stops killing the \`await\` listener.
+On CODEX it writes .agents/skills/sparrow/SKILL.md (Codex's own skills system — invoke it in a session with $sparrow), a short delimited sparrow section appended to the project's AGENTS.md, .codex/hooks.json (Stop, SessionStart, UserPromptSubmit, PostToolUse) and .codex/config.toml. Two steps there are yours, not the installer's: trust the project — answer "trust this folder" the first time you open codex in it, or add [projects."<absolute project path>"] with trust_level = "trusted" to ~/.codex/config.toml — and trust the hooks, with /hooks in the Codex TUI (headless codex exec takes --dangerously-bypass-hook-trust). Until both are done Codex silently ignores the project's .codex/ files: the hooks never fire, with no error message.
+That silence is what verify is for. sparrow skill verify --codex takes one real Codex turn and proves the hooks actually fire, rather than checking that the files exist — a Codex install that has not been verified is not known to work. Codex's Stop hook blocks the end of a turn exactly as Claude Code's does; Codex has no Notification event, though, so there is no automatic "blocked — needs your input" status there. Tested against codex-cli 0.153.3.
+\`install.sh\` also drops a \`sparrow-skill\` wrapper, so \`sparrow-skill install\` runs the same command.`}
         flags={[
+          [
+            '--codex | --claude',
+            'Which provider to install for. Auto-detected when the project holds only one of .claude/ or .codex/ + AGENTS.md; required when both are.',
+          ],
           ['--profile P', 'Act as that credential profile (stamped into each hook command).'],
           ['--shared', 'Write hooks into the committed .claude/settings.json instead of settings.local.json.'],
+          ['--user', 'User scope (~/.claude) instead of this project.'],
         ]}
         output={`sparrow skill installed (project scope) — hooks in .claude/settings.local.json`}
       />
@@ -566,7 +576,12 @@ function Command({
     <section>
       <h3>{name}</h3>
       <Terminal code={synopsis} />
-      <p>{desc}</p>
+      {/* A newline in `desc` is a paragraph break — most entries are one
+          paragraph and read identically; the longer ones (the skill) would be a
+          wall of text without it. */}
+      {desc.split('\n').map((para) => (
+        <p key={para}>{para}</p>
+      ))}
       {flags && flags.length > 0 && (
         <DocTable>
           <table>

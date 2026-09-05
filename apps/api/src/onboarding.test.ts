@@ -247,7 +247,7 @@ describe('invite onboarding doc', () => {
     expect(res.statusCode).toBe(200);
     const body = res.body;
     // The flow version is stamped as an HTML comment so deployed versions are visible in the wild.
-    expect(body).toContain('<!-- sparrow onboarding flow v3 -->');
+    expect(body).toContain('<!-- sparrow onboarding flow v4 -->');
     // A prominent, unmissable pre-enroll questions section (two, or three on Path 2/3).
     expect(body).toContain('## Before you enroll: two or three questions for your human');
     expect(body).toMatch(/do not enroll yet/i);
@@ -267,7 +267,7 @@ describe('invite onboarding doc', () => {
     expect(body).toContain('**Path 1 — raw HTTP (no install)** — *"just testing the waters."*');
     expect(body).toContain('**Path 2 — the CLI** — *"comfortable with some dependency."*');
     expect(body).toContain(
-      '**Path 3 — CLI + the sparrow skill (Claude Code)** — *"use Sparrow for all of the agent\'s communication."*',
+      '**Path 3 — CLI + the sparrow skill** — *"use Sparrow for all of the agent\'s communication."*',
     );
     expect(body).not.toMatch(/\*\*(Light|Medium|Heavy) —/);
     expect(body).not.toContain('→ **Option A** below.');
@@ -287,7 +287,7 @@ describe('invite onboarding doc', () => {
     // The section headings ARE the tier labels, verbatim.
     expect(body).toContain('## Path 1 — raw HTTP (no install)');
     expect(body).toContain('## Path 2 — the CLI');
-    expect(body).toContain('## Path 3 — CLI + the sparrow skill (Claude Code)');
+    expect(body).toContain('## Path 3 — CLI + the sparrow skill\n');
     // MCP is folded under Path 2 (it is a way of talking to the API, not a fourth path).
     expect(body).toContain('### Optional: expose Sparrow as MCP tools');
     expect(body).toContain('sparrow-mcp');
@@ -415,8 +415,8 @@ describe('invite onboarding doc', () => {
     expect(quickstart).toContain('Several agents on one machine');
     // Every step links to the section that explains it.
     expect((quickstart.match(/\]\(#/g) ?? []).length).toBeGreaterThanOrEqual(7);
-    // Copy-only change: the flow version comment is NOT bumped.
-    expect(body).toContain('<!-- sparrow onboarding flow v3 -->');
+    // The quickstart is stamped with the same flow version as the rest of the doc.
+    expect(body).toContain('<!-- sparrow onboarding flow v4 -->');
   });
 
   it('documents running several agents under one unix user on one machine', async () => {
@@ -456,6 +456,99 @@ describe('invite onboarding doc', () => {
     expect(body).toMatch(/user-scope/i);
     // Path 3 points at the multi-agent section for the rest.
     expect(body).toMatch(/Several agents on one machine/);
+  });
+
+  /**
+   * Path 3 (the inline skill tier) stopped being Claude-Code-only when the Codex
+   * adapter landed. The heading is the tier label VERBATIM and the quickstart
+   * links its GitHub slug, so label + heading + anchor move as one — and the
+   * provider-specific content lives in sub-blocks under the neutral heading.
+   */
+  it('Path 3 is provider-neutral, with a Claude Code and a Codex sub-block', async () => {
+    const body = await inviteDoc();
+    // The neutral label is what the reliance question offers AND what the heading says.
+    expect(body).toContain(
+      '**Path 3 — CLI + the sparrow skill** — *"use Sparrow for all of the agent\'s communication."*',
+    );
+    expect(body).toContain('## Path 3 — CLI + the sparrow skill\n');
+    // No provider in the heading or the label any more.
+    expect(body).not.toContain('Path 3 — CLI + the sparrow skill (Claude Code)');
+    // Both providers are offered, as clearly-separated sub-blocks in that order.
+    const start = body.indexOf('## Path 3 — CLI + the sparrow skill');
+    expect(start).toBeGreaterThan(0);
+    const section = body.slice(start, body.indexOf('## Several agents on one machine'));
+    expect(section).toContain('### Claude Code');
+    expect(section).toContain('### Codex');
+    expect(section.indexOf('### Claude Code')).toBeLessThan(section.indexOf('### Codex'));
+    // The shared install command still leads, and the Claude content is unchanged in substance.
+    expect(section).toContain('sparrow skill install');
+    expect(section).toContain('A **Stop hook**');
+    expect(section).toContain('**Auto-status hooks**');
+  });
+
+  /**
+   * The Codex adapter, live-verified against codex-cli 0.153.3. The two trust
+   * steps are the whole point: without them Codex silently ignores the hooks —
+   * no error, no output — so the doc must name them AND the verify command that
+   * proves the hooks really fire.
+   */
+  it('the Codex sub-block names the install, the two manual trust steps, and verify', async () => {
+    const body = await inviteDoc();
+    const at = body.indexOf('### Codex');
+    expect(at).toBeGreaterThan(0);
+    const codex = body.slice(at, body.indexOf('## Several agents on one machine'));
+    // Install (auto-detected; the flag forces it) and everything it writes.
+    expect(codex).toContain('sparrow skill install --codex');
+    expect(codex).toContain('.agents/skills/sparrow/SKILL.md');
+    expect(codex).toContain('$sparrow');
+    expect(codex).toContain('AGENTS.md');
+    expect(codex).toContain('.codex/hooks.json');
+    expect(codex).toContain('.codex/config.toml');
+    expect(codex).toContain('SessionStart');
+    expect(codex).toContain('UserPromptSubmit');
+    expect(codex).toContain('PostToolUse');
+    // (a) trust the project — the TUI prompt, or the config stanza.
+    expect(codex).toMatch(/trust this folder/i);
+    expect(codex).toContain('~/.codex/config.toml');
+    expect(codex).toContain('trust_level = "trusted"');
+    // (b) trust the hooks — /hooks in the TUI, or the headless bypass flag.
+    expect(codex).toContain('`/hooks`');
+    expect(codex).toContain('--dangerously-bypass-hook-trust');
+    // Why they are load-bearing: the failure is completely silent.
+    expect(codex).toMatch(/never fire/i);
+    expect(codex).toMatch(/no error message/i);
+    // Which is why "the files exist" is not proof — verify runs a real Codex turn.
+    expect(codex).toContain('sparrow skill verify --codex');
+    // Same wake discipline (Codex's Stop hook blocks the turn end too)…
+    expect(codex).toContain('sparrow await --timeout 900');
+    // …and the one honest gap, plus the tested version floor.
+    expect(codex).toMatch(/no Notification event/i);
+    expect(codex).toMatch(/blocked/);
+    expect(codex).toContain('codex-cli 0.153.3');
+  });
+
+  /**
+   * The quickstart links section anchors by GitHub slug; a renamed heading that
+   * leaves a link behind is a dead jump in the one document an agent reads first.
+   */
+  it('every in-doc anchor link resolves to a heading (GitHub slugs)', async () => {
+    const body = await inviteDoc();
+    const slugify = (heading: string): string =>
+      heading
+        .toLowerCase()
+        .replace(/[^\w\- ]+/g, '')
+        .trim()
+        .replace(/ /g, '-');
+    const headings = new Set(
+      [...body.matchAll(/^#{1,6} +(.+?)\s*$/gm)].map((m) => slugify(m[1]!)),
+    );
+    const links = [...body.matchAll(/\]\(#([^)]+)\)/g)].map((m) => m[1]!);
+    expect(links.length).toBeGreaterThanOrEqual(7);
+    // Report the dead ones by name rather than failing on the first.
+    expect(links.filter((a) => !headings.has(a))).toEqual([]);
+    // Specifically: the renamed Path 3 anchor, and no stale Claude-Code one.
+    expect(body).toContain('](#path-3--cli--the-sparrow-skill)');
+    expect(body).not.toContain('#path-3--cli--the-sparrow-skill-claude-code');
   });
 
   it('says inbox list items carry a truncated preview, never a body', async () => {

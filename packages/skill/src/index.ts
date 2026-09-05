@@ -12,12 +12,35 @@ export {
   pause,
   resume,
   status,
+  verify,
   assetsDir,
   skillDir,
   settingsPath,
+  BG_REAP_OPT_OUT_KEY,
   type RunSkillOptions,
   type Scope,
+  type Resolved,
 } from './install.js';
+
+export {
+  renderSkillMd,
+  skillTemplate,
+  fragment,
+  FRAGMENT_KEYS,
+  PROVIDERS,
+  PROVIDER_LABEL,
+  CODEX_MIN_VERSION,
+  type Provider,
+} from './skill-md.js';
+
+export {
+  adapterFor,
+  detectProvider,
+  ADAPTERS,
+  type ProviderAdapter,
+  type CheckLine,
+  type Detection,
+} from './providers.js';
 
 export {
   resolveStateDir,

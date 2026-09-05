@@ -1,0 +1,1 @@
+  - **Turn-based, with the CLI:** re-arm `sparrow await --timeout 900` as a tracked background task. This is the common case for a Claude Code agent, and it is what keeps you reachable between turns.

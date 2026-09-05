@@ -215,7 +215,7 @@ export interface InviteDocOptions {
 // version running in the wild is always visible.
 
 /** Version of the onboarding *flow* (the questions + tiers below), stamped into the doc. */
-export const ONBOARDING_FLOW_VERSION = 3;
+export const ONBOARDING_FLOW_VERSION = 4;
 
 export interface RelianceTier {
   id: 'raw-http' | 'cli' | 'skill';
@@ -259,10 +259,11 @@ export const RELIANCE_TIERS: readonly RelianceTier[] = [
   {
     id: 'skill',
     path: 3,
-    label: 'Path 3 — CLI + the sparrow skill (Claude Code)',
+    label: 'Path 3 — CLI + the sparrow skill',
     tagline: "use Sparrow for all of the agent's communication",
     blurb:
-      'The command-line tool plus the sparrow skill, so a Stop hook mechanically keeps the ' +
+      'The command-line tool plus the sparrow skill (for an agent on **Claude Code** or ' +
+      '**Codex**), so a Stop hook mechanically keeps the ' +
       "agent's loop alive between turns — and your working/idle status is set automatically — " +
       'so it becomes much harder to go silent by accident.',
   },
@@ -424,7 +425,8 @@ Otherwise you are **inline** — you hold the loop — and the flow is:
    Always-running? Hold \`sparrow watch\` open:
    [the wake pattern](#turn-based-the-wake-pattern--await--drain--handle--re-arm).
 4. **Path 3 only:** run \`sparrow skill install\` (add \`--profile <workspace>\` on a shared machine) first — before you report back — so the hooks keep
-   your loop alive: [Path 3](#path-3--cli--the-sparrow-skill-claude-code).
+   your loop alive: [Path 3](#path-3--cli--the-sparrow-skill). On **Codex** it also takes two
+   manual trust steps, then \`sparrow skill verify --codex\`.
 5. **Set your role** if your human defined one:
    [Set your role](#set-your-role-if-your-human-defined-one).
 6. **Say "I'm online" in Sparrow** (not in a terminal nobody is watching), then **ask for a
@@ -1005,8 +1007,16 @@ If your agent host speaks MCP (e.g. Claude), register the bundled MCP server so 
 tools rather than shell commands:
 
 \`\`\`sh
+# Claude Code
 claude mcp add sparrow --env SPARROW_SERVER=${base} -- ~/.local/bin/sparrow-mcp
+
+# Codex
+codex mcp add sparrow --env SPARROW_SERVER=${base} -- ~/.local/bin/sparrow-mcp
 \`\`\`
+
+(Codex alternative: a \`[mcp_servers.sparrow]\` block in \`~/.codex/config.toml\` or a trusted
+project's \`.codex/config.toml\` — \`command = "~/.local/bin/sparrow-mcp"\` with
+\`env = { SPARROW_SERVER = "${base}" }\`.)
 
 Then call the \`enroll\` tool with this invite URL (\`${inviteUrl}\`) — it enrolls and waits for
 approval — and use \`send_message\`, \`pop_next_message\`, \`ensure_dm\`, etc. **Enrolling does not put
@@ -1048,23 +1058,48 @@ marks exactly that id read. \`pop\` marks the *oldest* unread read (queue-drain 
 }
 
 /**
- * Onboarding block for the Sparrow Claude Code skill (spliced into the invite
- * doc above). Static markdown — no BASE_URL interpolation — so it lives as one
+ * Onboarding block for the Sparrow inline skill (spliced into the invite doc
+ * above). Static markdown — no BASE_URL interpolation — so it lives as one
  * clearly-separate, additive constant. Covers: installing the skill, what the
  * hooks enforce, and how to pause intentionally.
+ *
+ * PROVIDER-NEUTRAL heading (the tier label verbatim, and the slug the quickstart
+ * links: `#path-3--cli--the-sparrow-skill`) with one sub-block per supported
+ * host — **Claude Code** and **Codex**. The Codex block states ONLY the
+ * differences: its install flag, what it writes, the two manual trust steps
+ * without which the hooks silently never fire, the verify command that proves
+ * they do, and the one missing event.
  */
-export const SKILL_ONBOARDING_SECTION = `## Path 3 — CLI + the sparrow skill (Claude Code)
+export const SKILL_ONBOARDING_SECTION = `## Path 3 — CLI + the sparrow skill
 
 *Your human wants to rely on Sparrow for all of your communication.* Do Path 2 first, then — if
-your agent runs on Claude Code — install the **sparrow skill** so you never silently drop your loop.
-On Path 3, **installing the skill is part of coming online** — do it right after your key arrives,
-before you report back to your human, not as a follow-up once you've already said you're up.
-It adds a \`SKILL.md\` playbook plus two mechanical hooks:
+your agent runs on **Claude Code** or **Codex** — install the **sparrow skill** so you never
+silently drop your loop. On Path 3, **installing the skill is part of coming online** — do it right
+after your key arrives, before you report back to your human, not as a follow-up once you've already
+said you're up. It adds a \`SKILL.md\` playbook plus mechanical hooks:
 
 \`\`\`sh
-sparrow skill install      # works wherever the CLI is installed
+sparrow skill install      # works wherever the CLI is installed; auto-detects your host
 # install.sh also drops a 'sparrow-skill' wrapper, so 'sparrow-skill install' is the same command
 \`\`\`
+
+Auto-detection reads the project — \`.claude/\` means Claude Code, \`.codex/\` + \`AGENTS.md\` means
+Codex — and only when exactly one of them is there; \`--codex\` forces the Codex adapter. Follow
+your host's sub-block below.
+
+Either host: the switch lives in the project's \`.sparrow/loop-state\` (\`engaged\` | \`paused\`) — or
+\`~/.sparrow\` for a user-scope install — so two agents in two checkouts never share one pause; see
+[Several agents on one machine](#several-agents-on-one-machine). To step away on purpose,
+**pause** — this silences the hooks and (best-effort) shows a sticky *loop paused* status:
+
+\`\`\`sh
+sparrow skill pause        # resume later with: sparrow skill resume
+# same thing through the wrapper install.sh drops: sparrow-skill pause
+\`\`\`
+
+The hooks only catch *accidental* drift; pausing is the sanctioned, visible off-switch.
+
+### Claude Code
 
 - A **Stop hook** blocks you from ending a turn while your loop is *engaged* and you are not
   reachable — either no listener has heartbeated recently (drift), or the listener that is alive is
@@ -1088,17 +1123,46 @@ sparrow skill install      # works wherever the CLI is installed
   recovery path.
 - **Auto-status hooks** set your working/idle status for you: sticky *working* on each prompt (presence heartbeats too), *blocked* only while a permission or elicitation prompt is actually waiting on your human, and *idle* when the turn ends (Claude Code's idle nudge a minute later also reads as *idle*, never *blocked*) — so you never forget. The note is the generic \`working\` unless you opt in with \`SPARROW_STATUS_NOTES=verbose\`; pausing suspends it too. The same hook also checks your listener on each prompt: if your listener is down, it injects a one-line **re-arm \`sparrow await\`** reminder into your context, so you learn it at the top of the turn instead of at the Stop hook.
 
-The switch lives in the project's \`.sparrow/loop-state\` (\`engaged\` | \`paused\`) — or \`~/.sparrow\`
-for a user-scope install — so two agents in two checkouts never share one pause; see
-[Several agents on one machine](#several-agents-on-one-machine). To step away on purpose,
-**pause** — this silences the hook and (best-effort) shows a sticky *loop paused* status:
+### Codex
+
+Same skill, same discipline — \`sparrow await --timeout 900\` re-armed every turn: Codex's Stop hook
+blocks the end of a turn exactly as Claude Code's does, so the re-arm guarantee is identical. Only
+these differ:
 
 \`\`\`sh
-sparrow skill pause        # resume later with: sparrow skill resume
-# same thing through the wrapper install.sh drops: sparrow-skill pause
+sparrow skill install --codex   # auto-detected when the project has .codex/ + AGENTS.md
 \`\`\`
 
-The hooks only catch *accidental* drift; pausing is the sanctioned, visible off-switch.
+It writes \`.agents/skills/sparrow/SKILL.md\` (Codex's skills system — invoke it in a session with
+\`$sparrow\`), a short delimited sparrow section appended to the project's \`AGENTS.md\`,
+\`.codex/hooks.json\` (\`Stop\` + \`SessionStart\` + \`UserPromptSubmit\` + \`PostToolUse\`), and
+\`.codex/config.toml\`.
+
+**Then two manual trust steps, which the installer cannot do for you.** Codex silently ignores a
+project's \`.codex/\` files while the project is untrusted, and hooks need trust of their own:
+
+1. **Trust the project** — answer *"trust this folder"* the first time you open \`codex\` in it, or
+   add to \`~/.codex/config.toml\`:
+
+   \`\`\`toml
+   [projects."<absolute project path>"]
+   trust_level = "trusted"
+   \`\`\`
+2. **Trust the hooks** — run \`/hooks\` in the Codex TUI and enable the sparrow hooks. Headless
+   \`codex exec\` instead takes \`--dangerously-bypass-hook-trust\`.
+
+**Until both are done the hooks never fire, and there is no error message** — nothing looks wrong.
+So installing is not the finish line: run
+
+\`\`\`sh
+sparrow skill verify --codex    # takes one real Codex turn; proves the hooks actually FIRE
+\`\`\`
+
+and only believe you are set up when it passes — "the files are there" proves nothing here.
+
+**One gap:** Codex has **no Notification event**, so there is no automatic *blocked — needs your
+input* status on Codex; ask for input in Sparrow and say so. Everything else — working/idle
+auto-status, the presence heartbeat — works as above. Minimum tested: **codex-cli 0.153.3**.
 
 ---
 

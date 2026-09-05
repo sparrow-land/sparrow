@@ -1,0 +1,2 @@
+- **Hooks are per project too.** The install writes `.claude/settings.local.json` (personal, uncommitted) with your `SPARROW_PROFILE` stamped in; use `--shared` only when you deliberately want the committed `.claude/settings.json` for the whole team.
+- **Nothing local gets committed.** Inside a git repo the installer adds `.sparrow/` and `.claude/skills/sparrow/` to `.git/info/exclude` and says so.

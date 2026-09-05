@@ -1170,6 +1170,41 @@ describe('sparrow CLI — skill install flags', () => {
       'paused',
     );
   });
+
+  /**
+   * The skill is no longer Claude-Code-only. The CLI owes the Codex adapter the
+   * same two things it owes the Claude one: the flag that selects it, and the
+   * `verify` subcommand — which is the ONLY honest answer to "are these hooks
+   * running?" on a harness with two silent trust gates.
+   */
+  it('--codex installs the Codex adapter, not the Claude one', async () => {
+    const cap = capture();
+    expect(await runCli(['skill', 'install', '--codex'], skillEnv(), cap.io)).toBe(0);
+    expect(fs.existsSync(path.join(projectDir, '.agents', 'skills', 'sparrow', 'SKILL.md'))).toBe(
+      true,
+    );
+    expect(fs.existsSync(path.join(projectDir, '.codex', 'hooks.json'))).toBe(true);
+    expect(fs.existsSync(path.join(projectDir, '.claude'))).toBe(false);
+    // The trust steps the installer cannot take must reach the human.
+    expect(cap.out()).toContain('--dangerously-bypass-hook-trust');
+  });
+
+  it('--claude forces the Claude adapter even where Codex would be detected', async () => {
+    fs.writeFileSync(path.join(projectDir, 'AGENTS.md'), '# rules\n');
+    expect(await runCli(['skill', 'install', '--claude'], skillEnv(), capture().io)).toBe(0);
+    expect(fs.existsSync(path.join(projectDir, '.claude', 'skills', 'sparrow', 'SKILL.md'))).toBe(
+      true,
+    );
+    expect(fs.existsSync(path.join(projectDir, '.agents'))).toBe(false);
+  });
+
+  it('verify exits NON-ZERO while a Codex hook has never been observed firing', async () => {
+    expect(await runCli(['skill', 'install', '--codex'], skillEnv(), capture().io)).toBe(0);
+    const cap = capture();
+    // A failing verify is a CliError, i.e. a nonzero exit — never a quiet pass.
+    expect(await runCli(['skill', 'verify', '--codex'], skillEnv(), cap.io)).not.toBe(0);
+    expect(cap.out()).toContain('UNVERIFIED');
+  });
 });
 
 /* ================================================================== *

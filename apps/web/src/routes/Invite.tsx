@@ -10,9 +10,16 @@ import { serverOrigin } from '../lib/origin.js';
 import { INSTALL_COMMAND } from '../lib/docsUrl.js';
 import { Logo } from '../components/Logo.js';
 import { LoopModeArt } from '../components/LoopModeArt.js';
-// The dialog is the canonical picker; the landing page shows the same hints so
-// the two surfaces cannot drift apart on what each runtime's options are.
-import { RUNTIME_HINT } from '../components/InviteDialog.js';
+// One home for the runtimes and what each of them needs, shared with the invite
+// DIALOG in the app, so the two surfaces cannot drift apart on any of it.
+import {
+  CodexInlineSteps,
+  INLINE_RUNTIMES,
+  RUNTIMES,
+  RUNTIME_HINT,
+  type InlineRuntime,
+  type Runtime,
+} from '../components/AgentRuntimes.js';
 import { Terminal } from '../components/Terminal.js';
 import { SiteHeader } from '../components/SiteHeader.js';
 import { MAIN_CONTENT_ID } from '../components/SkipLink.js';
@@ -398,24 +405,6 @@ function HumanPanel({ token }: { token: string }) {
  * Agent panel
  * ------------------------------------------------------------------ */
 
-/** The agent runner the harness spawns — the picker only rewrites one flag. */
-type Runtime = 'claude' | 'codex' | 'gemini' | 'other';
-
-const RUNTIMES: [Runtime, string][] = [
-  ['claude', 'Claude Code'],
-  ['codex', 'Codex'],
-  ['gemini', 'Gemini'],
-  ['other', 'Other'],
-];
-
-/** `claude -p` is the harness default, so the Claude Code column needs no flag. */
-const RUNTIME_FLAG: Record<Runtime, string | null> = {
-  claude: null,
-  codex: '--codex',
-  gemini: '--gemini',
-  other: "--exec '<your command>'",
-};
-
 function AgentPanel({
   token,
   doc,
@@ -430,8 +419,11 @@ function AgentPanel({
   const origin = serverOrigin();
   const inviteUrl = `${origin}/invite/${token}`;
   const [runtime, setRuntime] = useState<Runtime>('claude');
+  // Inline picks from its own (shorter) list — the providers the sparrow skill
+  // installs for — so the two modes keep separate answers.
+  const [inlineRuntime, setInlineRuntime] = useState<InlineRuntime>('claude');
 
-  const flag = RUNTIME_FLAG[runtime];
+  const flag = RUNTIMES.find((r) => r.id === runtime)?.flag ?? '';
   const args = [`--url ${inviteUrl}`, ...(flag ? [flag] : [])];
   // The installer has one home (SPEC: *Canonical public homes*); the invite URL
   // above is this instance's, and stays that way.
@@ -458,7 +450,12 @@ function AgentPanel({
           pill="Needs the CLI"
           blurb="Most reliable. Sparrow's CLI runs the loop and calls your agent for every message."
         >
-          <RuntimePicker runtime={runtime} onChange={setRuntime} />
+          <RuntimePicker
+            label="Agent runtime"
+            options={RUNTIMES}
+            runtime={runtime}
+            onChange={setRuntime}
+          />
           <Terminal label="sparrow harness" code={harnessCmd} wrap className="mt-3" />
           <p className="mt-3 text-xs text-[var(--sparrow-muted)]">
             Options:{' '}
@@ -478,11 +475,28 @@ function AgentPanel({
           pill="No install"
           blurb="Quickest. Paste the link into an agent you already have open. The agent runs the loop and checks Sparrow when it remembers to."
         >
-          <Terminal label="invite link" code={inviteUrl} wrap />
+          {/* Which agent is open on the other side decides what comes AFTER the
+              paste: on Codex the sparrow skill needs a flag and two trust steps
+              only a human can do. */}
+          <RuntimePicker
+            label="Inline agent runtime"
+            options={INLINE_RUNTIMES}
+            runtime={inlineRuntime}
+            onChange={setInlineRuntime}
+          />
+          <Terminal label="invite link" code={inviteUrl} wrap className="mt-3" />
           <p className="mt-3 text-xs text-[var(--sparrow-muted)]">
             Paste it into the agent. It fetches this URL and gets a plain-text onboarding doc
             instead of this page.
           </p>
+          {inlineRuntime === 'codex' && (
+            <div className="mt-3 border-t border-[var(--sparrow-border)] pt-3">
+              <p className="text-xs uppercase tracking-wider text-[var(--sparrow-faint)]">
+                Then, on Codex
+              </p>
+              <CodexInlineSteps className="mt-1.5 text-xs text-[var(--sparrow-muted)]" />
+            </div>
+          )}
         </ModeCard>
       </div>
 
@@ -532,29 +546,37 @@ function ModeCard({
   );
 }
 
-function RuntimePicker({
+/**
+ * The runtime chips. Both loop modes use it — with their own list, their own
+ * state and their own accessible name, since both pickers are on screen at once.
+ */
+function RuntimePicker<T extends string>({
+  label,
+  options,
   runtime,
   onChange,
 }: {
-  runtime: Runtime;
-  onChange: (r: Runtime) => void;
+  label: string;
+  options: readonly { id: T; label: string }[];
+  runtime: T;
+  onChange: (r: T) => void;
 }) {
   return (
-    <div role="radiogroup" aria-label="Agent runtime" className="flex flex-wrap gap-1">
-      {RUNTIMES.map(([id, label]) => (
+    <div role="radiogroup" aria-label={label} className="flex flex-wrap gap-1">
+      {options.map((opt) => (
         <button
-          key={id}
+          key={opt.id}
           type="button"
           role="radio"
-          aria-checked={runtime === id}
-          onClick={() => onChange(id)}
+          aria-checked={runtime === opt.id}
+          onClick={() => onChange(opt.id)}
           className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
-            runtime === id
+            runtime === opt.id
               ? 'border-[var(--sparrow-accent)] bg-[var(--sparrow-accent-soft)] text-[var(--sparrow-accent)]'
               : 'border-[var(--sparrow-border)] text-[var(--sparrow-muted)] hover:text-[var(--sparrow-text)]'
           }`}
         >
-          {label}
+          {opt.label}
         </button>
       ))}
     </div>

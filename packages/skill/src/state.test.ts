@@ -153,6 +153,24 @@ describe('resolveStateDir', () => {
     expect(resolveStateDir({ HOME: home }, project)).toBe(path.join(project, '.sparrow'));
   });
 
+  /**
+   * The Codex install marker. Without it, a Codex project whose `.sparrow` had
+   * been deleted (or that has not run a hook yet) would resolve its state dir to
+   * `~/.sparrow` — i.e. start reading, and pausing, the loop switch belonging to
+   * whatever other agent shares this unix user.
+   */
+  it('accepts a Codex skill install (.agents/skills/sparrow) as the marker too', () => {
+    fs.mkdirSync(path.join(project, '.agents', 'skills', 'sparrow'), { recursive: true });
+    const nested = path.join(project, 'src', 'deep');
+    fs.mkdirSync(nested, { recursive: true });
+    expect(resolveStateDir({ HOME: home }, nested)).toBe(path.join(project, '.sparrow'));
+  });
+
+  it('ignores a bare `.agents` directory that holds no sparrow skill', () => {
+    fs.mkdirSync(path.join(project, '.agents', 'skills', 'other'), { recursive: true });
+    expect(resolveStateDir({ HOME: home }, project)).toBe(path.join(home, '.sparrow'));
+  });
+
   it('falls back to ~/.sparrow when no marker is found anywhere above the cwd', () => {
     expect(resolveStateDir({ HOME: home }, project)).toBe(path.join(home, '.sparrow'));
   });

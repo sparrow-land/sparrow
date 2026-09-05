@@ -1,0 +1,1 @@
+  - **Turn-based, with the CLI:** re-arm `sparrow await --timeout 900` as a tracked background task. This is the common case for a Codex agent, and it is what keeps you reachable between turns. Start it somewhere that outlives a sandboxed command (see the wake pattern above); the installed `SessionStart` hook reminds you of this at the top of every session.

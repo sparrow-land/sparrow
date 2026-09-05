@@ -165,6 +165,11 @@ function terminalText(): string {
     .join('\n');
 }
 
+/** Everything the dialog currently says, whitespace collapsed. */
+function bodyText(): string {
+  return (document.body.textContent ?? '').replace(/\s+/g, ' ');
+}
+
 const invitesMinted = (f: ReturnType<typeof mockFetch>) =>
   f.mock.calls.filter(
     ([u, i]) =>
@@ -393,6 +398,82 @@ describe('InviteDialog', () => {
       await waitFor(() => expect(terminalText()).toContain(blob));
       expect(terminalText()).not.toContain('curl -fsSL');
       expect(screen.getByText(/paste this into your agent/i)).toBeInTheDocument();
+    });
+
+    /**
+     * The INLINE branch stopped being Claude-Code-only when the sparrow skill
+     * grew a Codex adapter: handing a Codex user Claude-flavoured instructions
+     * is handing them the wrong ones. Same picker pattern as harness.
+     */
+    it('the inline branch picks a runtime too — Claude Code and Codex, Claude first', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'agent' });
+      await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
+      await userEvent.click(screen.getByRole('radio', { name: /inline/i }));
+
+      const tabs = screen.getAllByRole('tab').map((t) => t.textContent);
+      expect(tabs).toEqual(['Claude Code', 'Codex']);
+      expect(screen.getByRole('tab', { name: 'Claude Code' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      // Claude Code inline is exactly what it always was — the blob, nothing else.
+      const blob = buildInviteBlob({ inviterName: 'Jake', orgName: 'Acme', url: INVITE_URL });
+      expect(terminalText()).toContain(blob);
+      expect(screen.getByText(/paste this into your agent/i)).toBeInTheDocument();
+      expect(bodyText()).not.toContain('sparrow skill install --codex');
+    });
+
+    /**
+     * Live-verified against codex-cli 0.153.3: project-scoped `.codex/` files are
+     * SILENTLY ignored until the project is trusted, and hooks need per-hook trust
+     * on top of that. Neither step is something the installer can do, and neither
+     * failure says anything — so both, plus the verify that proves the hooks
+     * really fire, have to be on this surface.
+     */
+    it('Codex inline names the install, both manual trust steps, and verify', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'agent' });
+      await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
+      await userEvent.click(screen.getByRole('radio', { name: /inline/i }));
+      await userEvent.click(screen.getByRole('tab', { name: 'Codex' }));
+
+      const text = bodyText();
+      // What the install writes.
+      expect(text).toContain('sparrow skill install --codex');
+      expect(text).toContain('.agents/skills/sparrow/SKILL.md');
+      expect(text).toContain('$sparrow');
+      expect(text).toContain('AGENTS.md');
+      expect(text).toContain('.codex/hooks.json');
+      expect(text).toContain('.codex/config.toml');
+      // (a) trust the project.
+      expect(text).toMatch(/trust this folder/i);
+      expect(text).toContain('~/.codex/config.toml');
+      expect(text).toContain('trust_level = "trusted"');
+      // (b) trust the hooks.
+      expect(text).toContain('/hooks');
+      expect(text).toContain('--dangerously-bypass-hook-trust');
+      // Why they matter, and the proof that replaces "the files are there".
+      expect(text).toMatch(/never fire/i);
+      expect(text).toMatch(/no error message/i);
+      expect(text).toContain('sparrow skill verify --codex');
+      expect(text).toContain('codex-cli 0.153.3');
+      // The paste-this blob is still the first move.
+      const blob = buildInviteBlob({ inviterName: 'Jake', orgName: 'Acme', url: INVITE_URL });
+      expect(terminalText()).toContain(blob);
+    });
+
+    it('switching the inline runtime back to Claude Code drops the Codex steps', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'agent' });
+      await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
+      await userEvent.click(screen.getByRole('radio', { name: /inline/i }));
+      await userEvent.click(screen.getByRole('tab', { name: 'Codex' }));
+      expect(bodyText()).toContain('sparrow skill install --codex');
+
+      await userEvent.click(screen.getByRole('tab', { name: 'Claude Code' }));
+      expect(bodyText()).not.toContain('--codex');
+      expect(bodyText()).not.toContain('sparrow skill verify');
     });
 
     it('the runtime picker changes the harness command', async () => {

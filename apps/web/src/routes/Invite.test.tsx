@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach, beforeAll } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 
@@ -181,6 +181,17 @@ function terminalCode(label: string): string {
   return term.querySelector('code')?.textContent ?? '';
 }
 
+/**
+ * The two runtime pickers on the agent tab — harness and inline — are both on
+ * screen at once (the cards sit side by side), so every runtime query names the
+ * picker it means.
+ */
+const harnessRuntimes = () => screen.getByRole('radiogroup', { name: 'Agent runtime' });
+const inlineRuntimes = () => screen.getByRole('radiogroup', { name: 'Inline agent runtime' });
+
+/** Everything the page currently says, whitespace collapsed. */
+const bodyText = () => (document.body.textContent ?? '').replace(/\s+/g, ' ');
+
 describe('Invite landing page (/invite/:token)', () => {
   // jsdom's `window.location.assign` is a non-configurable throwing no-op, so we
   // can't spy on it directly. Swap the whole `location` for a plain stand-in that
@@ -320,13 +331,13 @@ describe('Invite landing page (/invite/:token)', () => {
     // Claude Code is the default runner — no runner flag at all.
     expect(terminalCode('sparrow harness')).not.toMatch(/--codex|--gemini|--exec/);
 
-    await userEvent.click(screen.getByRole('radio', { name: /codex/i }));
+    await userEvent.click(within(harnessRuntimes()).getByRole('radio', { name: /codex/i }));
     expect(terminalCode('sparrow harness')).toContain('--codex');
 
-    await userEvent.click(screen.getByRole('radio', { name: /gemini/i }));
+    await userEvent.click(within(harnessRuntimes()).getByRole('radio', { name: /gemini/i }));
     expect(terminalCode('sparrow harness')).toContain('--gemini');
 
-    await userEvent.click(screen.getByRole('radio', { name: /other/i }));
+    await userEvent.click(within(harnessRuntimes()).getByRole('radio', { name: /other/i }));
     expect(terminalCode('sparrow harness')).toContain("--exec '<your command>'");
   });
 
@@ -337,9 +348,65 @@ describe('Invite landing page (/invite/:token)', () => {
     const hint = (): string => screen.getByText(/sets the working folder/i).textContent ?? '';
 
     expect(hint()).toContain('--model sonnet');
-    await userEvent.click(screen.getByRole('radio', { name: /codex/i }));
+    await userEvent.click(within(harnessRuntimes()).getByRole('radio', { name: /codex/i }));
     expect(hint()).toContain('--sandbox read-only');
     expect(hint()).not.toContain('sonnet');
+  });
+
+  /**
+   * Inline mode is not Claude-Code-only any more — the sparrow skill has a Codex
+   * adapter, so the inline card picks a runtime the same way the harness card
+   * does, and Claude Code stays the default.
+   */
+  it('the inline card picks a runtime — Claude Code and Codex', async () => {
+    fetchCtl.set(inviteFetchMock({ signedIn: false }));
+    renderInvite();
+    await userEvent.click(await screen.findByRole('tab', { name: /connect an agent/i }));
+
+    const picker = inlineRuntimes();
+    expect(within(picker).getAllByRole('radio').map((r) => r.textContent)).toEqual([
+      'Claude Code',
+      'Codex',
+    ]);
+    expect(within(picker).getByRole('radio', { name: 'Claude Code' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    // Claude Code inline is unchanged: the bare invite URL and its caption.
+    expect(terminalCode('invite link')).toMatch(/^http.*\/invite\/ivk_1$/);
+    expect(bodyText()).not.toContain('sparrow skill install --codex');
+  });
+
+  /**
+   * codex-cli 0.153.3, live-verified: a project's `.codex/` files are SILENTLY
+   * ignored until the project is trusted, and the hooks need per-hook trust too.
+   * The installer can do neither, and neither failure prints anything — so both
+   * steps and the verify that proves the hooks fire belong on this page.
+   */
+  it('Codex inline names the install, both manual trust steps, and verify', async () => {
+    fetchCtl.set(inviteFetchMock({ signedIn: false }));
+    renderInvite();
+    await userEvent.click(await screen.findByRole('tab', { name: /connect an agent/i }));
+    await userEvent.click(within(inlineRuntimes()).getByRole('radio', { name: 'Codex' }));
+
+    const text = bodyText();
+    expect(text).toContain('sparrow skill install --codex');
+    expect(text).toContain('.agents/skills/sparrow/SKILL.md');
+    expect(text).toContain('$sparrow');
+    expect(text).toContain('AGENTS.md');
+    expect(text).toContain('.codex/hooks.json');
+    expect(text).toContain('.codex/config.toml');
+    expect(text).toMatch(/trust this folder/i);
+    expect(text).toContain('~/.codex/config.toml');
+    expect(text).toContain('trust_level = "trusted"');
+    expect(text).toContain('/hooks');
+    expect(text).toContain('--dangerously-bypass-hook-trust');
+    expect(text).toMatch(/never fire/i);
+    expect(text).toMatch(/no error message/i);
+    expect(text).toContain('sparrow skill verify --codex');
+    expect(text).toContain('codex-cli 0.153.3');
+    // The invite URL is still what you paste first.
+    expect(terminalCode('invite link')).toMatch(/^http.*\/invite\/ivk_1$/);
   });
 
   it('tucks the onboarding doc behind a closed disclosure', async () => {
