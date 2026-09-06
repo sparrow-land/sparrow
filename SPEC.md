@@ -3583,9 +3583,12 @@ sparrow watch [--room R] [--no-reconnect] [--retry-max S] [-v] [--with-presence]
           # Auto-reconnects (holding presence online) unless --no-reconnect;
           # --retry-max S gives up (exit 1) after S seconds of failed reconnects.
           # On `replay.gap` it HEALS its stored cursor — adopting the server's
-          # `latest` when the cursor is beyond it (a wiped/re-provisioned journal),
+          # `latest` on EVERY gap: a cursor beyond it (a wiped/re-provisioned
+          # journal) AND a cursor below the retention mark (pruned — the common
+          # case, e.g. a day of quiet-filtered churn the client never saw), or
           # clearing it when a pre-heal server sends no `latest` — so live events
-          # are never filtered against a cursor the server called unreachable, and
+          # are never filtered against a cursor the server called unreachable,
+          # the same gap is never replayed on every reconnect, and
           # prints ONE actionable line per gap ("events were missed … drain your
           # inbox: `sparrow pop`"), not one per poll tick
 sparrow await [--timeout S] [--stale-seconds S] [--max-stream-age S] [--poll-seconds S]

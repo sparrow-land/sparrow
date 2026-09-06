@@ -104,15 +104,33 @@ const sinceOf = (u: string): number => Number(sinceParam(u) ?? '0');
  * `carryLatest: false` models a PRE-HEAL server (v4.0): it still signals the gap
  * but its `replay.gap` frame has no `latest` for the client to adopt.
  */
-async function startUpstream(opts?: { carryLatest?: boolean }): Promise<Upstream> {
+async function startUpstream(opts?: {
+  carryLatest?: boolean;
+  /**
+   * The principal's pruned high-water mark: a `since` BELOW it is rule (1) of the
+   * real server's `hasGap` — retention lost events the client never saw.
+   */
+  prunedMark?: number;
+  /**
+   * The newest journaled id when it is NOT replayable to this subscriber (the
+   * production shape: a day of presence/status churn the `?quiet=` filter drops
+   * server-side still advances the journal, but never reaches the client).
+   */
+  unreplayableLatest?: number;
+}): Promise<Upstream> {
   const carryLatest = opts?.carryLatest ?? true;
+  const prunedMark = opts?.prunedMark ?? 0;
   const journal: JournalEntry[] = [];
   const inbox: unknown[] = [];
   const streamSince: Array<number | undefined> = [];
   const beats = new Set<NodeJS.Timeout>();
   let activeSse: http.ServerResponse | undefined;
   let pops = 0;
-  const latestOf = (): number => (journal.length ? journal[journal.length - 1]!.id : 0);
+  const latestOf = (): number =>
+    Math.max(journal.length ? journal[journal.length - 1]!.id : 0, opts?.unreplayableLatest ?? 0);
+  // Mirrors `EventJournal.hasGap`: (1) pruned — an event above `since` is gone;
+  // (2) generation mismatch — `since` is beyond the newest id.
+  const hasGap = (since: number): boolean => since < prunedMark || since > latestOf();
 
   const server = http.createServer((req, res) => {
     const u = req.url!;
@@ -124,7 +142,7 @@ async function startUpstream(opts?: { carryLatest?: boolean }): Promise<Upstream
         JSON.stringify({
           events: journal.filter((e) => e.id > since),
           latest,
-          gap: since > latest, // generation mismatch (post-wipe cursor ahead of latest)
+          gap: hasGap(since),
         }),
       );
       return;
@@ -136,7 +154,7 @@ async function startUpstream(opts?: { carryLatest?: boolean }): Promise<Upstream
       const latest = latestOf();
       res.writeHead(200, SSE_HEAD);
       res.write(': open\n\n');
-      if (raw !== null && since > latest) {
+      if (raw !== null && hasGap(since)) {
         const data = carryLatest ? { since, latest } : { since };
         res.write(`event: replay.gap\ndata: ${JSON.stringify(data)}\n\n`);
       }
@@ -151,6 +169,12 @@ async function startUpstream(opts?: { carryLatest?: boolean }): Promise<Upstream
         beats.delete(hb);
         if (activeSse === res) activeSse = undefined;
       });
+      return;
+    }
+    if (u.startsWith('/api/v1/me/inbox?') || u === '/api/v1/me/inbox') {
+      // What `await` reads (never consumes) to decide whether work is waiting.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ items: inbox, nextCursor: null }));
       return;
     }
     if (u === '/api/v1/me/inbox/pop' && req.method === 'POST') {
@@ -416,6 +440,52 @@ describe('sparrow CLI — persisted cursor self-heals across a journal wipe', ()
       process.emit('SIGINT');
       await loop;
     }
+  });
+
+  it('await: a PRUNED cursor (below the retention mark, nothing replayable) heals to `latest` and does not re-gap', async () => {
+    // The production failure (2026-09-06): a turn-based agent's cursor sat at
+    // 31079 for a day while only quiet-filtered presence churn was journaled.
+    // Retention then pruned past it. Every reconnect replayed the same
+    // `replay.gap` — and `await` woke INSTANTLY, every time, with a phantom
+    // item: a wake loop that burns a full agent turn per arm. The heal must
+    // adopt `latest` for a cursor BEHIND the journal, not only one ahead of it.
+    const PRUNED = 31079;
+    const LATEST = 44426;
+    upstream = await startUpstream({ prunedMark: 40000, unreplayableLatest: LATEST });
+    const serverUrl = `http://127.0.0.1:${upstream.port}`;
+    seedProfile(serverUrl, { lastEventId: String(PRUNED) });
+
+    // First arm: the gap wakes (events WERE missed — the inbox is the truth now)…
+    const first = capture();
+    expect(
+      await runCli(
+        ['await', '--timeout', '5', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        baseEnv(),
+        first.io,
+      ),
+      first.err(),
+    ).toBe(0);
+    const wake = JSON.parse(first.out().trim().split('\n').filter(Boolean)[0]!);
+    expect(wake.type).toBe('await.item');
+    expect(wake.reason).toBe('replay.gap');
+    expect(wake.item).toBeNull();
+    // …and HEALS the persisted cursor to the server's `latest`, not the dead 31079.
+    expect(wake.cursor).toBe(String(LATEST));
+    expect(persistedCursor()).toBe(String(LATEST));
+
+    // Second arm: resumes from the healed cursor, sees NO gap, and holds until
+    // its timeout (exit 2) — the phantom-wake loop is over.
+    const second = capture();
+    expect(
+      await runCli(
+        ['await', '--timeout', '1', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        baseEnv(),
+        second.io,
+      ),
+      second.err(),
+    ).toBe(2);
+    expect(upstream.streamSince[1]).toBe(LATEST);
+    expect(second.out()).not.toContain('replay.gap');
   });
 
   it('a re-enrolled profile never resumes from the PREVIOUS identity’s cursor', async () => {

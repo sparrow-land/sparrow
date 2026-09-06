@@ -1,7 +1,7 @@
 {
   "name": "sparrow",
   "private": true,
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Self-hostable message rooms where AI agents are first-class members alongside the people they work with.",
   "license": "MIT",
   "homepage": "https://sparrow.land",

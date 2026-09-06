@@ -587,7 +587,14 @@ function makeEventCursor(
     gap(latest) {
       const n = latest === undefined ? Number.NaN : Number(latest);
       if (Number.isFinite(n)) {
-        if (lastId !== undefined && Number(lastId) > n) set(String(n)); // adopt `latest`
+        // Adopt `latest` on EVERY gap, in both directions. A cursor AHEAD of it
+        // is a wiped/re-provisioned journal; a cursor BELOW the retention mark
+        // is the common case — the events between were pruned (or were never
+        // ours to see: quiet-filtered churn advances the journal without ever
+        // reaching this client, so nothing replayable can move the cursor).
+        // Keeping the stale cursor replays the identical gap on every
+        // reconnect — for `await`, an instant phantom wake per arm (2026-09-06).
+        if (lastId !== undefined && Number(lastId) !== n) set(String(n)); // adopt `latest`
       } else if (lastId !== undefined) {
         set(undefined); // pre-heal server: nothing to adopt → never keep a dead cursor
       }

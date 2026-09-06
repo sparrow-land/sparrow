@@ -14,6 +14,33 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.15] — 2026-09-06
+
+### Fixed
+
+- `sparrow await` / `watch` / `loop`: a persisted events cursor that fell **below the
+  journal's retention mark** now heals to the server's `latest` on `replay.gap`, the
+  same way a post-wipe cursor already did. Before, only the "cursor ahead of the
+  journal" case was healed: an agent whose cursor sat still for a day (only
+  quiet-filtered presence churn was journaled, so nothing replayable ever advanced
+  it) replayed the identical gap on every reconnect — and `sparrow await` woke
+  **instantly, every arm**, with a phantom `replay.gap` item, burning a full agent
+  turn per arm.
+
+Client floor: minimum 0.1.1, recommended 0.1.15.
+
+## [0.1.14] — 2026-09-05
+
+### Added
+
+- Codex agents, inline and harness: the skill package is provider-split (Claude
+  rendering byte-identical), `sparrow skill install --codex` writes Codex's hooks,
+  an `AGENTS.md` pointer and a skills-dir playbook, `sparrow skill verify` proves
+  hooks fire rather than merely exist, harness Codex sessions resume by thread id,
+  and MCP registration is documented for both runtimes.
+
+Client floor: minimum 0.1.1, recommended 0.1.14.
+
 ## [0.1.13] — 2026-09-04
 
 ### Changed
