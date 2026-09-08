@@ -574,7 +574,7 @@ carried them, because that request is always the same one:
 | `refresh-your-role` | the role changed and has not been re-read — RE-ARMS per `roleUpdatedAt` rather than on the daily cooldown, so it fires once per role version and again whenever the role changes | per role version |
 | `email-is-a-different-register` | the agent's most recently READ inbound email was read within `RECENT_ACTIVITY_MS` | **permanent** — once ever |
 | `voice-is-a-different-register` | the agent's most recent reply to a message carrying `origin: 'voice'`, sent within `RECENT_ACTIVITY_MS`, is not speakable (a markdown table row, a fenced code block, or a body over 600 chars) | **permanent** — once ever |
-| `you-have-email` | has an address, has never looked at it | standard |
+| `you-have-email` | has an address, unread mail is sitting in it, has never looked at it | standard |
 | `email-is-held` | an outbound mail has waited on the owner ~10 min | standard |
 | `markdown-renders` | the last `MARKDOWN_STREAK` (3) sends are all long and formatting-free, the newest within `RECENT_ACTIVITY_MS` | standard |
 | `upgrade-your-cli` | the caller's `X-Sparrow-Client` version parses below `CLIENT_RECOMMENDED_VERSION` (off unless the operator set one; header-less callers never match) | standard |
@@ -648,7 +648,7 @@ fire without an address:
 | Trigger | Fires when | Cooldown |
 |---|---|---|
 | `email-is-a-different-register` | the agent's most recently READ inbound email was read within `RECENT_ACTIVITY_MS`, and this principal has never been shown this hint | **permanent** — once ever (like `control-your-hints`) |
-| `you-have-email` | the agent has an email address, no email of its threads carries `read_at`, and it has no outbound email row (thread *listing* leaves no server-side trace, so reads and sends are the observable signal) | standard (`HINT_COOLDOWN_MS`) |
+| `you-have-email` | the agent has an email address, **at least one** inbound email sits in its mailbox, none of its emails carries `read_at`, and it has no outbound email row (thread *listing* leaves no server-side trace, so reads and sends are the observable signal). An EMPTY mailbox never fires it — an address nobody has written to is not news (2026-09-08). Since popping is reading, the queue normally delivers the mail before a pause can carry this; the tips view (`GET /me/hints`) still names it while mail waits | standard (`HINT_COOLDOWN_MS`) |
 | `email-is-held` | the agent has ≥1 outbound email sitting at disposition `held` older than ~10 minutes | standard |
 
 Text and actions:
@@ -663,8 +663,9 @@ Text and actions:
   Action: `POST /api/v1/me/email/threads/:threadId/reply`, example body
   `{ "text": "…" }`.
 - `you-have-email` — docs `me/email/threads`.
-  > "You have an email address ({address}) and have never opened it. People outside
-  > this workspace can write to you there and get no answer — check your threads."
+  > "Your inbox ({address}) holds {n} unread email(s) you have never opened. Only
+  > human-approved senders reach it, so this is trusted mail waiting on you. Check
+  > your threads."
 
   Action: `GET /api/v1/me/email/threads`.
 - `email-is-held` — docs `orgs/email/approvals`.

@@ -592,28 +592,34 @@ export const TRIGGERS: Trigger[] = [
     },
   },
   {
-    // The agent HAS a mailbox and has never opened it: nothing it anchors has
-    // ever been read, and it has never written from the address either. (A bare
-    // thread listing leaves no server-side trace, so a read or a send is the
-    // honest signal that the agent has met its mailbox.) Unchanged by the move
-    // to the pause — already a pure db state check, and "you have never looked"
-    // is a standing fact, not a moment.
+    // The agent HAS a mailbox, mail is SITTING in it, and it has never opened
+    // it: nothing it anchors has ever been read, and it has never written from
+    // the address either. (A bare thread listing leaves no server-side trace,
+    // so a read or a send is the honest signal that the agent has met its
+    // mailbox.) The mail-present condition is the point (Jake, 2026-09-08): an
+    // address nobody writes to is not news, and `every` over an EMPTY mailbox
+    // is vacuously true — this fired on every pause of every agent that merely
+    // HAD an address, pure noise for a medium most orgs have not started using.
+    // Popping is reading, so in practice the queue delivers the mail before
+    // this can fire on a pause; the tips view still names it while mail waits.
     id: 'you-have-email',
     docs: 'me/email/threads',
-    ownerLabel: 'Sparrow hinted the agent to check the email inbox it has never opened.',
+    ownerLabel: 'Sparrow hinted the agent to check the unread mail in the inbox it has never opened.',
     applies(h) {
       const agent = emailAgent(h);
       if (!agent) return false;
-      return agentEmails(h, agent.id).every((e) => e.direction === 'in' && e.readAt === null);
+      const mail = agentEmails(h, agent.id);
+      return mail.length > 0 && mail.every((e) => e.direction === 'in' && e.readAt === null);
     },
     build(h) {
       const agent = emailAgent(h)!;
+      const unread = agentEmails(h, agent.id).length;
       // Careful copy (Jake, 2026-09-02): teach the TRUST MODEL, not an open
       // door. Only human-approved senders reach an agent's inbox — a stranger's
       // mail waits for the human — so the miss being nudged is TRUSTED mail
       // sitting unanswered, never "anyone can email you".
       return {
-        text: `Your inbox (${agentAddress(h.ctx, agent)}) has never been opened. Only senders your human approved reach it — strangers wait for their OK — so trusted mail may sit unanswered. Check your threads.`,
+        text: `Your inbox (${agentAddress(h.ctx, agent)}) holds ${unread} unread email${unread === 1 ? '' : 's'} you have never opened. Only human-approved senders reach it, so this is trusted mail waiting on you. Check your threads.`,
         action: { method: 'GET', path: '/api/v1/me/email/threads' },
       };
     },

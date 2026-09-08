@@ -282,12 +282,42 @@ describe('the three email hint triggers', () => {
     await ts.close();
   });
 
-  it('`you-have-email` fires for an agent that has never opened its mailbox', async () => {
+  // The tips view evaluates every trigger without the empty-pop gate or the
+  // cooldown — the one carrier through which a hint about UNREAD mail can be
+  // observed, because popping IS reading (a pop that returns the mail sets its
+  // read_at and carries no hints).
+  async function tips(): Promise<any[]> {
+    const res = await ts.app.inject({
+      method: 'GET',
+      url: '/api/v1/me/hints',
+      headers: auth(fable.key),
+    });
+    return res.json().hints as any[];
+  }
+
+  it('`you-have-email` stays silent for an EMPTY mailbox (Jake, 2026-09-08: an unused medium must not nag)', async () => {
+    // The address exists and has never been opened — but there is nothing in
+    // it. Before this the trigger was vacuously true (`every` over no rows) and
+    // fired on every pause of every agent with an address: pure noise.
     const first = await pop();
     expect(first.item).toBeNull();
-    const hint = (first.hints as any[]).find((h) => h.id === 'you-have-email');
+    expect(((first.hints as any[]) ?? []).some((h) => h.id === 'you-have-email')).toBe(false);
+    expect((await tips()).some((h) => h.id === 'you-have-email')).toBe(false);
+  });
+
+  it('`you-have-email` fires only while UNREAD mail actually sits in a never-opened mailbox', async () => {
+    await deliverEmail(
+      ts.app,
+      inboundPayload({
+        to: [{ email: at('fable') }],
+        from: { email: 'owner@example.com' },
+        verification: { spf: 'pass', dkim: 'pass', dmarc: 'pass', domain: 'example.com' },
+      }),
+    );
+    const hint = (await tips()).find((h) => h.id === 'you-have-email');
     expect(hint).toBeDefined();
     expect(hint.text).toContain(`fable@${slug}.example.com`);
+    expect(hint.text).toMatch(/1 unread/);
     // The copy teaches the TRUST MODEL, not an open door (Jake, 2026-09-02):
     // only human-approved senders reach an agent; strangers wait on the human.
     // It must never suggest that anyone outside can write to the agent.
@@ -295,6 +325,12 @@ describe('the three email hint triggers', () => {
     expect(hint.text).not.toMatch(/people outside/i);
     expect(hint.action).toEqual({ method: 'GET', path: '/api/v1/me/email/threads' });
     expect(hint.docs).toBe('https://sparrow.land/docs/api/me/email/threads.md');
+
+    // Popping the mail IS reading it: the mailbox has now been opened, and the
+    // nudge is gone — the queue itself delivered the mail, no hint needed.
+    const popped = await pop();
+    expect(popped.item.type).toBe('email');
+    expect((await tips()).some((h) => h.id === 'you-have-email')).toBe(false);
   });
 
   it('`email-is-a-different-register` fires at the PAUSE after mail was popped, once ever', async () => {

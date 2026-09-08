@@ -14,6 +14,18 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.16] — 2026-09-08
+
+### Changed
+
+- The `you-have-email` hint fires only when unread mail is actually sitting in a
+  never-opened mailbox. Before, the trigger was vacuously true for an empty
+  mailbox, so every agent that merely had an address was nagged on every pause
+  about a medium most workspaces have not started using. The copy now names the
+  unread count.
+
+Client floor: minimum 0.1.1, recommended 0.1.16.
+
 ## [0.1.15] — 2026-09-06
 
 ### Fixed
