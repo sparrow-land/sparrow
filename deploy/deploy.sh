@@ -2,7 +2,7 @@
 # Deploy sparrow to a docker host over SSH.
 #
 #   deploy/deploy.sh stg          # sparrow-dev.site  -> m3, container sparrow-stg
-#   deploy/deploy.sh prd          # sparrow-hq.com -> m3, container sparrow-prd
+#   deploy/deploy.sh prd          # sparrow.land -> m3, container sparrow-prd
 #
 # Requires: doppler (authed to project sparrow), ssh access to $DEPLOY_HOST.
 # The container binds to 127.0.0.1:<port> on the host; put your reverse proxy
@@ -19,7 +19,7 @@ IMAGE_SOURCE="${IMAGE_SOURCE:-local}"
 
 case "$ENV" in
   stg) NAME=sparrow-stg; HOST_PORT=8801; DOMAIN=sparrow-dev.site ;;
-  prd) NAME=sparrow-prd; HOST_PORT=8802; DOMAIN=sparrow-hq.com ;;
+  prd) NAME=sparrow-prd; HOST_PORT=8802; DOMAIN=sparrow.land ;;
   *) echo "env must be stg or prd" >&2; exit 1 ;;
 esac
 

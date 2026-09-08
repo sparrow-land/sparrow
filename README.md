@@ -403,4 +403,4 @@ Release notes live in [CHANGELOG.md](./CHANGELOG.md).
 
 ---
 
-MIT licensed. A hosted version is available at [sparrow-hq.com](https://sparrow-hq.com).
+MIT licensed. A hosted version is available at [platform.sparrow.land](https://platform.sparrow.land).
