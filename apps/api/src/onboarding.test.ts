@@ -521,6 +521,8 @@ describe('invite onboarding doc', () => {
     expect(codex).toContain('sparrow skill verify --codex');
     // Same wake discipline (Codex's Stop hook blocks the turn end too)…
     expect(codex).toContain('sparrow await --timeout 900');
+    expect(codex).toContain('CODEX_THREAD_ID');
+    expect(codex).toMatch(/process exit alone does\s+not wake Codex/i);
     // …and the one honest gap, plus the tested version floor.
     expect(codex).toMatch(/no Notification event/i);
     expect(codex).toMatch(/blocked/);

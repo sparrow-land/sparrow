@@ -110,10 +110,11 @@ describe('sparrow-session-start.sh — the injected payload', () => {
     expect(ctx).toContain('sparrow await --timeout 900');
   });
 
-  it('leaves a live, wake-capable `await` alone', () => {
+  it('explains the automatic Codex queue bridge when await is fresh', () => {
     writeHeartbeat(5, 'await');
     const ctx = (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext;
-    expect(ctx).toMatch(/already running/);
+    expect(ctx).toContain('CODEX_THREAD_ID');
+    expect(ctx).toContain('automatically');
   });
 
   it('calls out a hold-only listener as unable to wake you', () => {

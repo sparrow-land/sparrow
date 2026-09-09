@@ -14,6 +14,13 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Fixed
+
+- `sparrow await` now detects `CODEX_THREAD_ID` and queues its drain/re-arm turn
+  into an idle, open Codex session. A queue failure is printed and stamps the
+  listener dead while preserving the original exit code and leaving work unread.
+  `--codex-thread <id>` remains available as an advanced override.
+
 ## [0.1.17] — 2026-09-09
 
 ### Fixed

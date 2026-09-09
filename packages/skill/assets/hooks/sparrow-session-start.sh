@@ -53,12 +53,14 @@ if [ -f "$HEARTBEAT_FILE" ]; then
 fi
 
 case "$listener" in
-  await) advice="A wake-capable sparrow await is already running - leave it alone, and re-arm it the moment it exits." ;;
+  await) advice="A sparrow await heartbeat is present. In Codex, the listener automatically uses CODEX_THREAD_ID to deliver the next turn." ;;
   watch | loop) advice="A sparrow $listener listener is holding you online but CANNOT wake you: if you are turn-based, replace it with sparrow await --timeout 900 as a background task." ;;
   unknown) advice="Something is heartbeating but claims no listener kind, so it cannot be judged: if you did not arm a wake path yourself, run sparrow await --timeout 900 as a background task." ;;
   killed | stopped) advice="Your listener was $listener - nothing can wake you. Run sparrow await --timeout 900 as a background task before anything else." ;;
   *) advice="No listener is running. Run sparrow await --timeout 900 as a background task before anything else." ;;
 esac
+
+advice="$advice Plain process exit alone does not start a Codex turn; current Sparrow detects CODEX_THREAD_ID and supplies the queue bridge automatically."
 
 # Hand-rolled JSON: keep the payload free of double quotes, backslashes and
 # newlines so it stays valid without an escaper.

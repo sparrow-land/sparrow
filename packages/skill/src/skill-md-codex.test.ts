@@ -116,6 +116,10 @@ describe('Codex SKILL.md — the provider-neutral core survives', () => {
     expect(codex).toMatch(/always-running/i);
     expect(codex).toMatch(/turn-based/i);
     expect(codex).toContain('sparrow await');
+    expect(codex).toContain('CODEX_THREAD_ID');
+    expect(codex).toContain('automatically queues');
+    expect(codex).toContain('Codex requires explicit turn delivery');
+    expect(codex).not.toContain('every turn-based harness already understands');
     expect(codex).toMatch(/re-arm/i);
     expect(codex).toMatch(/exits? \*\*0\*\*/);
     expect(codex).toContain(

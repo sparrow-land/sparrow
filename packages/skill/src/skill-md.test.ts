@@ -222,7 +222,7 @@ describe('SKILL.md — the come-online fork (online is not attentive)', () => {
   });
 
   it('prescribes await → drain → handle → re-arm, with the exit-code contract', () => {
-    expect(skillMd).toMatch(/process exit/i);
+    expect(skillMd).toContain('Your harness must turn that signal into a new agent turn');
     expect(skillMd).toContain('sparrow await');
     expect(skillMd).toMatch(/without consuming it|does not consume/i);
     expect(skillMd).toMatch(/still unread/i);

@@ -2574,6 +2574,76 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     expect(JSON.parse(pop.out()).item.message.id).toBe(sent.message.id);
   });
 
+  it('auto-detects CODEX_THREAD_ID and queues without consuming the work item', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtcodex');
+    const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'wake Codex' });
+    const cap = capture();
+    const calls: Array<[string, string]> = [];
+    cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+
+    expect(
+      await runCli(['await', '--timeout', '10'], { ...env, CODEX_THREAD_ID: 'thread-123' }, cap.io),
+    ).toBe(0);
+    expect(calls).toEqual([[
+      'thread-123',
+      'Sparrow await finished. Run `sparrow pop` until it reports `Inbox empty.`, reply in-room, then re-arm as the last action: `sparrow await --timeout 900`.',
+    ]]);
+
+    const inbox = capture();
+    expect(await runCli(['inbox', '--json'], env, inbox.io)).toBe(0);
+    expect(JSON.parse(inbox.out()).items.map((i: any) => i.id)).toContain(sent.message.id);
+  });
+
+  it('--codex-thread makes a queue failure loud while preserving exit 0 and unread work', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtcodexfail');
+    const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'queue failure' });
+    const cap = capture();
+    cap.io.notifyCodex = async () => { throw new Error('fake codex failure'); };
+
+    expect(
+      await runCli(
+        ['await', '--timeout', '10', '--codex-thread', 'thread-fail'],
+        { ...env, CODEX_THREAD_ID: 'thread-env-must-not-win' },
+        cap.io,
+      ),
+    ).toBe(0);
+    expect(cap.err()).toContain('codex queue failed for thread thread-fail');
+    expect(cap.err()).toContain('fake codex failure');
+    expect(cap.err()).toContain('work remains unread');
+    expect(fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8')).toContain('killed:CODEX_QUEUE');
+
+    const inbox = capture();
+    expect(await runCli(['inbox', '--json'], env, inbox.io)).toBe(0);
+    expect(JSON.parse(inbox.out()).items.map((i: any) => i.id)).toContain(sent.message.id);
+  });
+
+  it('--codex-thread rejects a blank thread id', async () => {
+    await awaitFixture('awtcodexblank');
+    const cap = capture();
+
+    expect(await runCli(['await', '--codex-thread', '   '], env, cap.io)).toBe(1);
+    expect(cap.err()).toContain('--codex-thread requires a non-empty Codex thread id');
+  });
+
+  it('--codex-thread does not dispatch after the loop is paused', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtcodexpaused');
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'do not queue this' });
+    const cap = capture();
+    let called = false;
+    cap.io.notifyCodex = async () => { called = true; };
+    const loopState = path.join(stateDir, 'loop-state');
+    fs.writeFileSync(loopState, 'paused\n');
+
+    try {
+      expect(
+        await runCli(['await', '--timeout', '10', '--codex-thread', 'thread-paused'], env, cap.io),
+      ).toBe(0);
+      expect(called).toBe(false);
+    } finally {
+      fs.rmSync(loopState, { force: true });
+    }
+  });
+
   it('holds the stream and wakes on a message that arrives while it waits', async () => {
     const { owner, roomId, agentId } = await awaitFixture('awtl');
     const cap = capture();
@@ -2599,6 +2669,31 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     const line = wakeLine(cap);
     expect(line.type).toBe('await.timeout');
     expect(line.timeoutSeconds).toBe(1);
+  });
+
+  it('auto-detected CODEX_THREAD_ID queues a timeout wake so an idle Codex turn can re-arm', async () => {
+    await awaitFixture('awtcodextimeout');
+    const cap = capture();
+    const calls: Array<[string, string]> = [];
+    cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+
+    expect(
+      await runCli(['await', '--timeout', '1'], { ...env, CODEX_THREAD_ID: 'thread-timeout' }, cap.io),
+    ).toBe(2);
+    expect(wakeLine(cap)).toMatchObject({ type: 'await.timeout', timeoutSeconds: 1 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]).toBe('thread-timeout');
+    expect(calls[0]![1]).toContain('sparrow await --timeout 900');
+  });
+
+  it('does not invoke Codex when CODEX_THREAD_ID and --codex-thread are both absent', async () => {
+    await awaitFixture('awtnocodex');
+    const cap = capture();
+    let called = false;
+    cap.io.notifyCodex = async () => { called = true; };
+
+    expect(await runCli(['await', '--timeout', '1'], env, cap.io)).toBe(2);
+    expect(called).toBe(false);
   });
 
   it('watch --exit-on-item is the same wake primitive', async () => {

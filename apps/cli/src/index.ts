@@ -7,7 +7,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import type { Readable, Writable } from 'node:stream';
 import { Command, type Command as Cmd } from 'commander';
@@ -109,7 +110,7 @@ import {
   writeEventCursor,
   type LastInbound,
 } from './state.js';
-import { touchHeartbeat, markHeartbeatDead, skillInstall } from './loop-state.js';
+import { touchHeartbeat, markHeartbeatDead, readLoopState, skillInstall } from './loop-state.js';
 import { runReconnectingStream } from './stream.js';
 import {
   pollEnrollmentUntilResolved,
@@ -121,6 +122,8 @@ import { registerHarnessCommand } from './harness/command.js';
 export interface CliIO {
   out(s: string): void;
   err(s: string): void;
+  /** Injected Codex turn delivery for tests and embedded clients. */
+  notifyCodex?(threadId: string, message: string): Promise<void>;
   /** Injected stdin body (for `--stdin`). */
   stdin?: string;
   /** Prompt the user (login). `opts.hidden` masks input (passwords). */
@@ -1613,6 +1616,33 @@ function runEnrollExec(cmd: string): Promise<number> {
     child.on('error', (err) => reject(err));
     child.on('close', (code) => resolve(code ?? 0));
   });
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Queue a new input into an idle Codex thread after `await` has reached a
+ * deliberate handoff point. The message is intentionally independent of the
+ * inbox preview: `await` must never turn a notification into a read.
+ */
+async function queueCodexAwaitWake(threadId: string, env: Env, io: CliIO): Promise<void> {
+  const message =
+    'Sparrow await finished. Run `sparrow pop` until it reports `Inbox empty.`, reply in-room, ' +
+    'then re-arm as the last action: `sparrow await --timeout 900`.';
+  try {
+    if (io.notifyCodex) {
+      await io.notifyCodex(threadId, message);
+      return;
+    }
+    await execFileAsync('codex', ['queue', '--thread', threadId, '--message', message], {
+      env: env as NodeJS.ProcessEnv,
+      timeout: 30_000,
+    });
+  } catch (e) {
+    const failure = e as { stderr?: string; message?: string };
+    const detail = (failure.stderr ?? failure.message ?? String(e)).trim();
+    throw new CliError(`codex queue failed for thread ${threadId}${detail ? `: ${detail}` : ''}`);
+  }
 }
 
 /**
@@ -3745,6 +3775,20 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const { client, server, token } = buildClient(opts, env);
     const { staleMs, maxStreamAgeMs } = streamHealthOpts(opts);
     const timeoutSeconds = (opts.timeout as number | undefined) ?? 0;
+    const explicitCodexThread = (opts.codexThread as string | undefined)?.trim();
+    if (opts.codexThread !== undefined && !explicitCodexThread) {
+      throw new CliError('--codex-thread requires a non-empty Codex thread id.');
+    }
+    const codexThread = explicitCodexThread || env.CODEX_THREAD_ID?.trim();
+    const queueCodexWake = async (): Promise<void> => {
+      if (!codexThread || readLoopState(env) === 'paused') return;
+      try {
+        await queueCodexAwaitWake(codexThread, env, io);
+      } catch (e) {
+        markHeartbeatDead(env, 'killed', 'CODEX_QUEUE');
+        io.err(`[await] ${String((e as Error)?.message ?? e)}; work remains unread, but no Codex turn was queued\n`);
+      }
+    };
 
     /* ------------------------- wake granularity -------------------------
      * `--wake-on` narrows what wakes you IMMEDIATELY; `--batch-after` is the
@@ -3926,6 +3970,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     if (alreadyWaiting && 'item' in alreadyWaiting) {
       wake('waiting', alreadyWaiting.item, { matched: alreadyWaiting.matched });
       await markTurn();
+      await queueCodexWake();
       return;
     }
     if (alreadyWaiting) firstDeferMs = alreadyWaiting.deferMs;
@@ -4134,12 +4179,14 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     if (emitted) {
       // exit 0 — the wake line is already on stdout; cover the turn it starts.
       await markTurn();
+      await queueCodexWake();
       return;
     }
     // A --timeout expiry plants NOTHING: a harness that re-arms is not a turn,
     // and marking it online would be the same lie in the other direction.
     if (timedOut) {
       emit({ type: 'await.timeout', timeoutSeconds });
+      await queueCodexWake();
       ctx.exitCode = 2; // nothing waiting — a harness re-arms
     }
     // Otherwise: interrupted (Ctrl-C). Exit 0 silently, as `watch` does.
@@ -4148,13 +4195,18 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
   withListener(withCommon(program.command('await')))
     .description(
       'WAKE primitive for turn-based agents: hold the events stream (presence rides it) until a ' +
-        'work item is waiting, print it as one JSON line WITHOUT consuming it, and exit 0 so your ' +
-        'harness re-invokes you — then drain with `sparrow pop`. On wake it heartbeats presence ' +
+        'work item is waiting, print it as one JSON line WITHOUT consuming it, and exit 0 for an external ' +
+        'wake bridge to handle — then drain with `sparrow pop`. When CODEX_THREAD_ID is present, it ' +
+        'automatically queues that bridge into the current Codex thread. On wake it heartbeats presence ' +
         '(--turn-seconds) so you stay online while you work. Exit 2 = --timeout elapsed (re-arm). ' +
         'Use --wake-on to wake urgently for DMs/mentions/email and batch the rest (--batch-after).',
     )
     .option('--timeout <seconds>', 'give up (exit 2) after this long with nothing waiting', (v) =>
       Number.parseInt(v, 10),
+    )
+    .option(
+      '--codex-thread <id>',
+      'override CODEX_THREAD_ID for Codex queue delivery (advanced/debug use)',
     )
     .option(
       '--stale-seconds <seconds>',

@@ -1125,8 +1125,9 @@ The hooks only catch *accidental* drift; pausing is the sanctioned, visible off-
 
 ### Codex
 
-Same skill, same discipline — \`sparrow await --timeout 900\` re-armed every turn: Codex's Stop hook
-blocks the end of a turn exactly as Claude Code's does, so the re-arm guarantee is identical. Only
+Same skill, same discipline — \`sparrow await --timeout 900\` re-armed every turn. In Codex,
+Sparrow detects \`CODEX_THREAD_ID\` and queues a new turn when work arrives; process exit alone does
+not wake Codex. The Stop hook enforces the re-arm, while the queue bridge delivers the turn. Only
 these differ:
 
 \`\`\`sh

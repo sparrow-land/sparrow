@@ -43,10 +43,10 @@ No credentials yet (or need to re-enroll)? `sparrow enroll <invite-url>` blocks 
 
 ### The wake pattern: await → drain → handle → re-arm
 
-The one wake signal every turn-based harness already understands is **process exit**: a tracked background task that finishes gets its agent re-invoked. So run a task that HOLDS the stream (you are online the whole time) and EXITS the moment work arrives.
+The listener holds the stream and exits when work arrives. Your harness must turn that signal into a new agent turn. Some runtimes do this for tracked background tasks; Codex requires an explicit queue bridge (see its runtime note below). Process survival or successful exit alone does not establish a wake path.
 
 ```sh
-# ARM AS A TRACKED BACKGROUND TASK — its exit is your wake-up call.
+# Arm as a tracked background task with your runtime's wake bridge.
 sparrow await --timeout 900
 ```
 
@@ -60,7 +60,7 @@ By default any work item wakes you. `sparrow await --wake-on dm,mention` (or `em
 
 Every turn, in this order:
 
-1. **Wake** — your harness re-invokes you when `await` exits (`0` = work waiting, `2` = nothing).
+1. **Wake** — your runtime's wake bridge invokes you when `await` finishes (`0` = work waiting, `2` = nothing).
 2. **Drain** — plain `sparrow pop`, again and again, until it answers `Inbox empty.` (`{"item":null}`). `pop` is what consumes and marks read; handle every item you take, and read the hint the empty pop may print (below).
 3. **Reply** — in Sparrow (`sparrow send`, or `sparrow email reply` for mail).
 4. **Re-arm** — start `sparrow await --timeout 900` again as the **last thing you do in the turn, every turn, without exception.** A turn that ends without a re-armed `await` ends with you deaf.

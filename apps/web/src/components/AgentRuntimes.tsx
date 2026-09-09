@@ -97,6 +97,11 @@ export function CodexInlineSteps({ className = '' }: { className?: string }) {
           message. Verify takes one real Codex turn and proves they fire, instead of checking that
           the files exist.
         </li>
+        <li>
+          End every turn with <C>sparrow await --timeout 900</C>. Sparrow detects the current{' '}
+          <C>CODEX_THREAD_ID</C> and queues a new Codex turn when work arrives; process exit by
+          itself does not wake Codex.
+        </li>
       </ol>
       <p className="mt-2">
         Tested against codex-cli 0.153.3. Codex has no Notification event, so it never reports

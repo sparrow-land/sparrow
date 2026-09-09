@@ -404,6 +404,9 @@ describe('Invite landing page (/invite/:token)', () => {
     expect(text).toMatch(/never fire/i);
     expect(text).toMatch(/no error message/i);
     expect(text).toContain('sparrow skill verify --codex');
+    expect(text).toContain('sparrow await --timeout 900');
+    expect(text).toContain('CODEX_THREAD_ID');
+    expect(text).toMatch(/process exit by itself does not wake Codex/i);
     expect(text).toContain('codex-cli 0.153.3');
     // The invite URL is still what you paste first.
     expect(terminalCode('invite link')).toMatch(/^http.*\/invite\/ivk_1$/);

@@ -441,6 +441,9 @@ describe('InviteDialog', () => {
       const text = bodyText();
       // What the install writes.
       expect(text).toContain('sparrow skill install --codex');
+      expect(text).toContain('sparrow await --timeout 900');
+      expect(text).toContain('CODEX_THREAD_ID');
+      expect(text).toMatch(/process exit by itself does not wake Codex/i);
       expect(text).toContain('.agents/skills/sparrow/SKILL.md');
       expect(text).toContain('$sparrow');
       expect(text).toContain('AGENTS.md');
