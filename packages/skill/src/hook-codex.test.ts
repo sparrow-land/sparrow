@@ -57,11 +57,20 @@ function run(
   args: string[] = [],
   { stdin = '{}', env = {} as Record<string, string> } = {},
 ): string {
-  return execFileSync('sh', [script, ...args], {
-    input: stdin,
-    encoding: 'utf8',
-    env: { PATH: process.env.PATH!, HOME: home, SPARROW_STATE_DIR: stateDir, ...env },
-  });
+  try {
+    return execFileSync('sh', [script, ...args], {
+      input: stdin,
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH!, HOME: home, SPARROW_STATE_DIR: stateDir, ...env },
+    });
+  } catch (e) {
+    // A script that exits before reading stdin (the no-argument wrapper does)
+    // can close the pipe while node is still writing `input`: EPIPE with a
+    // clean exit status is a successful run, not a failure. Seen on CI runners.
+    const err = e as { code?: string; status?: number | null; stdout?: string };
+    if (err.code === 'EPIPE' && (err.status ?? 0) === 0) return err.stdout ?? '';
+    throw e;
+  }
 }
 
 /* --------------------------- sparrow-session-start ------------------------- */

@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.19] — 2026-09-09
+
 ### Fixed
 
 - `sparrow upgrade` (alias `sparrow update`) now refreshes the **installed skill**

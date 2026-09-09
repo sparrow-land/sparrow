@@ -74,6 +74,9 @@ hold_kind=""
 passive_await=""
 dead_word=""
 dead_signal=""
+# Codex runs hooks as children of the session process, so they inherit its
+# CODEX_THREAD_ID. If a future runner strips it, this safely falls back to the
+# Claude-compatible bounded command and treats plain `await` as unjudgeable.
 if [ -n "${CODEX_THREAD_ID:-}" ]; then
   await_command="sparrow await"
   runtime="Codex"
