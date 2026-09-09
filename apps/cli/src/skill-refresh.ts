@@ -175,17 +175,38 @@ export function recordSkillInstall(o: RecordSkillInstallOptions): SkillInstallMa
   }
 }
 
+/** The uninstall being performed — everything that decides WHICH install it removed. */
+export interface ForgetSkillInstallOptions {
+  /** `--user`. */
+  user?: boolean;
+  /** `--shared`: the uninstall cleaned the COMMITTED settings file. */
+  shared?: boolean;
+  /** Explicit `--claude` / `--codex`; detected from the directory otherwise. */
+  provider?: Provider;
+}
+
 /**
- * Drop the marker after an UNINSTALL. Without this, a removed skill would be
- * resurrected by the next `sparrow upgrade` — the marker outliving the thing it
- * describes is the one way this feature could act against the user.
+ * Drop the marker after an UNINSTALL — but only for the install that was
+ * actually removed. Without this, a removed skill would be resurrected by the
+ * next `sparrow upgrade`; with too MUCH of it, a surviving install silently
+ * stops being refreshed, which is the same bug from the other side.
  *
- * It clears both state dirs an uninstall could have acted on (the resolved one
- * — `uninstall` walks up from the cwd the way `pause`/`status` do — and, for
- * `--user`, `~/.sparrow`), but only where the marker's own scope matches, so a
- * user-scope uninstall never forgets a project install or vice versa.
+ * Scope is settled by which state dir we look in (`--user` → `~/.sparrow`, else
+ * this project's). The other two coordinates are compared explicitly:
+ *   - LAYOUT. `--shared` and a personal install register in different settings
+ *     files and can coexist, so a plain uninstall leaves a `--shared` install
+ *     standing — assets and all — and its record must stand with it.
+ *   - HARNESS. A Codex uninstall must never forget a Claude install. With no
+ *     explicit flag the provider is detected exactly as the installer detects
+ *     it, and an answer we cannot pin down retains the marker: keeping a stale
+ *     record only costs one redundant refresh, while dropping a live one leaves
+ *     the skill silently lagging the CLI forever.
  */
-export function forgetSkillInstall(env: Env, cwd: string, opts: { user?: boolean } = {}): void {
+export function forgetSkillInstall(
+  env: Env,
+  cwd: string,
+  opts: ForgetSkillInstallOptions = {},
+): void {
   try {
     const home = env.HOME?.trim() || os.homedir();
     const scope: Scope = opts.user ? 'user' : 'project';
@@ -197,6 +218,9 @@ export function forgetSkillInstall(env: Env, cwd: string, opts: { user?: boolean
         : resolveStateDir(env, cwd);
     const marker = readSkillInstallMarker(stateDir);
     if (!marker || marker.scope !== scope) return;
+    if (Boolean(marker.shared) !== Boolean(opts.shared)) return;
+    const provider = opts.provider ?? detectProvider(scope === 'user' ? home : cwd).provider;
+    if (marker.provider !== provider) return;
     fs.rmSync(skillInstallMarkerPath(stateDir), { force: true });
   } catch {
     // best-effort: an uninstall that worked must not fail over its bookkeeping

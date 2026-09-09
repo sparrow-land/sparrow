@@ -3809,7 +3809,16 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         if (code !== 0) throw new CliError(`sparrow skill ${argv[0]} failed`);
         // A removed skill must stay removed: drop the record before `upgrade`
         // can replay it.
-        if (argv[0] === 'uninstall') forgetSkillInstall(env, cwd, { user: Boolean(opts.user) });
+        // …but only the record of the install this command actually removed:
+        // a plain uninstall leaves a `--shared` registration (and a Codex one)
+        // standing, and an install still on disk must keep being refreshed.
+        if (argv[0] === 'uninstall') {
+          forgetSkillInstall(env, cwd, {
+            user: Boolean(opts.user),
+            shared: Boolean(opts.shared),
+            provider: opts.codex ? 'codex' : opts.claude ? 'claude' : undefined,
+          });
+        }
         // Record HOW this install was made, next to the loop switch it just
         // seeded, so `sparrow upgrade` can replay it and the skill never lags
         // the CLI. Best-effort: never turns a good install into a failure.

@@ -186,6 +186,49 @@ describe('sparrow upgrade — skill refresh', () => {
     expect(cap.out()).toContain('sparrow skill install');
   });
 
+  /**
+   * An uninstall only forgets the install it actually removed.
+   *
+   * `--shared` and personal installs share a skill dir but not a settings file,
+   * so a plain `sparrow skill uninstall` leaves a `--shared` registration (and
+   * its assets) standing — and the record of it must stand too. Dropping the
+   * marker anyway would quietly stop `sparrow upgrade` refreshing a skill that
+   * is still installed and still firing.
+   */
+  it('a plain uninstall keeps the record of a --shared install, which upgrade still refreshes', async () => {
+    expect(await runCli(['skill', 'install', '--claude', '--shared'], env(), capture().io)).toBe(0);
+    expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))?.shared).toBe(true);
+
+    expect(await runCli(['skill', 'uninstall', '--claude'], env(), capture().io)).toBe(0);
+
+    expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))?.shared).toBe(true);
+    fs.rmSync(refreshLog, { force: true });
+    expect(await runCli(['upgrade'], env(), capture().io)).toBe(0);
+    expect(refreshes()[0]!.argv).toEqual(['skill', 'install', '--claude', '--shared']);
+  });
+
+  it('the MATCHING uninstall does forget it', async () => {
+    expect(await runCli(['skill', 'install', '--claude', '--shared'], env(), capture().io)).toBe(0);
+    expect(await runCli(['skill', 'uninstall', '--claude', '--shared'], env(), capture().io)).toBe(0);
+
+    expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))).toBeUndefined();
+    fs.rmSync(refreshLog, { force: true });
+    expect(await runCli(['upgrade'], env(), capture().io)).toBe(0);
+    expect(refreshes()).toHaveLength(0);
+  });
+
+  it('a --shared uninstall keeps the record of a PERSONAL install', async () => {
+    expect(await runCli(['skill', 'install', '--claude'], env(), capture().io)).toBe(0);
+    expect(await runCli(['skill', 'uninstall', '--claude', '--shared'], env(), capture().io)).toBe(0);
+    expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))?.provider).toBe('claude');
+  });
+
+  it('an uninstall for the OTHER harness never forgets this one', async () => {
+    expect(await runCli(['skill', 'install', '--claude'], env(), capture().io)).toBe(0);
+    expect(await runCli(['skill', 'uninstall', '--codex'], env(), capture().io)).toBe(0);
+    expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))?.provider).toBe('claude');
+  });
+
   /* ------------------------------ the refresh ------------------------------ */
 
   it('upgrade re-runs the recorded install with the NEW bundle, same provider and scope', async () => {
