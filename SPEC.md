@@ -2584,7 +2584,7 @@ whenever it differs from the thread's.
 
 | Header | Value |
 |---|---|
-| `Message-ID` | `<{emailId}@{agent address domain}>` — e.g. `<eml_7bN3xC6vT9pL@acme.example.com>`. Generated before relay and stored as `rfc_message_id`, so the reply that comes back resolves in one lookup |
+| `Message-ID` | `<{emailId}@{agent address domain}>` — e.g. `<eml_7bN3xC6vT9pL@acme.example.com>`. Generated before relay and stored as `rfc_message_id`, so the reply that comes back resolves in one lookup. **Corrected to the wire id** when the relay reports one on acceptance (below) |
 | `In-Reply-To` | the `rfc_message_id` of the thread's most recent email (any direction); absent on a new thread |
 | `References` | the parent's `References` + the parent's `Message-ID`, trimmed to the **last 20** ids; absent on a new thread |
 | `From` | `"{agent name}" <{agent address}>` |
@@ -2594,6 +2594,25 @@ whenever it differs from the thread's.
 
 An outbound email's row is written (with its `Message-ID`) **before** the relay
 call, so a crash mid-relay leaves an auditable `send-failed`, never a silent gap.
+
+**The wire Message-ID.** Not every relay can stamp the `Message-ID` it is
+handed — some upstream providers mint their own (`<{provider-id}@provider.example>`)
+and our header never reaches the wire. A relay MAY therefore report the id it
+actually sent under `rfcMessageId` on a successful send; the core then
+**corrects** the row's `rfc_message_id` to it, so a reply naming the wire id
+threads and the agent's next reply cites the id the world saw. The rules:
+
+- **Only on acceptance.** A `send-failed`, `held`, `rejected`, or otherwise
+  indeterminate send never reaches the relay or never got an acceptance, and
+  keeps the locally generated id.
+- **Only a well-formed value** — angle-bracketed, containing `@` — normalized
+  the same way inbound ids are. Anything else (a bare provider handle, a mangled
+  string) is ignored.
+- **Never a value already used** by another of that agent's emails: the pair
+  `(agent, Message-ID)` is the medium's idempotency key, so a collision keeps
+  the local id and logs.
+- The envelope the relay received still carried the locally minted id; only the
+  stored row moves. Read views (`Email.rfcMessageId`) show the corrected value.
 
 **Intra-instance mail is not short-circuited.** An agent emailing a sibling
 agent's address goes out through the relay and comes back through the inbound
@@ -2623,6 +2642,8 @@ An in-process loopback with no network at all — the TDD workhorse.
   `sent: CapturedEmail[]`, `clear()`, and
   `deliver(payload): Promise<InboundResult>` which runs the exact
   `/email/inbound` pipeline in-process. Unit tests use this; no HTTP, no token.
+  `setWireMessageId(fn)` makes the fake behave like a relay that stamps its own
+  `Message-ID` (the wire id above); unset — the default — it reports none.
 - **Admin/test HTTP surface** (present ONLY under `fake`; `404` otherwise;
   `X-Admin-Token`) so shell scenarios can drive the medium end to end:
 
@@ -2663,6 +2684,19 @@ Operators running a custom webhook receiver written against v3 **must
 update it**: the receiver now sees `to` as an array and a `headers` object it is
 expected to pass through. Any 2xx = accepted for delivery → `sent`; anything else
 → `send-failed` with `reason: "relay-error"`.
+
+A 2xx body is read for one optional field:
+
+```json
+{ "sent": true, "messageId": "<provider handle>",
+  "rfcMessageId": "<abc123@provider.example>" }
+```
+
+`rfcMessageId` is the `Message-ID` the relay actually put on the wire, for
+relays that cannot stamp ours; the core records it under the rules in *Outbound
+header generation* above. A relay that passes our header through verbatim (as
+`apps/mail-gateway` does) simply omits it, and a body that is not JSON, or
+carries a malformed value, changes nothing.
 
 #### `apps/mail-gateway` (OSS sidecar)
 

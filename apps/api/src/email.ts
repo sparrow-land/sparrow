@@ -20,7 +20,10 @@
  * Any 2xx = accepted for delivery → `{ sent: true }`. A non-2xx, a network
  * error, or an unconfigured webhook all yield `{ sent: false, reason }` — the
  * caller decides how to surface it (the email medium lands `send-failed` with
- * `reason: "relay-error"`).
+ * `reason: "relay-error"`). A relay that could not stamp the `Message-ID` we
+ * handed it may report the one it DID put on the wire as `rfcMessageId` in its
+ * 2xx body (`{ sent: true, messageId, rfcMessageId }`); it rides back on the
+ * result and the email medium records it.
  */
 import type { OutboundEmailWebhookPayload } from '@sparrow/common-types';
 
@@ -35,8 +38,15 @@ export interface EmailWebhookConfig {
 /** One outbound message on the wire — the v4 envelope. */
 export type EmailMessage = OutboundEmailWebhookPayload;
 
-/** Best-effort send outcome — never an exception. */
-export type SendEmailResult = { sent: true } | { sent: false; reason: string };
+/**
+ * Best-effort send outcome — never an exception. On acceptance a relay MAY
+ * report `rfcMessageId`: the `Message-ID` it actually put on the wire, which
+ * differs from the one we handed it when the upstream provider stamps its own.
+ * It is passed through verbatim here; the caller decides whether to trust it.
+ */
+export type SendEmailResult =
+  | { sent: true; rfcMessageId?: string }
+  | { sent: false; reason: string };
 
 /** Drop `undefined` optional keys so the wire payload stays minimal. */
 function compact(message: EmailMessage): Record<string, unknown> {
@@ -52,6 +62,22 @@ function compact(message: EmailMessage): Record<string, unknown> {
   if (message.html !== undefined) payload.html = message.html;
   if (message.attachments !== undefined) payload.attachments = message.attachments;
   return payload;
+}
+
+/**
+ * The relay's optional `rfcMessageId` — the wire `Message-ID` — from a 2xx body.
+ * A missing, non-JSON, or non-string value is simply absent: a relay that says
+ * nothing is a relay that stamped what we asked for.
+ */
+async function readWireMessageId(res: Response): Promise<string | null> {
+  try {
+    const body = (await res.json()) as unknown;
+    if (typeof body !== 'object' || body === null) return null;
+    const value = (body as { rfcMessageId?: unknown }).rfcMessageId;
+    return typeof value === 'string' ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -76,7 +102,10 @@ export async function sendEmail(
       headers,
       body: JSON.stringify(compact(message)),
     });
-    if (res.status >= 200 && res.status < 300) return { sent: true };
+    if (res.status >= 200 && res.status < 300) {
+      const wire = await readWireMessageId(res);
+      return wire === null ? { sent: true } : { sent: true, rfcMessageId: wire };
+    }
     return { sent: false, reason: `email webhook responded ${res.status}` };
   } catch (err) {
     return {
