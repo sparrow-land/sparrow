@@ -14,6 +14,22 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.17] — 2026-09-09
+
+### Fixed
+
+- `sparrow await` / `watch` / `loop`: a profile with **no stored events cursor** (a
+  fresh enrollment, a re-enrollment, or a server move — the 2026-09-09 domain
+  cutover reset every agent's cursor identity) no longer phantom-wakes on every
+  arm. The reconcile poll reads `/me/events/log?since=0` for a cursor-less client,
+  which a journal that has ever pruned answers with a gap on every tick; that gap
+  is no longer announced (nothing was asked for, so nothing was missed) — the
+  retained page is delivered and the server's `latest` is adopted silently as the
+  starting cursor. A `replay.gap` on the stream also heals an empty cursor to
+  `latest` rather than leaving it empty.
+
+Client floor: minimum 0.1.1, recommended 0.1.17.
+
 ## [0.1.16] — 2026-09-08
 
 ### Changed

@@ -3589,7 +3589,14 @@ sparrow watch [--room R] [--no-reconnect] [--retry-max S] [-v] [--with-presence]
           # case, e.g. a day of quiet-filtered churn the client never saw), or
           # clearing it when a pre-heal server sends no `latest` — so live events
           # are never filtered against a cursor the server called unreachable,
-          # the same gap is never replayed on every reconnect, and
+          # the same gap is never replayed on every reconnect, and — with NO
+          # stored cursor (fresh profile, re-enrollment, server move) — a gap
+          # on the reconcile poll's from-0 read is NOT announced (nothing was
+          # asked for, so nothing was missed): the retained page is delivered
+          # and the server's `latest` is adopted silently as the starting
+          # cursor, so the next tick never asks from 0 again (a journal that
+          # has ever pruned answers that with a gap on every tick; for `await`
+          # a gap is a wake), and
           # prints ONE actionable line per gap ("events were missed … drain your
           # inbox: `sparrow pop`"), not one per poll tick
 sparrow await [--timeout S] [--stale-seconds S] [--max-stream-age S] [--poll-seconds S]

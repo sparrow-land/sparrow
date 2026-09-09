@@ -563,6 +563,14 @@ interface EventCursor {
   advance(id: string): void;
   /** Apply a gap signal; returns true when the caller should announce it. */
   gap(latest?: string | number): boolean;
+  /**
+   * Adopt the server's newest id as the starting cursor when NONE is stored —
+   * silently (no gap, no announcement). The reconcile poll uses this when its
+   * from-0 read of a cursor-less client delivered nothing, so the next tick does
+   * not ask from 0 again — a journal that has ever pruned answers that with a
+   * gap on every tick, and for `await` a gap is a wake (2026-09-09).
+   */
+  seed(latest?: string | number): void;
 }
 
 function makeEventCursor(
@@ -594,7 +602,11 @@ function makeEventCursor(
         // reaching this client, so nothing replayable can move the cursor).
         // Keeping the stale cursor replays the identical gap on every
         // reconnect — for `await`, an instant phantom wake per arm (2026-09-06).
-        if (lastId !== undefined && Number(lastId) !== n) set(String(n)); // adopt `latest`
+        // …and from NO cursor at all: ids at or below `latest` were never going
+        // to be replayed (pruned, or before this client existed), so filtering
+        // them costs nothing, while holding an empty cursor re-gaps on every
+        // reconnect (2026-09-09).
+        if (lastId === undefined || Number(lastId) !== n) set(String(n)); // adopt `latest`
       } else if (lastId !== undefined) {
         set(undefined); // pre-heal server: nothing to adopt → never keep a dead cursor
       }
@@ -602,6 +614,11 @@ function makeEventCursor(
       const announce = announcedAt !== at;
       announcedAt = at;
       return announce;
+    },
+    seed(latest) {
+      if (lastId !== undefined) return; // a real cursor always wins over a probe
+      const n = latest === undefined ? Number.NaN : Number(latest);
+      if (Number.isFinite(n)) set(String(n));
     },
   };
 }
@@ -651,47 +668,67 @@ function startReconcilePoll(params: {
    * from them (see {@link makeEventCursor}) before anything is filtered again.
    */
   onGap: (info: { since: string; latest: string }) => void;
+  /**
+   * The poll ran with NO stored cursor (from `0`) and the journal has history
+   * it could not hand over — the server flags that as a gap, but nothing was
+   * MISSED: this client never asked for anything before, so it is not news and
+   * must not be announced (for `await` a gap is a wake — this was one phantom
+   * wake per arm for every fresh profile, re-enrollment or server move, live
+   * after the 2026-09-09 domain cutover reset every agent's cursor identity).
+   * Adopt the server's `latest` as the starting cursor, silently.
+   */
+  onSeed: (latest: string) => void;
   onError: (e: unknown) => void;
 }): () => void {
   const { client, pollMs, timeoutMs, signal } = params;
   if (pollMs === undefined) return () => {};
   let running = false;
+  /**
+   * One log read over a fresh single-connection transport with a hard abort
+   * timeout, so neither a poisoned pool nor a hung read can wedge the poll loop.
+   */
+  const fetchLog = async (since: string): Promise<MeEventsLogResult> => {
+    const transport = params.newTransport();
+    const ac = new AbortController();
+    const onOuterAbort = (): void => ac.abort();
+    signal.addEventListener('abort', onOuterAbort, { once: true });
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    (timer as { unref?: () => void }).unref?.();
+    try {
+      return await client.meEventsLog(since, {
+        signal: ac.signal,
+        dispatcher: transport?.dispatcher,
+        fetchImpl: transport?.fetchImpl,
+        quiet: params.quiet,
+      });
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onOuterAbort);
+      transport?.close();
+    }
+  };
   const tick = async (): Promise<void> => {
     if (signal.aborted || running) return; // skip while a prior poll is in flight
     running = true;
     try {
       // Backfill from the current cursor; when the stream never delivered a frame
       // (wedged from the start), from the beginning (0) so the backlog surfaces.
+      const fresh = params.getLastId() === undefined;
       let cursor = params.getLastId() ?? '0';
       for (;;) {
-        // Each request: a fresh single-connection transport + a hard abort timeout,
-        // so neither a poisoned pool nor a hung read can wedge the poll loop.
-        const transport = params.newTransport();
-        const ac = new AbortController();
-        const onOuterAbort = (): void => ac.abort();
-        signal.addEventListener('abort', onOuterAbort, { once: true });
-        const timer = setTimeout(() => ac.abort(), timeoutMs);
-        (timer as { unref?: () => void }).unref?.();
-        let res: MeEventsLogResult;
-        try {
-          res = await client.meEventsLog(cursor, {
-            signal: ac.signal,
-            dispatcher: transport?.dispatcher,
-            fetchImpl: transport?.fetchImpl,
-            quiet: params.quiet,
-          });
-        } finally {
-          clearTimeout(timer);
-          signal.removeEventListener('abort', onOuterAbort);
-          transport?.close();
-        }
+        const res = await fetchLog(cursor);
         if (signal.aborted) break;
         // onGap runs BEFORE the events: on a generation mismatch it heals the
         // cursor DOWN to `latest`, after which this page's (empty) events and every
         // subsequent fresh id pass the seen-gate again. A normal pruned-retention
         // gap keeps `latest` above the cursor, so the heal is a no-op there.
-        if (res.gap) params.onGap({ since: cursor, latest: res.latest });
+        // A gap on the from-0 read of a cursor-less client is not a gap at all
+        // (see onSeed): the page still delivers what the journal retains.
+        if (res.gap && !fresh) params.onGap({ since: cursor, latest: res.latest });
         for (const e of res.events) params.onEvent(e);
+        // Cursor-less and nothing delivered (all pruned, or all quiet-filtered
+        // churn): adopt `latest` so the next tick does not ask from 0 again.
+        if (fresh && params.getLastId() === undefined) params.onSeed(res.latest);
         // Only ids > cursor are ever returned, and onEvent advances lastId, so the
         // cursor strictly increases; stop if a capped page somehow didn't advance.
         const next = params.getLastId() ?? cursor;
@@ -4040,6 +4077,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       getLastId: () => cursor.current(),
       onEvent,
       onGap: ({ since, latest }) => onGap(since, latest),
+      onSeed: (latest) => cursor.seed(latest),
       onError: (e) =>
         lifecycle(
           { type: 'await.poll_error', message: String((e as Error)?.message ?? e) },
@@ -4338,6 +4376,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
                 getLastId: () => cursor.current(),
                 onEvent: printMe,
                 onGap: ({ since, latest }) => noteGap(since, latest),
+                onSeed: (latest) => cursor.seed(latest),
                 onError: (e) => {
                   if (ctx.json) {
                     io.out(
@@ -4637,6 +4676,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
                 getLastId: () => cursor.current(),
                 onEvent,
                 onGap: ({ since, latest }) => onGap(since, latest),
+                onSeed: (latest) => cursor.seed(latest),
                 onError: (e) => {
                   if (ctx.json) {
                     io.err(

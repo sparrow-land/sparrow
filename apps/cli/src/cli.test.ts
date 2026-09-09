@@ -3989,10 +3989,12 @@ describe('sparrow CLI — watch/loop stream health', () => {
       expect(wake.item).toBeNull(); // nothing to preview — the instruction is the payload
       expect(wake.drain).toBe('sparrow pop');
       // The gap is reported honestly, and the cursor went through the shared
-      // heal (nothing to adopt here — this profile had no stored cursor).
+      // heal: the server named its newest id, so even a profile with NO stored
+      // cursor adopts it — holding an empty cursor would re-gap on every
+      // reconnect (the 2026-09-09 phantom-wake loop after the domain cutover).
       expect(wake.since).toBe(2634);
       expect(wake.latest).toBe(115);
-      expect(wake.cursor).toBeNull();
+      expect(wake.cursor).toBe('115');
     } finally {
       await stub.close();
     }

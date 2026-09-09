@@ -135,9 +135,16 @@ async function startUpstream(opts?: {
   const server = http.createServer((req, res) => {
     const u = req.url!;
     if (u.startsWith('/api/v1/me/events/log')) {
-      const since = sinceOf(u);
+      const raw = sinceParam(u);
       const latest = latestOf();
       res.writeHead(200, { 'Content-Type': 'application/json' });
+      // No cursor → the server's cheap PROBE: the caller learns its starting
+      // cursor and fetches nothing — never a gap (mirrors routes/events.ts).
+      if (raw === null) {
+        res.end(JSON.stringify({ events: [], latest }));
+        return;
+      }
+      const since = Number(raw);
       res.end(
         JSON.stringify({
           events: journal.filter((e) => e.id > since),
@@ -486,6 +493,33 @@ describe('sparrow CLI — persisted cursor self-heals across a journal wipe', ()
     ).toBe(2);
     expect(upstream.streamSince[1]).toBe(LATEST);
     expect(second.out()).not.toContain('replay.gap');
+  });
+
+  it('await: a profile with NO stored cursor on a server that has pruned probes its start and never phantom-wakes', async () => {
+    // The production failure (2026-09-09, right after the prod domain cutover
+    // reset every agent's cursor identity): with no stored cursor the reconcile
+    // poll asked `/me/events/log?since=0`, which a journal that has EVER pruned
+    // answers with a gap — so `await` woke on every arm, one burned turn per
+    // poll tick, for every fresh profile, re-enrollment or server move. That
+    // gap is not news (nothing was asked for, so nothing was missed): deliver
+    // the retained page, adopt `latest` silently as the start, and hold.
+    const LATEST = 69015;
+    upstream = await startUpstream({ prunedMark: 60000, unreplayableLatest: LATEST });
+    const serverUrl = `http://127.0.0.1:${upstream.port}`;
+    seedProfile(serverUrl, {}); // an address, no cursor at all
+
+    const cap = capture();
+    expect(
+      await runCli(
+        ['await', '--timeout', '2', '--stale-seconds', '0', '--max-stream-age', '0'],
+        baseEnv({ SPARROW_RECONCILE_POLL_MS: '60' }),
+        cap.io,
+      ),
+      cap.err(),
+    ).toBe(2); // held to the timeout — no phantom gap wake
+    expect(cap.out()).not.toContain('replay.gap');
+    // …and it now knows where it stands: the probed `latest` is the cursor.
+    expect(persistedCursor()).toBe(String(LATEST));
   });
 
   it('a re-enrolled profile never resumes from the PREVIOUS identity’s cursor', async () => {
