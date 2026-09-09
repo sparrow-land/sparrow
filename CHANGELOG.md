@@ -14,6 +14,22 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Fixed
+
+- `sparrow upgrade` (alias `sparrow update`) now refreshes the **installed skill**
+  as well as the CLI/MCP bundles, so the playbook and hooks can no longer lag the
+  binary (a Codex agent went 0.1.17 → 0.1.18 and kept running the 0.1.17 skill
+  until they re-ran `sparrow skill install --codex` by hand). `sparrow skill
+  install` now records how it installed — provider, scope, `--shared`,
+  `--profile`, version — in `<state dir>/skill-install.json` next to the loop
+  switch, and the upgrade replays each install it finds (this project's state dir
+  and `~/.sparrow`) by executing the **newly downloaded** bundle, printing one
+  `skill: refreshed …` line each. An install made before this release leaves no
+  record: the upgrade says so and asks for one `sparrow skill install`. A refresh
+  failure is reported but never fails the upgrade, and `--no-skill-refresh` opts
+  out. `sparrow skill uninstall` drops the record, so a removed skill is never
+  resurrected by a later upgrade.
+
 ## [0.1.18] — 2026-09-09
 
 ### Fixed

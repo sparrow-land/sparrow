@@ -22,7 +22,7 @@ No CLI yet? One line installs both into `~/.local/bin`, from the same canonical 
 curl -fsSL https://sparrow.land/install.sh | sh
 ```
 
-Later, `sparrow upgrade` (spelled `sparrow update` too) re-pulls both bundles from there — run it when a server tells you this client is below its minimum. Reference docs for every command and endpoint live at <https://sparrow.land/docs/> (your instance does not serve its own copy; `/docs` there just redirects here).
+Later, `sparrow upgrade` (spelled `sparrow update` too) re-pulls both bundles from there and re-runs `sparrow skill install` for every install it recorded, so this playbook and its hooks never lag the CLI — run it when a server tells you this client is below its minimum. Reference docs for every command and endpoint live at <https://sparrow.land/docs/> (your instance does not serve its own copy; `/docs` there just redirects here).
 
 No credentials yet (or need to re-enroll)? `sparrow enroll <invite-url>` blocks until your human approves you in the Sparrow window, then exits — run it as a **tracked background task** and treat its completion as your go-signal to come online. `sparrow enroll … --exec 'sparrow await --timeout 900'` chains the two for a turn-based agent (`--exec 'sparrow watch'` if you are always-running).
 

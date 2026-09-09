@@ -1663,6 +1663,15 @@ build.
   `SPARROW_INSTALL_URL`) into `~/.local/bin` and prints old → new.
   It errors clearly when sparrow was not installed via `install.sh` (no
   `~/.local/bin/sparrow.mjs`) or the server is unreachable.
+  It then **refreshes the installed skill** so the bundles and the skill assets stay
+  one release: `sparrow skill install` records its provider, scope, `--shared`,
+  `--profile` and version in `<state dir>/skill-install.json`, and the upgrade
+  replays every install it finds (the project's state dir and `~/.sparrow`) by
+  EXECUTING THE NEWLY DOWNLOADED bundle — the running process still carries the old
+  assets — printing `skill: refreshed <provider> install (<scope> scope, <dir>)` per
+  install. No record (an install predating this) refreshes nothing and says to run
+  `sparrow skill install` once. A refresh failure prints to stderr and never changes
+  the upgrade's exit code; `--no-skill-refresh` skips the refresh.
 - **`sparrow whoami`** additionally does a best-effort `GET /api/v1/meta` and prints
   a one-line stderr note when this client is newer than the server by a minor+ gap
   (silent otherwise / on failure).
@@ -3701,7 +3710,7 @@ sparrow room restore <roomId> [--org O]
 sparrow room add <agent-name|agt_> --room R           # attach a visible agent
 sparrow room invite <email|usr_> --room R             # invite a human (they accept)
 sparrow invitations [list|accept <rinId>|decline <rinId>]   # your room invitations
-sparrow upgrade | update                              # re-download the CLI + MCP bundles from https://sparrow.land (SPARROW_INSTALL_URL to mirror) into ~/.local/bin (prints old → new)
+sparrow upgrade | update [--no-skill-refresh]         # re-download the CLI + MCP bundles from https://sparrow.land (SPARROW_INSTALL_URL to mirror) into ~/.local/bin (prints old → new), then re-install the skill to match
 sparrow admin orgs|rooms|delete ... [--server URL --admin-token T]
 ```
 

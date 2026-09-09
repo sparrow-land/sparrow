@@ -111,6 +111,13 @@ import {
   type LastInbound,
 } from './state.js';
 import { touchHeartbeat, markHeartbeatDead, readLoopState, skillInstall } from './loop-state.js';
+import {
+  recordSkillInstall,
+  forgetSkillInstall,
+  refreshSkillInstalls,
+  NO_SKILL_INSTALL_NOTE,
+  type SkillRefreshResult,
+} from './skill-refresh.js';
 import { runReconnectingStream } from './stream.js';
 import {
   pollEnrollmentUntilResolved,
@@ -3585,11 +3592,17 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
   // /install/* to sparrow.land), so `upgrade` works with no profile at all.
   // Only meaningful for an install.sh install; a workspace/dev checkout has no
   // installed bundle.
+  //
+  // It then RE-INSTALLS THE SKILL (see `skill-refresh.ts`): the bundles and the
+  // skill assets are one release, and an upgrade that moves only the former
+  // leaves an agent running last release's playbook and hooks.
   withCommon(program.command('upgrade'))
     .alias('update')
     .description(
-      're-download the sparrow CLI + MCP bundles from https://sparrow.land into $SPARROW_BIN_DIR (default ~/.local/bin)',
+      're-download the sparrow CLI + MCP bundles from https://sparrow.land into $SPARROW_BIN_DIR ' +
+        '(default ~/.local/bin) and re-install the Sparrow skill so it matches',
     )
+    .option('--no-skill-refresh', 'leave the installed Sparrow skill alone (bundles only)')
     .addHelpText(
       'after',
       [
@@ -3602,10 +3615,18 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         'pull from a mirror instead. Installs over the bundles',
         'install.sh wrote: set SPARROW_BIN_DIR to the same directory you installed into',
         'if it was not the default ~/.local/bin.',
+        '',
+        'After the download it re-runs `sparrow skill install` — with the NEW bundle —',
+        'for every install recorded on this machine (this project, and user scope), each',
+        'with the provider, scope and profile it was installed with, so the playbook and',
+        'hooks never lag the CLI. Installs made before this feature left no record: run',
+        '`sparrow skill install` once and they will be refreshed from then on. A skill',
+        'refresh that fails is reported but never fails the upgrade; --no-skill-refresh',
+        'skips it entirely.',
       ].join('\n'),
     )
     .action(
-      action(async () => {
+      action(async (opts) => {
         // The canonical install home — never the profile's server. The /install/*
         // endpoints are unauthenticated (and never gated).
         const base = installBaseUrl(env);
@@ -3659,10 +3680,59 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         await download(`${base}/install/sparrow.js${v}`, cliPath);
         await download(`${base}/install/sparrow-mcp.js${v}`, mcpPath);
         const newVersion = readVersion(cliPath);
+
+        // The skill half. THIS process is the OLD bundle carrying the OLD
+        // embedded assets, so the refresh runs the binary we just wrote —
+        // anything else would rewrite the very files that are stale.
+        const refreshed: SkillRefreshResult[] = [];
+        const notes: string[] = [];
+        if (opts.skillRefresh !== false) {
+          const results = refreshSkillInstalls({
+            env,
+            cwd: process.cwd(),
+            exec: (args, ctx) => {
+              const childEnv: Record<string, string> = {};
+              for (const [k, val] of Object.entries(ctx.env)) if (val !== undefined) childEnv[k] = val;
+              execFileSync(process.execPath, [cliPath, ...args], {
+                cwd: ctx.cwd,
+                env: childEnv,
+                encoding: 'utf8',
+                stdio: 'pipe',
+                timeout: 120_000,
+              });
+            },
+          });
+          refreshed.push(...results);
+          for (const r of results) {
+            if (r.ok) notes.push(`skill: refreshed ${r.provider} install (${r.scope} scope, ${r.dir})`);
+          }
+          if (results.length === 0) notes.push(NO_SKILL_INSTALL_NOTE);
+        }
+
         print(
-          { old: oldVersion ?? null, new: newVersion ?? null, installUrl: base, cli: cliPath, mcp: mcpPath },
-          `Upgraded sparrow: ${oldVersion ?? '?'} → ${newVersion ?? '?'} (from ${base}).`,
+          {
+            old: oldVersion ?? null,
+            new: newVersion ?? null,
+            installUrl: base,
+            cli: cliPath,
+            mcp: mcpPath,
+            skillRefresh: refreshed,
+          },
+          [`Upgraded sparrow: ${oldVersion ?? '?'} → ${newVersion ?? '?'} (from ${base}).`, ...notes].join(
+            '\n',
+          ),
         );
+        // A failed refresh is loud but never fatal: the upgrade the user asked
+        // for succeeded, and `-j` already carries the failure in the payload.
+        if (!opts.json) {
+          for (const r of refreshed) {
+            if (!r.ok) {
+              io.err(
+                `skill: refresh failed for ${r.provider} install (${r.scope} scope, ${r.dir}): ${r.error}\n`,
+              );
+            }
+          }
+        }
       }),
     );
 
@@ -3708,8 +3778,26 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           // whichever neighbour happens to own `defaultProfile`.
           ...(opts.profile ? ['--profile', String(opts.profile)] : []),
         ];
-        const code = await skillInstall(argv, { cwd: process.cwd(), env, log: (m) => io.out(`${m}\n`) });
+        const cwd = process.cwd();
+        const code = await skillInstall(argv, { cwd, env, log: (m) => io.out(`${m}\n`) });
         if (code !== 0) throw new CliError(`sparrow skill ${argv[0]} failed`);
+        // A removed skill must stay removed: drop the record before `upgrade`
+        // can replay it.
+        if (argv[0] === 'uninstall') forgetSkillInstall(env, cwd, { user: Boolean(opts.user) });
+        // Record HOW this install was made, next to the loop switch it just
+        // seeded, so `sparrow upgrade` can replay it and the skill never lags
+        // the CLI. Best-effort: never turns a good install into a failure.
+        if (argv[0] === 'install') {
+          recordSkillInstall({
+            env,
+            cwd,
+            version: clientBuildVersion(),
+            user: Boolean(opts.user),
+            shared: Boolean(opts.shared),
+            profile: opts.profile ? String(opts.profile) : undefined,
+            provider: opts.codex ? 'codex' : opts.claude ? 'claude' : undefined,
+          });
+        }
       }),
     );
 
