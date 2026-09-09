@@ -335,7 +335,9 @@ export function readHeartbeatState(stateDir: string): HeartbeatState | undefined
 /**
  * Which listener last heartbeated, or `undefined` when the file is absent,
  * empty (legacy/third-party heartbeat) or unrecognized. `undefined` means
- * "cannot judge" — never "no listener".
+ * "cannot judge" — never "no listener". Deliberately RAW: it reads the first
+ * token only and does NOT validate a generation tag — {@link readHeartbeatState}
+ * and the hooks are the validating readers.
  */
 export function readHeartbeatKind(stateDir: string): ListenerKind | undefined {
   try {

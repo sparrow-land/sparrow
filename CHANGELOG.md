@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.20] — 2026-09-09
+
 ### Fixed
 
 - **Email threading survives a relay that stamps its own `Message-ID`.** Outbound

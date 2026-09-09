@@ -42,9 +42,12 @@
  * are generation-tagged (`await:codex <nonce>`, `killed:SIGTERM <nonce>`) and
  * hooks discard a claim whose nonce is not the live generation's. Every check-then-write fence here
  * still has a window — a newer generation can publish between a checkpoint and
- * the write it guards — but the dead stamp was the one write that could
- * persist false state (a corpse reporting the live listener as dead), and the
- * tag makes such a stamp unjudgeable rather than believed.
+ * the write it guards — so BOTH heartbeat writes could persist false state: a
+ * corpse reporting the live listener as dead, or a stale live claim overwriting
+ * the successor's classification. The tag makes either unjudgeable rather than
+ * believed. (`readHeartbeatKind` is the one deliberately RAW reader — it
+ * answers "which kind of listener wrote this?" without validating the
+ * generation; the validating readers are `readHeartbeatState` and the hooks.)
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
