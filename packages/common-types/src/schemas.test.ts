@@ -59,6 +59,8 @@ import {
   ReadMessageResponseSchema,
   MessageStatusSchema,
   GetMessageStatusResponseSchema,
+  ListMessageStatusesQuerySchema,
+  ListMessageStatusesResponseSchema,
   DraftSchema,
   CreateDraftRequestSchema,
   CreateDraftResponseSchema,
@@ -97,6 +99,7 @@ import {
   MAX_TRANSCRIPTION_AUDIO_BYTES,
   QUIETABLE_EVENTS,
   quietEventNames,
+  MESSAGE_STATUS_IDS_MAX,
 } from './constants.js';
 
 const memberRef = {
@@ -525,6 +528,28 @@ describe('messages', () => {
     expect(MessageStatusSchema.safeParse({ ...status, recipients: [{ id: 'x', status: 'read', readAt: null }] }).success)
       .toBe(false);
   });
+  it('ListMessageStatuses: `?ids=` splits, trims and bounds; the response wraps MessageStatus', () => {
+    const parsed = ListMessageStatusesQuerySchema.parse({ ids: 'msg_a, msg_b ,msg_c' });
+    expect(parsed.ids).toEqual(['msg_a', 'msg_b', 'msg_c']);
+    // Empty (or all-blank) is a client error, not an empty page.
+    expect(ListMessageStatusesQuerySchema.safeParse({ ids: '' }).success).toBe(false);
+    expect(ListMessageStatusesQuerySchema.safeParse({ ids: ' , ' }).success).toBe(false);
+    expect(ListMessageStatusesQuerySchema.safeParse({}).success).toBe(false);
+    // The cap is exactly MESSAGE_STATUS_IDS_MAX.
+    const atCap = Array.from({ length: MESSAGE_STATUS_IDS_MAX }, (_, i) => `msg_${i}`).join(',');
+    expect(ListMessageStatusesQuerySchema.safeParse({ ids: atCap }).success).toBe(true);
+    expect(ListMessageStatusesQuerySchema.safeParse({ ids: `${atCap},msg_over` }).success).toBe(false);
+
+    const status = {
+      id: 'msg_a', kind: 'broadcast', createdAt: '2026-08-20T17:00:00Z',
+      recipients: [{ ...humanRef, status: 'read', receivedAt: null, readAt: '2026-08-20T17:05:00Z' }],
+    };
+    const res = ListMessageStatusesResponseSchema.parse({ items: [{ messageId: 'msg_a', status }] });
+    expect(res.items[0]!.messageId).toBe('msg_a');
+    // Each entry's `status` IS the single-route payload.
+    expect(res.items[0]!.status).toEqual(GetMessageStatusResponseSchema.parse(status));
+  });
+
   it('RecipientStatusSchema: receivedAt defaults null, tolerates present', () => {
     // Pre-received servers omit receivedAt — new clients default it to null.
     const legacy = RecipientStatusSchema.parse({ ...humanRef, status: 'unread', readAt: null });

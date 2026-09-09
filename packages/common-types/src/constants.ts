@@ -46,6 +46,14 @@ export const MESSAGES_LIST_DEFAULT_LIMIT = 50;
 /** Maximum page size for the room message-history list. */
 export const MESSAGES_LIST_MAX_LIMIT = 200;
 
+/**
+ * Maximum number of message ids one bulk read-receipt lookup may name
+ * (`GET /rooms/:roomId/messages/status?ids=`). Sized to the room-history page
+ * cap ({@link MESSAGES_LIST_MAX_LIMIT}), so a client can hydrate receipts for a
+ * full history page in exactly one request; more than that is a `400`.
+ */
+export const MESSAGE_STATUS_IDS_MAX = 200;
+
 /** Maximum length of a member status note (characters). */
 export const STATUS_NOTE_MAX = 140;
 

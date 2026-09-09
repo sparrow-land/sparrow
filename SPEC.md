@@ -219,12 +219,14 @@ messages          id, room_id, sender_id (member id), kind ('dm'|'broadcast'),
                   subject (nullable), body, suggested_replies (JSON, nullable),
                   in_reply_to (nullable message id, not FK-enforced),
                   reply_value (nullable), origin (nullable; 'voice'), created_at
+                  INDEX(room_id, created_at)   -- the room-history page
 message_recipients message_id, recipient_id (member id),
                   recipient_principal_type, recipient_principal_id,
                   recipient_display_name (all nullable — the RECIPIENT IDENTITY
                   SNAPSHOT), received_at (nullable),
                   read_at (nullable)
                   PRIMARY KEY(message_id, recipient_id)
+                  INDEX(recipient_id, read_at)  -- every unread surface
 attachments       id, message_id, filename, content_type, size_bytes, created_at
 drafts            id, room_id, member_id (the authoring member), text (trimmed,
                   ≤ MAX_BODY_BYTES), created_at
@@ -1194,6 +1196,7 @@ medium's own surface and stay chat-only; only the `/me/*` surfaces span mediums.
 | ListOutbox | `GET /rooms/:roomId/outbox` | messages the caller sent; paged |
 | ListRoomMessages | `GET /rooms/:roomId/messages` | the room's conversation history, newest-first; `before=` cursor; peek (writes no read state) |
 | GetMessageStatus | `GET /rooms/:roomId/messages/:id/status` | any room member |
+| ListMessageStatuses | `GET /rooms/:roomId/messages/status` | any room member; `?ids=` comma list, ≤ 200 |
 | GetAttachment | `GET /rooms/:roomId/attachments/:id` | binary; any room member |
 | Whoami | `GET /rooms/:roomId/whoami` | the caller's Member resource |
 
@@ -1278,7 +1281,16 @@ truncated previews (`preview`: first 200 chars, `truncated`, `attachmentCount`,
 Envelopes: ReadMessage → `{ message }`; PopNextMessage → `{ message: Message |
 null }` (`null` on empty inbox, not 404); ListOutbox pages bare Messages as `items`.
 GetMessageStatus → `{ id, kind, createdAt, recipients: [ MemberRef & { status,
-receivedAt, readAt } ] }` (`status`: `unread` | `received` | `read`). The
+receivedAt, readAt } ] }` (`status`: `unread` | `received` | `read`).
+ListMessageStatuses is the BULK form of that one route — a rendered transcript
+hydrates a screen of receipts in ONE request instead of one per message:
+`?ids=` is a comma-separated list of message ids (1–200; empty or over the cap →
+`bad_request`) and the response is `{ "items": [ { "messageId", "status" } ] }`
+where each `status` is byte-for-byte the GetMessageStatus payload, in the order
+the ids were asked for. It applies exactly GetMessageStatus's visibility rule,
+but never refuses the batch over one id: unknown, other-room and clawed-back ids
+are simply ABSENT from `items` (an omission leaks no more than the single
+route's uniform `404`). The
 room-scoped inbox and pop keep exactly these v3 shapes — a room has no email, so
 `InboxItem` carries no `type` and the room pop returns a bare message.
 
@@ -4178,8 +4190,12 @@ past the grace, and a scheduled reconnect is exactly what the grace cannot survi
 Header: room name + member strip (initial-avatars with presence/busy glyphs,
 overflow "+N") + **Add people** (directory picker → room invitation; pending
 invitations shown with revoke) + **Add agent** (picker over your visible agents →
-instant attach). Compose box broadcasts; per-member DM threads are reached from the
-sidebar sections. Drafts are per-conversation; failed sends surface inline with the
+instant attach). The pane opens on the newest 50 messages and pages backward as the
+reader scrolls up (ListRoomMessages `before`, one page at a time, stopping at the
+beginning of the room), every later refetch MERGES into what is loaded rather than
+replacing it, and the receipts for a screen hydrate through ListMessageStatuses in
+one request instead of one per bubble. Compose box broadcasts; per-member DM threads
+are reached from the sidebar sections. Drafts are per-conversation; failed sends surface inline with the
 draft retained. The composer's hint line names every key it answers to, clawback
 included ("Esc pulls back your last message") — an affordance no one is told about
 does not exist. A clawback pulls the message and restores its text to the composer;

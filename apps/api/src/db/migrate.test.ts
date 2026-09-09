@@ -219,6 +219,45 @@ describe('migrate: idempotent column adds', () => {
     sqlite.close();
   });
 
+  it('adds the room-open indexes to a POPULATED database without touching a row', () => {
+    // The room-open indexes (messages(room_id, created_at) and
+    // message_recipients(recipient_id, read_at)) landed after this schema
+    // shipped, so they meet real databases with real rows in them. Creating an
+    // index never rewrites a table — this pins that, because the alternative
+    // (a rebuild) would be a long write lock on the busiest table there is.
+    const sqlite = new Database(path.join(dir, 'populated.db'));
+    migrate(sqlite);
+    sqlite.exec(`
+      INSERT INTO messages (id, room_id, sender_id, kind, body, created_at)
+      VALUES ('msg_1', 'rm_1', 'mem_a', 'broadcast', 'one', '2026-01-01T00:00:00.000Z'),
+             ('msg_2', 'rm_1', 'mem_a', 'broadcast', 'two', '2026-01-01T00:00:01.000Z');
+      INSERT INTO message_recipients (message_id, recipient_id, read_at)
+      VALUES ('msg_1', 'mem_b', '2026-01-01T00:01:00.000Z'), ('msg_2', 'mem_b', NULL);
+    `);
+    const rowids = () =>
+      sqlite.prepare('SELECT rowid, id FROM messages ORDER BY rowid').all() as unknown[];
+    const before = rowids();
+
+    // Drop them to stand in for a database created before they existed…
+    sqlite.exec('DROP INDEX messages_room_created; DROP INDEX message_recipients_recipient_read;');
+    // …and boot again: the next start creates them in place.
+    migrate(sqlite);
+    migrate(sqlite);
+
+    const names = (sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as {
+      name: string;
+    }[]).map((r) => r.name);
+    expect(names).toContain('messages_room_created');
+    expect(names).toContain('message_recipients_recipient_read');
+    expect(names.filter((n) => n === 'messages_room_created')).toHaveLength(1);
+    // Same rows, same rowids: no table was rebuilt under them.
+    expect(rowids()).toEqual(before);
+    expect(
+      sqlite.prepare('SELECT COUNT(*) AS n FROM message_recipients').get() as { n: number },
+    ).toEqual({ n: 2 });
+    sqlite.close();
+  });
+
   it('is idempotent — a second migrate does not error or duplicate the column', () => {
     const sqlite = new Database(path.join(dir, 'fresh.db'));
     migrate(sqlite);

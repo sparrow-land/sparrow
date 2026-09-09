@@ -176,6 +176,16 @@ export function migrate(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS messages_room ON messages(room_id);
     CREATE INDEX IF NOT EXISTS messages_sender ON messages(sender_id);
+    -- Room open. The history page (and the agent-DM oversight page, same shape)
+    -- reads WHERE room_id = ? ORDER BY created_at DESC, rowid DESC LIMIT n.
+    -- With messages_room alone SQLite had to sort the ENTIRE room in a temp
+    -- b-tree to return 50 rows, so opening a busy room got slower with every
+    -- message ever sent to it. (room_id, created_at) -- plus the rowid SQLite
+    -- carries as every index's implicit tail -- matches that ORDER BY exactly,
+    -- so the page is a backwards index walk that stops at LIMIT. The outbox
+    -- (room + sender) keeps messages_sender: it is a per-member page, not the
+    -- one every room open pays for, and a third messages index is not free.
+    CREATE INDEX IF NOT EXISTS messages_room_created ON messages(room_id, created_at);
 
     CREATE TABLE IF NOT EXISTS message_recipients (
       message_id   TEXT NOT NULL,
@@ -188,6 +198,15 @@ export function migrate(sqlite: Database.Database): void {
       PRIMARY KEY (message_id, recipient_id)
     );
     CREATE INDEX IF NOT EXISTS message_recipients_recipient ON message_recipients(recipient_id);
+    -- Every unread surface -- the room inbox, the principal-wide inbox and pop,
+    -- and the unread badge -- asks the same question: recipient_id = ? AND
+    -- read_at IS NULL. message_recipients_recipient alone made that a visit to
+    -- every delivery row the member ever received, just to discard the read
+    -- ones; with read_at in the index the unread tail is a range of its own.
+    -- No index on recipient_principal_id: nothing queries that column -- it is
+    -- a frozen identity snapshot, read only off rows already found by id.
+    CREATE INDEX IF NOT EXISTS message_recipients_recipient_read
+      ON message_recipients(recipient_id, read_at);
 
     CREATE TABLE IF NOT EXISTS attachments (
       id           TEXT PRIMARY KEY,

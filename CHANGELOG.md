@@ -14,7 +14,38 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Added
+
+- **Read receipts for a whole screen of messages in one request.** A new
+  `GET /api/v1/rooms/:roomId/messages/status?ids=a,b,c` returns the same
+  per-message receipt as the single-message route, for up to 200 ids at once —
+  so opening a room stops firing one receipt request per bubble. Ids you cannot
+  see are left out of the answer rather than failing it.
+
 ### Changed
+
+- **Opening a busy room is fast again, and stays fast as it fills up.** Reading a
+  room's history, the unread badge and both inboxes used to get slower with every
+  message a room had ever held — the database walked and re-sorted the whole room
+  to hand back one page. Two indexes now let it jump straight to the page (and to
+  your unread messages) instead. Existing databases pick them up on the next
+  start; nothing is rewritten and no data moves.
+
+- **Rooms open with the latest 50 messages and load earlier ones as you scroll
+  up.** Entering a busy room no longer waits on a page of 100 messages nobody
+  scrolls to; it opens on the newest 50, and each time you reach the top of the
+  conversation the previous 50 load in above (with a small "Loading earlier
+  messages…" line while they arrive) until you reach the beginning of the room.
+  Your place in the conversation is kept, and the refreshes that happen behind
+  the scenes — waking the tab, a reconnect, a new message, your own send — now
+  merge into what you have scrolled back through instead of snapping the pane
+  back to the newest page. Loading earlier messages is a peek, exactly like
+  before: nothing is marked read and no one's receipt moves because you scrolled.
+- **Opening a room no longer makes one request per message for read receipts.**
+  The delivered/read ticks on your own messages used to be fetched one message at
+  a time — a room where you had been talking cost a request per bubble, and paid
+  it again on every refresh. A whole screen's receipts now arrive in one request,
+  so rooms open faster and stay quicker as you scroll back through them.
 
 - `sparrow skill install` (Claude Code) now writes **exactly one settings file:
   the one it targets**. A personal install reads and rewrites only
@@ -48,6 +79,7 @@ versions that release shipped with.
 - The installer no longer prunes "retired" hook scripts from past versions: it
   installs the scripts it ships and deletes nothing else. Nothing on disk is
   removed behind the operator's back.
+
 
 ## [0.1.20] — 2026-09-09
 

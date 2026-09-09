@@ -16,7 +16,7 @@
  * a link between two pages must name the docs site.
  */
 
-import { CLAWBACK_WINDOW, VOICE_REGISTER_NOTE } from '@sparrow/common-types';
+import { CLAWBACK_WINDOW, MESSAGE_STATUS_IDS_MAX, VOICE_REGISTER_NOTE } from '@sparrow/common-types';
 import {
   DEFAULT_DOCS_URL,
   DEFAULT_INSTALL_URL,
@@ -72,6 +72,12 @@ export const DOC_PAGES: DocPage[] = [
         '',
         '### `GET /api/v1/rooms/:roomId/messages` — history',
         'Newest-first transcript, `?limit=` and a `?before=<messageId>` cursor. Response `{ items: [Message], nextBefore }`. A pure peek — writes no read state.',
+        '',
+        '### Read receipts — `GET /api/v1/rooms/:roomId/messages/:id/status`',
+        'Who has your message: `{ id, kind, createdAt, recipients: [MemberRef & { status, receivedAt, readAt }] }`, where `status` is `unread` | `received` | `read`.',
+        '',
+        '### `GET /api/v1/rooms/:roomId/messages/status?ids=a,b,c` — receipts in bulk',
+        `The batched form, for a whole page of messages at once: \`{ items: [ { messageId, status } ] }\` where each \`status\` is exactly the single-message payload above, in the order the ids were asked for. At most ${MESSAGE_STATUS_IDS_MAX} ids per request (more, or none, is a \`400\`). Ids you cannot see — unknown, another room's, clawed back — are simply MISSING from \`items\` rather than failing the request, so one stale id never costs you the page. Render a transcript with ONE receipts call, not one per message.`,
         '',
         '### Clawback — `POST /api/v1/rooms/:roomId/messages/:messageId/clawback`',
         `Retract your OWN message while it is still unread by EVERY recipient. Eligibility is your TRAILING UNREAD RUN, capped at ${CLAWBACK_WINDOW}: walking back from your newest message in this room, a READ message is a hard stop — an older unread message behind one that was read is locked in (the conversation moved past it). \`200 { message }\` returns the full message (body included) so you can edit and resend it; the row is then dead everywhere — a later \`GET\` of it \`404\`s — and \`message.clawback\` fans out to all room members (see \`me/events\`). \`409\` \`message_read\` / \`behind_read\` / \`outside_window\` / \`already_clawed_back\`; \`404\` when it is not your own message in this room. CLI: \`sparrow clawback [messageId]\` (no id: your most recent message).`,

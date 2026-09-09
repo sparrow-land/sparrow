@@ -16,6 +16,7 @@ import {
   ReadMessageQuerySchema,
   ListOutboxQuerySchema,
   ListRoomMessagesQuerySchema,
+  ListMessageStatusesQuerySchema,
   MAX_BODY_BYTES,
   MAX_ATTACHMENT_BYTES,
   MAX_TOTAL_ATTACHMENT_BYTES,
@@ -31,6 +32,8 @@ import {
   type ListOutboxResponse,
   type ListRoomMessagesResponse,
   type GetMessageStatusResponse,
+  type ListMessageStatusesResponse,
+  type MessageStatus,
   type WhoamiResponse,
   type MessageKind,
   type Message,
@@ -546,6 +549,103 @@ export function registerMessageRoutes(app: FastifyInstance, ctx: AppContext): vo
     );
     return reply.send(response);
   });
+
+  /* --------------------------- ListMessageStatuses ------------------ */
+  // The BULK receipts lookup. A rendered history page wants a receipt per bubble;
+  // asking id-by-id turned ONE screen into up to a hundred round trips, which is
+  // what made opening a busy room feel slow long after the server had answered.
+  // Same visibility rules and same per-id payload as the single route below —
+  // and a bounded number of queries however many ids are asked for.
+  //
+  // Registered before the `:id` route only for reading order; Fastify matches the
+  // static `/status` segment ahead of the parameterized one either way.
+  app.get<{ Params: { roomId: string } }>(
+    '/api/v1/rooms/:roomId/messages/status',
+    (request, reply) => {
+      const principal = principalIdent(resolvePrincipal(ctx, request));
+      const caller = requireRoomMember(ctx, request, request.params.roomId, principal);
+      const query = parse(ListMessageStatusesQuerySchema, request.query ?? {});
+      const asked = [...new Set(query.ids)];
+
+      // The single route gates on `messageInRoom` (a LIVE row in this room) and
+      // `memberCanReadMessage` (the caller is a current member of that room).
+      // `requireRoomMember` settled the second half for every row this query can
+      // return, so the room + clawback filter IS the whole rule. Ids that fail it
+      // — unknown, another room's, clawed back — are simply absent from `items`:
+      // a screen's worth of receipts must not be lost to one stale id, and an
+      // omission leaks no more than the single route's uniform `404` does.
+      const rows =
+        asked.length === 0
+          ? []
+          : ctx.db
+              .select()
+              .from(messages)
+              .where(
+                and(
+                  inArray(messages.id, asked),
+                  eq(messages.roomId, caller.room.id),
+                  isNull(messages.clawedBackAt),
+                ),
+              )
+              .all();
+      const byId = new Map(rows.map((row) => [row.id, row]));
+
+      // Two more queries, whatever the page size: every delivery row for the
+      // visible messages, then every member they name.
+      const visibleIds = rows.map((row) => row.id);
+      const recRows =
+        visibleIds.length === 0
+          ? []
+          : ctx.db
+              .select()
+              .from(messageRecipients)
+              .where(inArray(messageRecipients.messageId, visibleIds))
+              // The single route reads these off the (message_id, recipient_id)
+              // primary key, so it sees them recipient-id ascending; say so here
+              // rather than inherit whichever order the batched lookup produced.
+              .orderBy(asc(messageRecipients.messageId), asc(messageRecipients.recipientId))
+              .all();
+      const memberIds = [...new Set(recRows.map((rec) => rec.recipientId))];
+      const memberRows =
+        memberIds.length === 0
+          ? []
+          : ctx.db.select().from(members).where(inArray(members.id, memberIds)).all();
+      const memberById = new Map(memberRows.map((row) => [row.id, row]));
+
+      const byMessage = new Map<string, typeof recRows>();
+      for (const rec of recRows) {
+        const list = byMessage.get(rec.messageId);
+        if (list) list.push(rec);
+        else byMessage.set(rec.messageId, [rec]);
+      }
+
+      const response: ListMessageStatusesResponse = {
+        items: asked.flatMap((id) => {
+          const row = byId.get(id);
+          if (!row) return [];
+          const status: MessageStatus = {
+            id: row.id,
+            kind: row.kind as MessageKind,
+            createdAt: row.createdAt,
+            recipients: (byMessage.get(row.id) ?? []).map((rec) => {
+              const memberRow = memberById.get(rec.recipientId);
+              const ref = memberRow
+                ? toMemberRef(ctx, memberRow)
+                : { id: rec.recipientId, kind: 'human' as const, displayName: '', avatarUrl: null };
+              return {
+                ...ref,
+                status: recipientStatus(rec.readAt, rec.receivedAt),
+                receivedAt: rec.receivedAt ?? null,
+                readAt: rec.readAt ?? null,
+              };
+            }),
+          };
+          return [{ messageId: row.id, status }];
+        }),
+      };
+      return reply.send(response);
+    },
+  );
 
   /* ----------------------------- GetMessageStatus ------------------- */
   app.get<{ Params: { roomId: string; id: string } }>(

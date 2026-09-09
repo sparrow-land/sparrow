@@ -53,6 +53,8 @@ import {
   ListOrgRoomsResponseSchema,
   UpdateOrgRoomResponseSchema,
   GetMessageStatusResponseSchema,
+  ListMessageStatusesResponseSchema,
+  MESSAGE_STATUS_IDS_MAX,
   WhoamiResponseSchema,
   SetStatusResponseSchema,
   ListStatusesResponseSchema,
@@ -162,6 +164,7 @@ import {
   type AgentDmSever,
   type OrgRoomSummary,
   type MessageStatus,
+  type ListMessageStatusesResponse,
   type MemberStatus,
   type ListStatusesResponse,
   type SetPresenceResponse,
@@ -1275,6 +1278,22 @@ export class SparrowClient {
   getMessageStatus(roomId: string, messageId: string): Promise<MessageStatus> {
     return this.request('GET', `/rooms/${enc(roomId)}/messages/${enc(messageId)}/status`, {
       schema: GetMessageStatusResponseSchema,
+    });
+  }
+
+  /**
+   * `GET /rooms/:roomId/messages/status?ids=` — read receipts for MANY messages
+   * in one request. The batched form of {@link getMessageStatus}: each entry's
+   * `status` is exactly that route's payload, in the order the ids were passed.
+   * Ids you cannot see — unknown, another room's, clawed back — are simply
+   * absent from `items` rather than failing the call, so a rendered page of
+   * messages hydrates its receipts once instead of once per bubble. At most
+   * {@link MESSAGE_STATUS_IDS_MAX} ids per call (more is a `400`).
+   */
+  listMessageStatuses(roomId: string, ids: string[]): Promise<ListMessageStatusesResponse> {
+    return this.request('GET', `/rooms/${enc(roomId)}/messages/status`, {
+      schema: ListMessageStatusesResponseSchema,
+      query: { ids: ids.join(',') },
     });
   }
 

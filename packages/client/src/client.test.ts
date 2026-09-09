@@ -1351,6 +1351,31 @@ describe('events (SSE)', () => {
     expect(st.recipients[0]!.receivedAt).toBe(receivedAt);
     expect(st.recipients[0]!.readAt).not.toBeNull();
   });
+
+  it('listMessageStatuses batches receipts: one call, same payload per id as getMessageStatus', async () => {
+    const { client: agent, agent: agentRow } = await makeAgent(h, owner, orgId, 'bulk-status-bot');
+    const dm = await owner.ensureDm({ principal: agentRow.id });
+    const roomId = dm.room.id;
+    const ownerMember = await owner.whoami(roomId);
+    const ids: string[] = [];
+    for (const body of ['one', 'two', 'three']) {
+      ids.push((await agent.sendMessage(roomId, { to: ownerMember.id, body })).message.id);
+    }
+    // Read exactly one of them so the three statuses are not all identical.
+    await owner.readMessage(roomId, ids[1]!);
+
+    const bulk = await agent.listMessageStatuses(roomId, ids);
+    expect(bulk.items.map((i) => i.messageId)).toEqual(ids);
+    for (const id of ids) {
+      const single = await agent.getMessageStatus(roomId, id);
+      expect(bulk.items.find((i) => i.messageId === id)!.status).toEqual(single);
+    }
+    expect(bulk.items[1]!.status.recipients[0]!.status).toBe('read');
+
+    // Unknown ids are dropped, not thrown — a stale id must not lose the page.
+    const mixed = await agent.listMessageStatuses(roomId, ['msg_nope', ids[0]!]);
+    expect(mixed.items.map((i) => i.messageId)).toEqual([ids[0]]);
+  });
 });
 
 /* ================================================================== *

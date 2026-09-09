@@ -26,6 +26,7 @@ import {
   DISPLAY_NAME_MAX,
   PASSWORD_MIN_LENGTH,
   MESSAGES_LIST_MAX_LIMIT,
+  MESSAGE_STATUS_IDS_MAX,
   HINT_TEXT_MAX,
   AGENT_NAME_RULE_MESSAGE,
   isWellFormedAgentName,
@@ -1802,6 +1803,38 @@ export type MessageStatus = z.infer<typeof MessageStatusSchema>;
 
 export const GetMessageStatusResponseSchema = MessageStatusSchema;
 export type GetMessageStatusResponse = z.infer<typeof GetMessageStatusResponseSchema>;
+
+/**
+ * GET /rooms/:roomId/messages/status query — the BULK receipts lookup. `ids` is
+ * a comma-separated list of message ids (blank entries dropped): at least one,
+ * at most {@link MESSAGE_STATUS_IDS_MAX}. A rendered history page asks for its
+ * whole screen of receipts at once instead of one request per bubble.
+ */
+export const ListMessageStatusesQuerySchema = z.object({
+  ids: z
+    .string()
+    .transform((raw) => raw.split(',').map((id) => id.trim()).filter((id) => id.length > 0))
+    .pipe(z.array(z.string().min(1)).min(1).max(MESSAGE_STATUS_IDS_MAX)),
+});
+export type ListMessageStatusesQuery = z.infer<typeof ListMessageStatusesQuerySchema>;
+
+/** One entry of the bulk lookup: a message id and its (single-route) status. */
+export const MessageStatusEntrySchema = z.object({
+  messageId: z.string(),
+  status: MessageStatusSchema,
+});
+export type MessageStatusEntry = z.infer<typeof MessageStatusEntrySchema>;
+
+/**
+ * GET /rooms/:roomId/messages/status response. `items` holds one entry per id
+ * the caller may actually see, in the order the ids were asked for; unknown,
+ * clawed-back and invisible ids are simply ABSENT — a bulk lookup never fails
+ * the whole request over one bad id.
+ */
+export const ListMessageStatusesResponseSchema = z.object({
+  items: z.array(MessageStatusEntrySchema),
+});
+export type ListMessageStatusesResponse = z.infer<typeof ListMessageStatusesResponseSchema>;
 
 /* ================================================================== *
  * Drafts (personal, room-scoped)

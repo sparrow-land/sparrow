@@ -31,6 +31,9 @@ import { userAgentPrefersMarkdown } from './onboarding.js';
  */
 export const DOCS_BY_ROUTE: Record<string, string> = {
   '/api/v1/rooms/:roomId/messages': 'rooms/messages',
+  // Read receipts, single and bulk — both documented on the messages page.
+  '/api/v1/rooms/:roomId/messages/:id/status': 'rooms/messages',
+  '/api/v1/rooms/:roomId/messages/status': 'rooms/messages',
   '/api/v1/rooms/:roomId/inbox': 'me/inbox',
   '/api/v1/rooms/:roomId/inbox/pop': 'me/inbox',
   '/api/v1/rooms/:roomId/status': 'rooms/status',
