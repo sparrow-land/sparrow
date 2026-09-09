@@ -22,8 +22,6 @@ import {
   type TestServer,
   type SignedUpHuman,
 } from './test-helpers.js';
-import { openDb } from './db/index.js';
-import { emails } from './db/schema.js';
 
 describe('the outbound pipeline', () => {
   let ts: TestServer;
@@ -294,202 +292,6 @@ describe('the outbound pipeline', () => {
     expect(tooMany.statusCode).toBe(400);
   });
 
-  /**
-   * The WIRE Message-ID (SPEC "Threading → Outbound header generation"). Some
-   * relays cannot stamp the Message-ID we hand them and put their own on the
-   * wire. When the relay reports that id back on acceptance, the row is
-   * CORRECTED to it — otherwise every reply naming it would start a new thread.
-   */
-
-  it('records the WIRE Message-ID the relay reports on acceptance', async () => {
-    ts.app.emailFake!.setWireMessageId(() => '<abc123@provider.example>');
-    const res = await send({ to: ['owner@example.com'], subject: 'Hello', text: 'body' });
-    expect(res.statusCode).toBe(201);
-    const email = res.json().email;
-    expect(email.disposition).toBe('sent');
-    expect(email.rfcMessageId).toBe('<abc123@provider.example>');
-    // What we ASKED the relay to stamp is still the locally minted id.
-    expect(ts.app.emailFake!.sent[0]!.headers.messageId).toBe(
-      `<${email.id}@${slug}.example.com>`,
-    );
-    // The read view shows the corrected value.
-    const one = await ts.app.inject({
-      method: 'GET',
-      url: `/api/v1/me/email/emails/${email.id}`,
-      headers: auth(fable.key),
-    });
-    expect(one.json().email.rfcMessageId).toBe('<abc123@provider.example>');
-  });
-
-  it('keeps the locally generated Message-ID when the relay reports none', async () => {
-    const res = await send({ to: ['owner@example.com'], subject: 'Hello', text: 'body' });
-    const email = res.json().email;
-    expect(email.rfcMessageId).toBe(`<${email.id}@${slug}.example.com>`);
-  });
-
-  it('ignores a malformed wire Message-ID', async () => {
-    ts.app.emailFake!.setWireMessageId(() => 'not a message id');
-    const res = await send({ to: ['owner@example.com'], subject: 'Hello', text: 'body' });
-    const email = res.json().email;
-    expect(email.disposition).toBe('sent');
-    expect(email.rfcMessageId).toBe(`<${email.id}@${slug}.example.com>`);
-  });
-
-  it("ignores a wire Message-ID already used by another of this agent's emails", async () => {
-    await setPolicy({ trustedPatterns: ['*@partner.example.com'] });
-    await deliverEmail(
-      ts.app,
-      inboundPayload({ rfcMessageId: '<taken@x.test>', to: [{ email: at('fable') }] }),
-    );
-    ts.app.emailFake!.setWireMessageId(() => '<taken@x.test>');
-    const res = await send({ to: ['owner@example.com'], subject: 'Hello', text: 'body' });
-    const email = res.json().email;
-    expect(email.disposition).toBe('sent');
-    expect(email.rfcMessageId).toBe(`<${email.id}@${slug}.example.com>`);
-  });
-
-  it('a held send never reaches the relay, so its Message-ID is never corrected', async () => {
-    await setPolicy({ outboundUnrecognized: 'approve' });
-    let calls = 0;
-    ts.app.emailFake!.setWireMessageId(() => {
-      calls += 1;
-      return '<abc123@provider.example>';
-    });
-    const res = await send({ to: ['dana@partner.example.com'], subject: 'Hi', text: 'body' });
-    expect(res.statusCode).toBe(202);
-    const email = res.json().email;
-    expect(email.disposition).toBe('held');
-    expect(calls).toBe(0);
-    expect(ts.app.emailFake!.sent).toHaveLength(0);
-    expect(email.rfcMessageId).toBe(`<${email.id}@${slug}.example.com>`);
-  });
-
-  it('a rejected send never reaches the relay either', async () => {
-    let calls = 0;
-    ts.app.emailFake!.setWireMessageId(() => {
-      calls += 1;
-      return '<abc123@provider.example>';
-    });
-    const res = await send({ to: ['dana@partner.example.com'], subject: 'Hi', text: 'body' });
-    expect(res.statusCode).toBe(403);
-    expect(calls).toBe(0);
-    expect(ts.app.emailFake!.sent).toHaveLength(0);
-    // A rejection is persisted for the audit trail but never listed as pending;
-    // read the row itself and assert the local id stands.
-    const handle = openDb(ts.dataDir);
-    try {
-      const rows = handle.db.select().from(emails).all();
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.disposition).toBe('rejected');
-      expect(rows[0]!.rfcMessageId).toBe(`<${rows[0]!.id}@${slug}.example.com>`);
-    } finally {
-      handle.close();
-    }
-  });
-
-  it('a failed relay keeps the locally generated Message-ID', async () => {
-    const stub = await startStub(500);
-    try {
-      await ts.close();
-      ts = await makeTestServer({
-        emailOrgSuffix: '.example.com',
-        emailProvider: 'webhook',
-        emailWebhookUrl: stub.url,
-        emailWebhookToken: 'relay-token',
-      });
-      await boot();
-      stub.body = { sent: false, rfcMessageId: '<abc123@provider.example>' };
-      const res = await send({ to: ['owner@example.com'], subject: 'Hello', text: 'body' });
-      expect(res.statusCode).toBe(202);
-      const email = res.json().email;
-      expect(email.disposition).toBe('send-failed');
-      expect(email.rfcMessageId).toBe(`<${email.id}@${slug}.example.com>`);
-    } finally {
-      await stub.close();
-    }
-  });
-
-  it('a webhook relay that reports a wire Message-ID corrects the row (retry included)', async () => {
-    const stub = await startStub(500);
-    try {
-      await ts.close();
-      ts = await makeTestServer({
-        emailOrgSuffix: '.example.com',
-        emailProvider: 'webhook',
-        emailWebhookUrl: stub.url,
-        emailWebhookToken: 'relay-token',
-      });
-      await boot();
-      const res = await send({ to: ['owner@example.com'], subject: 'Hello', text: 'body' });
-      const emailId = res.json().email.id as string;
-      expect(res.json().email.rfcMessageId).toBe(`<${emailId}@${slug}.example.com>`);
-
-      stub.status = 202;
-      stub.body = { sent: true, messageId: 'provider-handle-1', rfcMessageId: '<abc123@provider.example>' };
-      const retry = await ts.app.inject({
-        method: 'POST',
-        url: `/api/v1/me/email/emails/${emailId}/retry`,
-        headers: auth(fable.key),
-      });
-      expect(retry.statusCode).toBe(202);
-      expect(retry.json().email.disposition).toBe('sent');
-      expect(retry.json().email.rfcMessageId).toBe('<abc123@provider.example>');
-      // The relay still received the locally minted id in the envelope.
-      expect(stub.received.body.headers.messageId).toBe(`<${emailId}@${slug}.example.com>`);
-    } finally {
-      await stub.close();
-    }
-  });
-
-  it('threads through the WIRE Message-ID in both directions', async () => {
-    let n = 0;
-    ts.app.emailFake!.setWireMessageId(() => {
-      n += 1;
-      return n === 1 ? '<abc123@provider.example>' : `<wire${n}@provider.example>`;
-    });
-    const sent = await send({ to: ['owner@example.com'], subject: 'Q3 rollout', text: 'kickoff' });
-    expect(sent.json().email.rfcMessageId).toBe('<abc123@provider.example>');
-    const threadId = sent.json().thread.id as string;
-
-    // An inbound reply naming the WIRE id lands on the same thread.
-    const inbound = await deliverEmail(
-      ts.app,
-      inboundPayload({
-        rfcMessageId: '<reply-1@mail.example.net>',
-        from: { email: 'owner@example.com', name: 'Owner' },
-        to: [{ email: at('fable') }],
-        subject: 'Re: Q3 rollout',
-        inReplyTo: '<abc123@provider.example>',
-      }),
-    );
-    expect(inbound.body.email.threadId).toBe(threadId);
-
-    // The agent's reply: In-Reply-To is the inbound, References carries the wire id.
-    const reply = await ts.app.inject({
-      method: 'POST',
-      url: `/api/v1/me/email/threads/${threadId}/reply`,
-      headers: auth(fable.key),
-      payload: { text: 'on it' },
-    });
-    expect(reply.statusCode).toBe(201);
-    expect(reply.json().email.rfcMessageId).toBe('<wire2@provider.example>');
-    const firstReply = ts.app.emailFake!.sent[1]!;
-    expect(firstReply.headers.inReplyTo).toBe('<reply-1@mail.example.net>');
-    expect(firstReply.headers.references).toContain('<abc123@provider.example>');
-
-    // A further reply hangs off the CORRECTED id of the previous outbound.
-    const again = await ts.app.inject({
-      method: 'POST',
-      url: `/api/v1/me/email/threads/${threadId}/reply`,
-      headers: auth(fable.key),
-      payload: { text: 'more' },
-    });
-    expect(again.statusCode).toBe(201);
-    const secondReply = ts.app.emailFake!.sent[2]!;
-    expect(secondReply.headers.inReplyTo).toBe('<wire2@provider.example>');
-    expect(secondReply.headers.references).toContain('<abc123@provider.example>');
-  });
-
   it('a human session cannot send from an agent mailbox', async () => {
     const res = await ts.app.inject({
       method: 'POST',
@@ -505,8 +307,6 @@ describe('the outbound pipeline', () => {
 interface StubServer {
   url: string;
   status: number;
-  /** The JSON body it answers with (the relay's response shape). */
-  body: Record<string, unknown>;
   received: { authorization?: string; body?: any };
   close(): Promise<void>;
 }
@@ -515,7 +315,6 @@ async function startStub(status: number): Promise<StubServer> {
   const state: StubServer = {
     url: '',
     status,
-    body: {},
     received: {},
     close: () => Promise.resolve(),
   };
@@ -530,8 +329,7 @@ async function startStub(status: number): Promise<StubServer> {
         state.received.body = undefined;
       }
       res.statusCode = state.status;
-      res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify(state.body));
+      res.end('{}');
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { sendEmail } from './email.js';
-import { WebhookEmailProvider } from './email/providers.js';
 
 /**
  * A throwaway HTTP server standing in for the outbound-email webhook. Records
@@ -20,7 +19,7 @@ interface StubServer {
   };
 }
 
-async function startStub(status = 200, body?: Record<string, unknown>): Promise<StubServer> {
+async function startStub(status = 200): Promise<StubServer> {
   const received: StubServer['received'] = {};
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -36,8 +35,7 @@ async function startStub(status = 200, body?: Record<string, unknown>): Promise<
         received.body = raw;
       }
       res.statusCode = status;
-      res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify(body ?? { ok: status >= 200 && status < 300 }));
+      res.end(JSON.stringify({ ok: status >= 200 && status < 300 }));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -142,90 +140,7 @@ describe('sendEmail — the v4 outbound webhook envelope', () => {
     expect(result.sent).toBe(false);
     if (!result.sent) expect(result.reason).toBeTruthy();
   });
-
-  it('carries the relay-reported wire `rfcMessageId` back on acceptance', async () => {
-    stub = await startStub(202, {
-      sent: true,
-      messageId: 'provider-handle-1',
-      rfcMessageId: '<abc123@provider.example>',
-    });
-    const result = await sendEmail({ webhookUrl: stub.url, webhookToken: 't' }, minimal());
-    expect(result).toEqual({ sent: true, rfcMessageId: '<abc123@provider.example>' });
-  });
-
-  it('carries nothing back when the relay reports no wire Message-ID', async () => {
-    stub = await startStub(202, { sent: true, messageId: 'provider-handle-1' });
-    const result = await sendEmail({ webhookUrl: stub.url, webhookToken: 't' }, minimal());
-    expect(result).toEqual({ sent: true });
-  });
-
-  it('survives a 2xx whose body is not JSON', async () => {
-    stub = await startStubRaw(202, 'accepted');
-    const result = await sendEmail({ webhookUrl: stub.url, webhookToken: 't' }, minimal());
-    expect(result).toEqual({ sent: true });
-  });
 });
-
-describe('WebhookEmailProvider — the wire Message-ID', () => {
-  let stub: StubServer | undefined;
-  afterEach(async () => {
-    if (stub) await stub.close();
-    stub = undefined;
-  });
-
-  it('parses a well-formed `rfcMessageId` from the relay response', async () => {
-    stub = await startStub(202, {
-      sent: true,
-      messageId: 'provider-handle-1',
-      rfcMessageId: '<abc123@provider.example>',
-    });
-    const url = stub.url;
-    const provider = new WebhookEmailProvider(() => ({ webhookUrl: url, webhookToken: 't' }));
-    const result = await provider.relay(minimal());
-    expect(result).toEqual({ ok: true, rfcMessageId: '<abc123@provider.example>' });
-  });
-
-  it('ignores a malformed `rfcMessageId`', async () => {
-    stub = await startStub(202, { sent: true, rfcMessageId: 'abc123-no-brackets' });
-    const url = stub.url;
-    const provider = new WebhookEmailProvider(() => ({ webhookUrl: url, webhookToken: 't' }));
-    expect(await provider.relay(minimal())).toEqual({ ok: true });
-
-    await stub.close();
-    stub = await startStub(202, { sent: true, rfcMessageId: '<no-at-sign>' });
-    const url2 = stub.url;
-    const p2 = new WebhookEmailProvider(() => ({ webhookUrl: url2, webhookToken: 't' }));
-    expect(await p2.relay(minimal())).toEqual({ ok: true });
-  });
-
-  it('a refused relay is `{ ok: false }` whatever the body says', async () => {
-    stub = await startStub(500, { sent: false, rfcMessageId: '<abc123@provider.example>' });
-    const url = stub.url;
-    const provider = new WebhookEmailProvider(() => ({ webhookUrl: url, webhookToken: 't' }));
-    const result = await provider.relay(minimal());
-    expect(result.ok).toBe(false);
-  });
-});
-
-/** A stub answering with a RAW (non-JSON) body. */
-async function startStubRaw(status: number, raw: string): Promise<StubServer> {
-  const received: StubServer['received'] = {};
-  const server: Server = createServer((req, res) => {
-    req.on('data', () => {});
-    req.on('end', () => {
-      res.statusCode = status;
-      res.setHeader('content-type', 'text/plain');
-      res.end(raw);
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address() as AddressInfo;
-  return {
-    url: `http://127.0.0.1:${port}/hook`,
-    received,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
-  };
-}
 
 /** The smallest valid v4 envelope. */
 function minimal() {

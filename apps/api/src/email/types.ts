@@ -11,18 +11,8 @@ import type {
   OutboundEmailWebhookPayload,
 } from '@sparrow/common-types';
 
-/**
- * Outbound relay result: any 2xx = accepted → `sent`; else `send-failed`.
- *
- * On ACCEPTANCE a relay may report `rfcMessageId` — the `Message-ID` it
- * actually put on the wire. Relays that cannot stamp the id we handed them
- * (some upstream providers mint their own) report it here so the core can
- * correct the row it already wrote; a relay that says nothing stamped ours.
- * Only a well-formed value (`<local@domain>`) ever appears.
- */
-export type RelayResult =
-  | { ok: true; rfcMessageId?: string }
-  | { ok: false; reason: string };
+/** Outbound relay result: any 2xx = accepted → `sent`; else `send-failed`. */
+export type RelayResult = { ok: true } | { ok: false; reason: string };
 
 /**
  * One registered outbound provider. `fake` captures in-process and never
@@ -44,15 +34,6 @@ export interface EmailFakeHandle {
   readonly sent: CapturedEmail[];
   clear(): void;
   deliver(payload: unknown): Promise<InboundEmailResponse>;
-  /**
-   * Stand in for a relay that stamps its OWN `Message-ID`: the function's
-   * return value (when well-formed) is reported as the accepted send's
-   * `rfcMessageId`. `null` — the default — reports none, i.e. the relay stamped
-   * exactly what the core handed it.
-   */
-  setWireMessageId(
-    fn: ((payload: OutboundEmailWebhookPayload) => string | null | undefined) | null,
-  ): void;
 }
 
 declare module 'fastify' {

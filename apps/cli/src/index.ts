@@ -111,6 +111,7 @@ import {
   type LastInbound,
 } from './state.js';
 import { touchHeartbeat, markHeartbeatDead, readLoopState, skillInstall } from './loop-state.js';
+import { prepareAwaitGeneration, type AwaitGeneration } from './await-owner.js';
 import {
   recordSkillInstall,
   forgetSkillInstall,
@@ -380,13 +381,23 @@ const SIGNAL_EXIT_CODES: Readonly<Record<string, number>> = { SIGTERM: 143, SIGH
  * never throws — a corpse cannot report an error. Normal exits (wake 0, timeout
  * 2, 426) stamp NOTHING: the turn that follows owns those.
  */
-function armListenerSignals(env: Env, onInterrupt: () => void): () => void {
+function armListenerSignals(
+  env: Env,
+  onInterrupt: () => void,
+  /**
+   * Last-moment veto on the stamp itself. `await` passes its generation check
+   * here: a signal delivered to a SUPERSEDED listener must not write over the
+   * heartbeat its successor now owns (a delayed kill of yesterday's listener
+   * would otherwise report the live one as dead). Exit codes are unchanged.
+   */
+  canStamp?: () => boolean,
+): () => void {
   let fired = false;
   const stamp = (reason: 'killed' | 'stopped', signal: string): boolean => {
     if (fired) return false;
     fired = true;
     try {
-      markHeartbeatDead(env, reason, signal);
+      if (canStamp === undefined || canStamp()) markHeartbeatDead(env, reason, signal);
     } catch {
       /* best-effort: never throw on the way out */
     }
@@ -3860,8 +3871,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
    * medium the inbox spans, chat and email alike.
    *
    * Exit codes ARE the contract: `0` = work is waiting, drain now; `2` = the
-   * `--timeout` elapsed with nothing waiting (re-arm); `1` = a real failure,
-   * including the `426` client floor, which requires an upgrade before re-arm.
+   * `--timeout` elapsed with nothing waiting (re-arm); `4` = a newer `await`
+   * took over this state dir, so this one stood down having done nothing (see
+   * await-owner.ts); `1` = a real failure, including the `426` client floor,
+   * which requires an upgrade before re-arm.
    */
   const AWAIT_DRAIN_CMD = 'sparrow pop';
   const runAwait = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
@@ -3880,8 +3893,54 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     }
     const codexThread = explicitCodexThread || env.CODEX_THREAD_ID?.trim();
     const awaitHeartbeatKind = codexThread ? 'await:codex' : 'await';
+
+    /* -------------------- ONE LISTENER PER STATE DIR --------------------
+     * The skill tells a turn-based agent to re-arm `await` as the last action
+     * of EVERY turn — and a turn can end while the previous listener is still
+     * alive, which used to leave two listeners on one state dir (under the
+     * Codex bridge each queues a turn per message, so duplicates amplify into
+     * a backlog; under Claude Code each fires a redundant wake). Field bug,
+     * 2026-09.
+     *
+     * So arming publishes a new GENERATION record and the older listener
+     * stands down by itself: nothing is ever signalled and no pid is ever
+     * trusted (see await-owner.ts for why newest-wins beats check-then-exit).
+     *
+     * PUBLISH LATE — only once this process has real credentials AND either
+     * holds the stream or is handing off on the preflight path. A re-arm that
+     * dies on a bad token or an unreachable server therefore never evicts a
+     * healthy listener; until it publishes it is a CANDIDATE that touches no
+     * heartbeat, no cursor, no presence and no Codex thread.
+     *
+     * CHECKPOINT — `owned()` runs immediately before every side effect on
+     * shared state (the wake line, a Codex queue, the event cursor, the
+     * heartbeat including a signal handler's `killed:` stamp, and presence)
+     * and on the heartbeat touch that rides the stream's existing cadence,
+     * which is how an idle listener finds out at all. THE ONE RACE that
+     * remains is a wake or queue already SUBMITTED when the new generation
+     * appears; that stays fail-open — one cheap extra turn beats a dropped
+     * wake.
+     */
+    const generation: AwaitGeneration = prepareAwaitGeneration({
+      env,
+      kind: awaitHeartbeatKind,
+      profile: activeProfileName(opts, env),
+    });
+    let supersededBy: string | undefined;
+    /** Set once the stream exists: how a checkpoint ends the wait. */
+    let standDown: () => void = () => {};
+    /** May this listener still act on the state dir? Sticky once lost. */
+    const owned = (): boolean => {
+      if (supersededBy !== undefined) return false;
+      const by = generation.supersededBy();
+      if (by === undefined) return true;
+      supersededBy = by;
+      standDown();
+      return false;
+    };
+
     const queueCodexWake = async (reason: 'work' | 'gap' | 'upgrade'): Promise<void> => {
-      if (!codexThread || readLoopState(env) === 'paused') return;
+      if (!codexThread || readLoopState(env) === 'paused' || !owned()) return;
       try {
         await queueCodexAwaitWake(codexThread, env, io, reason);
       } catch (e) {
@@ -3949,6 +4008,19 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       if (ctx.json) io.err(`${JSON.stringify(json)}\n`);
       else if (verbose) io.err(`${human}\n`);
     };
+    /**
+     * Stand down for a newer generation: exit 4, on stderr only. stdout stays
+     * EMPTY — the wake line is the successor's to print — and the heartbeat is
+     * left exactly as the successor wrote it (a superseded listener stamps
+     * nothing, ever: it must never report the live listener as dead).
+     */
+    const reportSuperseded = (): void => {
+      note(
+        { type: 'await.superseded', by: supersededBy ?? null },
+        `[await] superseded by a newer listener (nonce ${supersededBy ?? '?'}) — exiting`,
+      );
+      ctx.exitCode = 4;
+    };
 
     /** The oldest work item WAITING for the caller, or null. Reads; never consumes. */
     const oldestWaiting = async (): Promise<InboxEntry | null> => {
@@ -3973,6 +4045,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     );
     const markTurn = async (): Promise<void> => {
       if (turnSeconds <= 0) return; // `--turn-seconds 0` — opted out
+      if (!owned()) return; // presence belongs to whoever holds the state dir
       try {
         await client.setPresence(turnSeconds);
       } catch (e) {
@@ -3986,6 +4059,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
 
     let emittedReason: string | undefined;
     const wake = (reason: string, item: InboxEntry | null, extra?: Record<string, unknown>): void => {
+      if (!owned()) return; // superseded: this work belongs to the newer listener
       emittedReason = reason;
       emit({
         type: 'await.item',
@@ -4079,11 +4153,23 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     try {
       alreadyWaiting = await nextWake();
     } catch (e) {
-      if (isUpgradeRequired(e)) await queueCodexWake('upgrade');
+      // A 426 on the very first request is still a hand-off (it queues a repair
+      // turn), so this candidate claims the state dir before acting on it.
+      if (isUpgradeRequired(e)) {
+        generation.publish();
+        await queueCodexWake('upgrade');
+      }
       throw e;
     }
     if (alreadyWaiting && 'item' in alreadyWaiting) {
+      // Handing off without ever opening a stream: publish first, because the
+      // wake line, the presence mark and the Codex queue below are all owner-only.
+      generation.publish();
       wake('waiting', alreadyWaiting.item, { matched: alreadyWaiting.matched });
+      if (!emitted) {
+        reportSuperseded(); // superseded in the instant between the two
+        return;
+      }
       await markTurn();
       await queueCodexWake('work');
       return;
@@ -4091,8 +4177,16 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     if (alreadyWaiting) firstDeferMs = alreadyWaiting.deferMs;
 
     const controller = new AbortController();
-    const disarmSignals = armListenerSignals(env, () => controller.abort());
-    touchHeartbeat(env, awaitHeartbeatKind, true);
+    standDown = () => controller.abort();
+    // The heartbeat is deliberately NOT touched here: this process is still a
+    // candidate until the stream opens (see the publish-late rule above), and a
+    // candidate must not write over the state dir a healthy listener owns —
+    // including from a late signal, hence the stamp veto.
+    const disarmSignals = armListenerSignals(
+      env,
+      () => controller.abort(),
+      () => generation.published() && owned(),
+    );
     let terminalError: unknown;
     let upgradeWake: Promise<void> | undefined;
     const terminateForUpgrade = (e: unknown): boolean => {
@@ -4112,7 +4206,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const cursor = makeEventCursor(
       stateProfile ? readEventCursor(env, stateProfile, identity) : undefined,
       (id) => {
-        if (!stateProfile) return;
+        if (!stateProfile || !owned()) return;
         try {
           writeEventCursor(env, stateProfile, identity, id);
         } catch {
@@ -4227,9 +4321,21 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         // (see listenerQuiet): `await` is watching for WORK, and nothing about
         // who just came online can put work in its queue.
         quiet,
-        onOpen,
+        onOpen: () => {
+          // PUBLISH: the stream is up, so this listener can really wake the
+          // agent — only now does it claim the state dir (newest wins) and take
+          // over the heartbeat. Idempotent: a reconnect never re-claims, so a
+          // listener that has been superseded stays superseded.
+          const first = !generation.published();
+          generation.publish();
+          if (first) touchHeartbeat(env, awaitHeartbeatKind, true);
+          onOpen();
+        },
         onActivity: () => {
-          touchHeartbeat(env, awaitHeartbeatKind);
+          // The CHECKPOINT that rides the stream's own cadence (events and
+          // server heartbeats): no new timer, and an idle listener still
+          // notices it was superseded.
+          if (owned()) touchHeartbeat(env, awaitHeartbeatKind);
           onActivity();
         },
         dispatcher: transport?.dispatcher,
@@ -4318,6 +4424,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       await queueCodexWake(emittedReason === 'replay.gap' ? 'gap' : 'work');
       return;
     }
+    // Superseded (detected at a checkpoint, or right here before the timeout
+    // line — that line is itself an announcement the successor now owns).
+    owned();
+    if (supersededBy !== undefined) {
+      reportSuperseded();
+      return;
+    }
     // A --timeout expiry plants NOTHING: a harness that re-arms is not a turn,
     // and marking it online would be the same lie in the other direction.
     if (timedOut) {
@@ -4333,7 +4446,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         'work item is waiting, print it as one JSON line WITHOUT consuming it, and exit 0 for an external ' +
         'wake bridge to handle — then drain with `sparrow pop`. When CODEX_THREAD_ID is present, it ' +
         'automatically queues that bridge into the current Codex thread. On wake it heartbeats presence ' +
-        '(--turn-seconds) so you stay online while you work. Exit 2 = --timeout elapsed (re-arm). ' +
+        '(--turn-seconds) so you stay online while you work. Exit 2 = --timeout elapsed (re-arm); ' +
+        'exit 4 = a newer `sparrow await` took over this state dir (arming is idempotent — newest ' +
+        'wins — so re-arming blindly is always safe). ' +
         'Use --wake-on to wake urgently for DMs/mentions/email and batch the rest (--batch-after).',
     )
     .option('--timeout <seconds>', 'give up (exit 2) after this long with nothing waiting', (v) =>

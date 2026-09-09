@@ -16,17 +16,33 @@ versions that release shipped with.
 
 ### Fixed
 
-- **Email threading survives a relay that stamps its own `Message-ID`.** Outbound
-  mail is still minted with `<{emailId}@{agent domain}>` before the relay call,
-  but some relays cannot put that header on the wire and substitute their own.
-  When the relay reports the id it actually sent (`rfcMessageId` in its 2xx
-  body), the stored email is now corrected to it — so a reply naming the wire id
-  joins the right thread instead of starting a new one, the agent's own next
-  reply cites the id the recipient saw, and API/CLI views show the real
-  `rfcMessageId`. The correction happens only on acceptance: a failed, held, or
-  rejected send keeps the locally generated id, as does a malformed value or one
-  already used by another of that agent's emails. Relays that pass our header
-  through verbatim (including the bundled `mail-gateway`) are unaffected.
+- `sparrow await` is now **one listener per state dir**. The skill tells a
+  turn-based agent to re-arm `await` as the last action of *every* turn, but a
+  turn can end while the previous listener is still alive (`await` exits only on
+  work, a replay gap, a `426`, or `--timeout`) — so the re-arm left **two**
+  listeners on one state dir. Under the Codex bridge each queues a turn per
+  message, so duplicates amplified into a backlog of turns; under Claude Code
+  each fired a redundant wake. Arming now publishes a generation record
+  (`<state dir>/await-owner.json`: `{version, nonce, pid, startedAt, kind,
+  profile?}`, written temp+rename) and the **newest listener always wins**.
+  Nothing is signalled and no pid is ever probed for liveness: the older
+  listener re-reads the record at every checkpoint — the wake line, a Codex
+  queue, the event cursor, the heartbeat (including a late signal handler's
+  `killed:` stamp) and presence, plus the heartbeat touch that rides the
+  stream's existing cadence — and on seeing a nonce that is not its own it
+  exits **4** having done nothing at all: no wake line, no queued turn, no
+  cursor write, and no heartbeat stamp of any kind, so the successor's health
+  is never overwritten. A candidate publishes only once it has real credentials
+  and has either opened the stream or reached the preflight hand-off, so a
+  re-arm that dies on a bad token or an unreachable server can never evict a
+  healthy listener. A crashed owner needs no cleanup — the next arm simply
+  overwrites its record, and the record is never unlinked. `watch
+  --exit-on-item` is the same primitive and takes the same generation.
+  Exit codes: `0` work waiting, `2` `--timeout` elapsed, `4` superseded by a
+  newer listener, `1` a real failure. **Upgrading from 0.1.19:** listeners
+  armed by an older CLI publish no record and cannot notice a successor, so
+  replace them once by hand (kill the tracked background task and re-arm, or
+  let it exit on its own); from 0.1.20 onward re-arming is always safe.
 
 ## [0.1.19] — 2026-09-09
 

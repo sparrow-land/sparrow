@@ -3019,6 +3019,315 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     expect(wake.matched).toBe('dm');
     expect(wake.item.preview).toContain('a real dm');
   });
+
+  /* ---------------------------------------------------------------- *
+   * ONE LISTENER PER STATE DIR (the generation record)
+   *
+   * FIELD BUG (2026-09): the skill tells a turn-based agent to re-arm
+   * `await` as the last action of EVERY turn, but a turn can end while the
+   * previous `await` is still alive — so the re-arm left two listeners on
+   * one state dir. Under the Codex bridge each queues a turn per message
+   * and the duplicates amplify into a backlog; under Claude Code each
+   * fires a redundant wake.
+   *
+   * The fix is a generation record, `<state dir>/await-owner.json`:
+   * arming publishes a new nonce, newest wins, and NOTHING is ever
+   * signalled or probed for liveness. The older listener re-reads the
+   * record at every checkpoint, sees a nonce that is not its own, and
+   * exits 4 having done nothing at all.
+   * ---------------------------------------------------------------- */
+
+  const ownerFile = (dir: string = stateDir): string => path.join(dir, 'await-owner.json');
+  const ownerRecord = (dir: string = stateDir): any => {
+    try {
+      return JSON.parse(fs.readFileSync(ownerFile(dir), 'utf8'));
+    } catch {
+      return undefined;
+    }
+  };
+  /** Every stdout line printed by a set of listeners — the wake contract, fleet-wide. */
+  const stdoutLines = (...caps: Capture[]): any[] =>
+    caps.flatMap((c) => c.out().trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+
+  it('publishes a generation record (version, nonce, kind) when it arms', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown1');
+    fs.rmSync(ownerFile(), { force: true });
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'publish on the preflight path' });
+
+    const cap = capture();
+    expect(await runCli(['await', '--timeout', '10'], env, cap.io)).toBe(0);
+    expect(wakeLine(cap).type).toBe('await.item');
+    // Even the preflight hand-off publishes: it queues a Codex turn and plants
+    // a presence mark, and both are side effects only the owner may perform.
+    const rec = ownerRecord();
+    expect(rec.version).toBe(1);
+    expect(rec.nonce).toMatch(/^[0-9a-f]{16}$/);
+    expect(rec.kind).toBe('await');
+    expect(rec.pid).toBe(process.pid);
+  });
+
+  it('a second arm supersedes the first: the record names the newest generation', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown2');
+    const a = capture();
+    const first = runCli(['await', '--timeout', '15'], env, a.io);
+    await nap(300);
+    const n1 = ownerRecord().nonce;
+
+    const b = capture();
+    const second = runCli(['await', '--timeout', '15'], env, b.io);
+    await nap(300);
+    const n2 = ownerRecord().nonce;
+    expect(n2).not.toBe(n1); // newest wins, unconditionally
+
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'exactly one of you' });
+    expect(await first).toBe(4); // superseded — it did nothing and left
+    expect(await second).toBe(0);
+    // The whole point: ONE wake for one message, not two.
+    const lines = stdoutLines(a, b);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].type).toBe('await.item');
+    expect(lines[0].item.preview).toContain('exactly one of you');
+  });
+
+  it('a superseded listener exits 4 quietly: no stdout, one stderr line, no heartbeat stamp', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown3');
+    const cap = capture();
+    const running = runCli(['await', '--timeout', '15'], env, cap.io);
+    await nap(300);
+    fs.writeFileSync(path.join(stateDir, 'heartbeat'), 'await\n');
+    // A newer generation publishes (any process, any host, no signal).
+    fs.writeFileSync(
+      ownerFile(),
+      `${JSON.stringify({ version: 1, nonce: 'f00dcafef00dcafe', pid: 999999, startedAt: new Date().toISOString(), kind: 'await' })}\n`,
+    );
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'not for the old one' });
+
+    expect(await running).toBe(4);
+    expect(cap.out()).toBe(''); // never a wake line — the successor owns this work
+    expect(cap.err()).toContain('superseded by a newer listener');
+    expect(cap.err()).toContain('f00dcafef00dcafe');
+    // Retirement is SILENT: the successor's heartbeat must survive intact.
+    const hb = fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8');
+    expect(hb).not.toContain('killed');
+    expect(hb).not.toContain('stopped');
+    expect(hb).not.toContain('retired');
+    // …and the record still names the successor — a superseded listener never
+    // unlinks it (that would delete a newer generation).
+    expect(ownerRecord().nonce).toBe('f00dcafef00dcafe');
+    const pop = capture(); // the work is untouched, waiting for whoever wakes
+    expect(await runCli(['pop', '--json'], env, pop.io)).toBe(0);
+    expect(JSON.parse(pop.out()).item.message.body).toBe('not for the old one');
+  });
+
+  it('-j reports the supersession as a structured line', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown4');
+    const cap = capture();
+    const running = runCli(['await', '--timeout', '15', '-j'], env, cap.io);
+    await nap(300);
+    fs.writeFileSync(
+      ownerFile(),
+      `${JSON.stringify({ version: 1, nonce: 'abcdef0123456789', pid: 999999, startedAt: new Date().toISOString(), kind: 'await' })}\n`,
+    );
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'json supersession' });
+
+    expect(await running).toBe(4);
+    const line = cap
+      .err()
+      .trim()
+      .split('\n')
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return undefined;
+        }
+      })
+      .find((l) => l?.type === 'await.superseded');
+    expect(line).toEqual({ type: 'await.superseded', by: 'abcdef0123456789' });
+  });
+
+  it('a superseded listener queues NO Codex turn for work that arrives after it lost', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown5');
+    const cap = capture();
+    const calls: Array<[string, string]> = [];
+    cap.io.notifyCodex = async (threadId, message) => {
+      calls.push([threadId, message]);
+    };
+    const running = runCli(
+      ['await', '--timeout', '15'],
+      { ...env, CODEX_THREAD_ID: 'thread-superseded' },
+      cap.io,
+    );
+    await nap(300);
+    fs.writeFileSync(
+      ownerFile(),
+      `${JSON.stringify({ version: 1, nonce: '0123456789abcdef', pid: 999999, startedAt: new Date().toISOString(), kind: 'await:codex' })}\n`,
+    );
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'the new listener owns this' });
+
+    expect(await running).toBe(4);
+    expect(calls).toEqual([]); // the amplification this whole mechanism exists to stop
+  });
+
+  it('one message during an overlap queues exactly ONE Codex turn', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown6');
+    const calls: Array<[string, string]> = [];
+    const codexEnv = { ...env, CODEX_THREAD_ID: 'thread-overlap' };
+    const a = capture();
+    a.io.notifyCodex = async (t, m) => {
+      calls.push([t, m]);
+    };
+    const first = runCli(['await', '--timeout', '15'], codexEnv, a.io);
+    await nap(300);
+    const b = capture();
+    b.io.notifyCodex = async (t, m) => {
+      calls.push([t, m]);
+    };
+    const second = runCli(['await', '--timeout', '15'], codexEnv, b.io);
+    await nap(300);
+
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'one turn, please' });
+    expect(await first).toBe(4);
+    expect(await second).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]).toBe('thread-overlap');
+    expect(stdoutLines(a, b)).toHaveLength(1);
+  });
+
+  it('three generations, one message: exactly one wake and one Codex turn', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown7');
+    const calls: Array<[string, string]> = [];
+    const codexEnv = { ...env, CODEX_THREAD_ID: 'thread-three' };
+    const caps = [capture(), capture(), capture()];
+    const runs: Array<Promise<number>> = [];
+    for (const c of caps) {
+      c.io.notifyCodex = async (t, m) => {
+        calls.push([t, m]);
+      };
+      runs.push(runCli(['await', '--timeout', '15'], codexEnv, c.io));
+      await nap(300);
+    }
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'newest wins' });
+
+    expect(await runs[0]!).toBe(4);
+    expect(await runs[1]!).toBe(4);
+    expect(await runs[2]!).toBe(0);
+    expect(stdoutLines(...caps)).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('a superseded listener does not write the event cursor', async () => {
+    // `--wake-on dm --batch-after 0` keeps the listener ALIVE through project
+    // traffic, so it really does process events and persist a cursor — which is
+    // what makes the second half of this test mean anything.
+    const { owner, roomId, agentId } = await awaitFixture('awtown8');
+    const statePath = path.join(configDir, 'sparrow', 'state.json');
+    const cursorOf = (): string | undefined => {
+      try {
+        const profiles = JSON.parse(fs.readFileSync(statePath, 'utf8')).profiles ?? {};
+        return (Object.values(profiles)[0] as any)?.lastEventId;
+      } catch {
+        return undefined;
+      }
+    };
+    const cap = capture();
+    const running = runCli(
+      ['await', '--wake-on', 'dm', '--batch-after', '0', '--timeout', '15'],
+      env,
+      cap.io,
+    );
+    await nap(300);
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'deferred, cursor moves' });
+    await nap(400);
+    const before = cursorOf();
+    expect(before).toBeDefined(); // it was writing the cursor while it owned the dir
+
+    fs.writeFileSync(
+      ownerFile(),
+      `${JSON.stringify({ version: 1, nonce: 'deadbeefdeadbeef', pid: 999999, startedAt: new Date().toISOString(), kind: 'await' })}\n`,
+    );
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'cursor must not move now' });
+
+    expect(await running).toBe(4);
+    // The successor resumes from ITS cursor: a superseded listener must not
+    // advance shared state past events it never handed to anyone.
+    expect(cursorOf()).toBe(before);
+  });
+
+  it('a candidate that cannot authenticate never evicts the healthy owner', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown9');
+    const a = capture();
+    const healthy = runCli(['await', '--timeout', '15'], env, a.io);
+    await nap(300);
+    const mine = ownerRecord().nonce;
+
+    // A re-arm that dies before it ever holds a stream must publish NOTHING:
+    // otherwise a bad token would take the whole agent deaf.
+    const bad = capture();
+    expect(
+      await runCli(['await', '--timeout', '10'], { ...env, SPARROW_TOKEN: 'not-a-real-token' }, bad.io),
+    ).not.toBe(0);
+    expect(ownerRecord().nonce).toBe(mine);
+
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'still listening' });
+    expect(await healthy).toBe(0); // the healthy listener is untouched
+    expect(wakeLine(a).item.preview).toContain('still listening');
+  });
+
+  it('two state dirs are two independent agents — neither supersedes the other', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown10');
+    const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-cli-state2-'));
+    try {
+      const a = capture();
+      const first = runCli(['await', '--timeout', '15'], env, a.io);
+      await nap(300);
+      const b = capture();
+      const second = runCli(['await', '--timeout', '15'], { ...env, SPARROW_STATE_DIR: otherDir }, b.io);
+      await nap(300);
+      expect(ownerRecord(otherDir).nonce).not.toBe(ownerRecord().nonce);
+
+      await owner.client.sendMessage(roomId, { to: agentId, body: 'both of you' });
+      expect(await first).toBe(0);
+      expect(await second).toBe(0);
+      expect(stdoutLines(a, b)).toHaveLength(2); // separate state dirs, separate listeners
+    } finally {
+      fs.rmSync(otherDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a --timeout expiry leaves the generation record in place (it is never unlinked)', async () => {
+    await awaitFixture('awtown11');
+    const cap = capture();
+    expect(await runCli(['await', '--timeout', '1'], env, cap.io)).toBe(2);
+    expect(wakeLine(cap).type).toBe('await.timeout');
+    const rec = ownerRecord();
+    expect(rec.version).toBe(1);
+    expect(rec.pid).toBe(process.pid);
+  });
+
+  it('a wake leaves the generation record in place too', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown12');
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'record survives a wake' });
+    const cap = capture();
+    expect(await runCli(['await', '--timeout', '10'], env, cap.io)).toBe(0);
+    expect(ownerRecord().version).toBe(1);
+  });
+
+  it('watch --exit-on-item takes the same generation (one implementation)', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown13');
+    const a = capture();
+    const first = runCli(['await', '--timeout', '15'], env, a.io);
+    await nap(300);
+    const b = capture();
+    const second = runCli(['watch', '--exit-on-item', '--timeout', '15'], env, b.io);
+    await nap(300);
+
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'via the alias' });
+    expect(await first).toBe(4);
+    expect(await second).toBe(0);
+    expect(stdoutLines(a, b)).toHaveLength(1);
+  });
+
 });
 
 /* ================================================================== *

@@ -52,6 +52,8 @@ The listener holds the stream and exits when work arrives. Your harness must tur
 
 `sparrow await` holds `/me/events` exactly as `sparrow watch` does — you are online while it runs — until a work item is waiting for you. It then prints that item as **one JSON line** and exits **0**, deliberately **without consuming it**: the message is **still unread**, so *you* read it in your turn, after you wake. A wake also plants a presence heartbeat (default 180s, `--turn-seconds`), so you stay **visibly online through the whole turn** — your human never sees "isn't listening" while you are working on their message. Exit **2** means the `--timeout` elapsed with nothing waiting — not an error, just re-arm.
 
+`sparrow await` is **idempotent per state dir**: arming while one is already armed **supersedes** it (newest wins, no signals — the older listener notices and exits **4** on its next tick, or before its next side effect, having done nothing), so re-arming blindly as the last action of every turn is always safe. Exit **4** is that stand-down: not an error, and not yours to react to — it means a newer listener of yours is already on watch.
+
 {{sparrow:interrupt-note}}
 
 {{sparrow:reaper-note}}

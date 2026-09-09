@@ -11,7 +11,6 @@ import type {
   OutboundEmailWebhookPayload,
 } from '@sparrow/common-types';
 import { sendEmail, type EmailWebhookConfig } from '../email.js';
-import { wireMessageId } from './inbound.js';
 import type { EmailFakeHandle, EmailProvider, RelayResult } from './types.js';
 
 /** How many captured sends the fake provider's ring buffer keeps. */
@@ -27,9 +26,6 @@ export class FakeEmailProvider implements EmailProvider, EmailFakeHandle {
   readonly id = 'fake';
   private readonly buffer: CapturedEmail[] = [];
   private deliverFn: ((payload: unknown) => Promise<InboundEmailResponse>) | null = null;
-  private wireFn:
-    | ((payload: OutboundEmailWebhookPayload) => string | null | undefined)
-    | null = null;
 
   get sent(): CapturedEmail[] {
     return this.buffer;
@@ -44,13 +40,6 @@ export class FakeEmailProvider implements EmailProvider, EmailFakeHandle {
     this.deliverFn = fn;
   }
 
-  /** Stand in for a relay that stamps its own `Message-ID` (see the handle). */
-  setWireMessageId(
-    fn: ((payload: OutboundEmailWebhookPayload) => string | null | undefined) | null,
-  ): void {
-    this.wireFn = fn;
-  }
-
   deliver(payload: unknown): Promise<InboundEmailResponse> {
     if (!this.deliverFn) return Promise.reject(new Error('inbound pipeline not bound'));
     return this.deliverFn(payload);
@@ -61,17 +50,15 @@ export class FakeEmailProvider implements EmailProvider, EmailFakeHandle {
       this.buffer.push(captured);
       if (this.buffer.length > FAKE_OUTBOX_MAX) this.buffer.shift();
     }
-    const wire = this.wireFn ? wireMessageId(this.wireFn(payload)) : null;
-    return Promise.resolve(wire === null ? { ok: true } : { ok: true, rfcMessageId: wire });
+    void payload;
+    return Promise.resolve({ ok: true });
   }
 }
 
 /**
  * `EMAIL_PROVIDER=webhook` — outbound rides the `sendEmail` seam with the v4
  * envelope. Any 2xx = accepted for delivery → `sent`; anything else →
- * `send-failed` with `reason: "relay-error"`. A 2xx body's `rfcMessageId` — the
- * `Message-ID` the relay actually put on the wire — rides back on the result
- * when it is well-formed.
+ * `send-failed` with `reason: "relay-error"`.
  */
 export class WebhookEmailProvider implements EmailProvider {
   readonly id = 'webhook';
@@ -80,10 +67,6 @@ export class WebhookEmailProvider implements EmailProvider {
 
   async relay(payload: OutboundEmailWebhookPayload): Promise<RelayResult> {
     const result = await sendEmail(this.resolve(), payload);
-    if (!result.sent) return { ok: false, reason: result.reason };
-    // A relay that could not stamp our `Message-ID` reports the one it put on
-    // the wire; anything malformed is ignored (ours stands).
-    const wire = wireMessageId(result.rfcMessageId);
-    return wire === null ? { ok: true } : { ok: true, rfcMessageId: wire };
+    return result.sent ? { ok: true } : { ok: false, reason: result.reason };
   }
 }

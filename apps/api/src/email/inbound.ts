@@ -78,18 +78,6 @@ export function normalizeMessageId(raw: string): string {
   return `<${bare}>`;
 }
 
-/**
- * A relay-reported WIRE `Message-ID` we are willing to record, or `null`. It
- * must be angle-bracketed and carry an `@` — anything else is a provider handle
- * or a mangled value, never a `Message-ID`, and the locally generated id stands.
- */
-export function wireMessageId(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null;
-  const trimmed = raw.trim();
-  if (!/^<[^<>\s]+@[^<>\s]+>$/.test(trimmed)) return null;
-  return normalizeMessageId(trimmed);
-}
-
 /** Enforce the medium's size caps that the schema cannot express. */
 function assertWithinCaps(payload: InboundEmailPayload): void {
   if (Buffer.byteLength(payload.text, 'utf8') > EMAIL_TEXT_MAX_BYTES) {

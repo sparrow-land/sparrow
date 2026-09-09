@@ -196,6 +196,36 @@ describe('sparrow await — termination stamps the heartbeat', () => {
     expect(l.stdout().trim()).toBe('');
   }, 40_000);
 
+  /**
+   * A LATE SIGNAL FROM A SUPERSEDED LISTENER. Re-arming supersedes the previous
+   * listener (see await-owner.ts), and the harness may kill that old process
+   * seconds later — long after its successor took over the state dir. Its
+   * `killed:SIGTERM` stamp would then report the LIVE listener as dead, and the
+   * next Stop hook would demand a re-arm that is already running. So the stamp
+   * is vetoed once the generation record names someone else: retirement is
+   * silent, whichever way the old process finally dies.
+   */
+  it('a superseded listener stamps NOTHING when it is killed afterwards', async () => {
+    const l = await startListener(['await', '--timeout', '60', '--poll-seconds', '0', '--json']);
+    const hbFile = path.join(l.stateDir, 'heartbeat');
+    // A newer generation publishes and owns the heartbeat from here on.
+    fs.writeFileSync(
+      path.join(l.stateDir, 'await-owner.json'),
+      `${JSON.stringify({ version: 1, nonce: 'cafebabecafebabe', pid: 999999, startedAt: new Date().toISOString(), kind: 'await' })}\n`,
+    );
+    fs.writeFileSync(hbFile, 'await\n');
+    l.kill('SIGTERM');
+
+    const { code } = await l.ended;
+    // Either the signal arrived first (143) or the listener had already noticed
+    // it was superseded and stood down (4) — both must leave the successor's
+    // heartbeat untouched.
+    expect([143, 4]).toContain(code);
+    expect(heartbeat(l.stateDir)).toBe('await');
+    expect(heartbeat(l.stateDir)).not.toMatch(/killed|stopped/);
+    expect(l.stdout().trim()).toBe(''); // and never a wake line
+  }, 40_000);
+
   it('a --timeout expiry stamps NOTHING dead — the next turn owns that', async () => {
     const l = await startListener(['await', '--timeout', '1', '--poll-seconds', '0', '--json']);
     const { code } = await l.ended;

@@ -235,6 +235,21 @@ describe('SKILL.md — the come-online fork (online is not attentive)', () => {
     expect(skillMd).toMatch(/cannot re-enter/i);
   });
 
+  /**
+   * The re-arm instruction is unconditional ("every turn, without exception"),
+   * so the file must also say why that is SAFE: `await` is one listener per
+   * state dir, newest wins, and the loser exits 4 having done nothing. Without
+   * this an agent that re-arms over a live listener doubles every wake — under
+   * the Codex bridge, one queued turn per message per listener.
+   */
+  it('says re-arming is safe because await is idempotent per state dir (exit 4)', () => {
+    expect(skillMd).toMatch(/idempotent per state dir/i);
+    expect(skillMd).toMatch(/supersede/i);
+    expect(skillMd).toMatch(/newest wins/i);
+    expect(skillMd).toMatch(/exits? \*\*4\*\*/);
+    expect(skillMd).toMatch(/re-arming blindly[^.]*is always safe/i);
+  });
+
   it('is honest about the Stop hook: what it now checks, and what it still cannot see', () => {
     const idx = skillMd.indexOf('## What the hooks enforce');
     expect(idx).toBeGreaterThan(0);
