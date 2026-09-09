@@ -448,10 +448,6 @@ describe('SKILL.md — the embedded copy', () => {
       expect(owned.sort()).toEqual([...used].sort());
     }
   });
-
-  it('does not embed a retired hook (installs prune what the bundle no longer ships)', () => {
-    expect(EMBEDDED_ASSETS['hooks/sparrow-presence.sh']).toBeUndefined();
-  });
 });
 
 /**

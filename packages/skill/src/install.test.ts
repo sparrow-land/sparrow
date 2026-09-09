@@ -253,60 +253,73 @@ describe('install (project scope) — settings.local.json + stamped commands', (
 });
 
 /**
- * The pruner looks in BOTH settings files on every install. Otherwise an upgrade
- * that switches the default target leaves the old registration in place and the
- * hooks fire twice — once with the old (unstamped) command.
+ * ONE INSTALL WRITES ONE FILE.
+ *
+ * `.claude/settings.local.json` is personal and untracked; `.claude/settings.json`
+ * is the committed file a whole team shares. Which one this install writes is
+ * decided by `--shared` and by nothing else: the other file is never read for
+ * writing, never rewritten, and never created. An install that "helpfully"
+ * swept our entries out of the file it was not targeting would silently disarm
+ * every other agent working in the same checkout.
  */
-describe('install — migration between settings.json and settings.local.json', () => {
-  it('removes an older settings.json registration when installing to settings.local.json', async () => {
-    seedSettings(cwd, {
-      model: 'opus',
-      hooks: {
-        Stop: [
-          {
-            matcher: '',
-            hooks: [
-              { type: 'command', command: '$CLAUDE_PROJECT_DIR/.claude/skills/sparrow/hooks/sparrow-stop-check.sh' },
-              { type: 'command', command: 'echo someone-elses-stop' },
-            ],
-          },
-        ],
-        UserPromptSubmit: [
-          {
-            matcher: '',
-            hooks: [
-              {
-                type: 'command',
-                command: '$CLAUDE_PROJECT_DIR/.claude/skills/sparrow/hooks/sparrow-auto-status.sh prompt',
-              },
-            ],
-          },
-        ],
+describe('install — the target settings file, and only the target', () => {
+  /** A settings file already carrying our registrations (any file name). */
+  const seedOurHooks = (file: string): string => {
+    seedSettings(
+      cwd,
+      {
+        model: 'opus',
+        hooks: {
+          Stop: [
+            {
+              matcher: '',
+              hooks: [
+                { type: 'command', command: '$CLAUDE_PROJECT_DIR/.claude/skills/sparrow/hooks/sparrow-stop-check.sh' },
+                { type: 'command', command: 'echo someone-elses-stop' },
+              ],
+            },
+          ],
+          UserPromptSubmit: [
+            {
+              matcher: '',
+              hooks: [
+                {
+                  type: 'command',
+                  command: '$CLAUDE_PROJECT_DIR/.claude/skills/sparrow/hooks/sparrow-auto-status.sh prompt',
+                },
+              ],
+            },
+          ],
+        },
       },
-    });
+      file,
+    );
+    return fs.readFileSync(settingsFile(cwd, file), 'utf8');
+  };
+
+  it('leaves the committed settings.json byte-identical on a personal install', async () => {
+    const before = seedOurHooks('settings.json');
 
     await run(['install']);
 
-    const shared = readSettings(cwd, 'settings.json');
-    expect(JSON.stringify(shared)).not.toContain('sparrow-stop-check.sh');
-    expect(JSON.stringify(shared)).not.toContain('sparrow-auto-status.sh');
-    // Only OUR entries go; everything else survives.
-    expect(shared.model).toBe('opus');
-    expect(commandsFor(shared, 'Stop')).toEqual(['echo someone-elses-stop']);
-    expect(shared.hooks.UserPromptSubmit).toBeUndefined();
-
-    // Exactly one registration, in the file this install targeted.
+    expect(fs.readFileSync(settingsFile(cwd, 'settings.json'), 'utf8')).toBe(before);
+    // …and our registration lands in the personal file, exactly once per event.
     const local = readSettings(cwd, 'settings.local.json');
     expect(commandsFor(local, 'Stop').filter((c) => c.includes('sparrow-stop-check.sh'))).toHaveLength(1);
+    for (const event of ['UserPromptSubmit', 'PostToolUse', 'Notification']) {
+      expect(commandsFor(local, event).filter((c) => c.includes('sparrow-auto-status.sh'))).toHaveLength(1);
+    }
   });
 
-  it('removes a settings.local.json registration when installing --shared', async () => {
-    await run(['install']);
+  it('leaves settings.local.json byte-identical on a --shared install', async () => {
+    const before = seedOurHooks('settings.local.json');
+
     await run(['install', '--shared']);
-    const local = readSettings(cwd, 'settings.local.json');
-    expect(JSON.stringify(local)).not.toContain('sparrow-');
+
+    expect(fs.readFileSync(settingsFile(cwd, 'settings.local.json'), 'utf8')).toBe(before);
     const shared = readSettings(cwd, 'settings.json');
     expect(commandsFor(shared, 'Stop').filter((c) => c.includes('sparrow-stop-check.sh'))).toHaveLength(1);
+    expect(shared.env).toEqual({ CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP: '1' });
   });
 
   it('does not create the other settings file when there is nothing to prune', async () => {
@@ -455,12 +468,16 @@ describe('uninstall', () => {
     expect(readSettings(cwd).hooks).toBeUndefined();
   });
 
-  it('cleans BOTH settings files, whichever one the install used', async () => {
-    await run(['install', '--shared']); // registers in settings.json
-    await run(['install']); // …then migrates to settings.local.json
-    expect(await run(['uninstall'])).toBe(0);
+  it('cleans the target file only — a personal uninstall never edits settings.json', async () => {
+    await run(['install', '--shared']); // registers in the committed file
+    const before = fs.readFileSync(settingsFile(cwd, 'settings.json'), 'utf8');
+
+    expect(await run(['uninstall'])).toBe(0); // personal: settings.local.json
+    expect(fs.readFileSync(settingsFile(cwd, 'settings.json'), 'utf8')).toBe(before);
+
+    // …and `--shared` is what removes a shared registration.
+    expect(await run(['uninstall', '--shared'])).toBe(0);
     expect(JSON.stringify(readSettings(cwd, 'settings.json'))).not.toContain('sparrow-');
-    expect(JSON.stringify(readSettings(cwd, 'settings.local.json'))).not.toContain('sparrow-');
   });
 });
 
@@ -573,35 +590,12 @@ describe('heartbeat listener kind', () => {
   });
 });
 
-describe('upgrade pruning', () => {
-  it('re-install over a v1 layout removes the retired presence hook entry and file', async () => {
-    // Simulate the v1 layout: orphan script + a settings entry referencing it.
-    const hooksDir = path.join(cwd, '.claude', 'skills', 'sparrow', 'hooks');
-    fs.mkdirSync(hooksDir, { recursive: true });
-    fs.writeFileSync(path.join(hooksDir, 'sparrow-presence.sh'), '#!/bin/sh\nexit 0\n');
-    seedSettings(cwd, {
-      hooks: {
-        UserPromptSubmit: [
-          {
-            matcher: '',
-            hooks: [
-              { type: 'command', command: '$CLAUDE_PROJECT_DIR/.claude/skills/sparrow/hooks/sparrow-presence.sh' },
-            ],
-          },
-        ],
-      },
-    });
-
-    expect(await run(['install'])).toBe(0);
-    // The retired entry is gone from the old file…
-    expect(JSON.stringify(readSettings(cwd, 'settings.json'))).not.toContain('sparrow-presence.sh');
-    expect(fs.existsSync(path.join(hooksDir, 'sparrow-presence.sh'))).toBe(false);
-    // …and the v2 entries live in the file this install targeted.
-    expect(JSON.stringify(readSettings(cwd, 'settings.local.json'))).toContain(
-      'sparrow-auto-status.sh prompt',
-    );
-  });
-
+/**
+ * A matcher change must MIGRATE an existing registration, not add a second one:
+ * within the target file every group is swept of our command before the current
+ * one goes in, so a re-install can never leave two entries racing.
+ */
+describe('re-install — matcher migration inside the target file', () => {
   /**
    * The Notification hook used to be registered with matcher '' (= every
    * notification type, including `idle_prompt`). Re-installing must MIGRATE
@@ -743,9 +737,9 @@ describe('settings env — background-shell reaper opt-out', () => {
     expect(readSettings(cwd).env).toBeUndefined();
   });
 
-  it('uninstall sweeps BOTH settings files, whichever install wrote it', async () => {
+  it('uninstall --shared removes it from the committed file it was written to', async () => {
     await run(['install', '--shared']);
-    await run(['uninstall']);
+    await run(['uninstall', '--shared']);
     expect(readSettings(cwd, 'settings.json').env).toBeUndefined();
   });
 

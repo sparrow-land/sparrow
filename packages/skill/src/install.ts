@@ -10,9 +10,12 @@
  * module owns the rest and never branches on the provider itself.
  *
  * ONE MACHINE, SEVERAL AGENTS. A project-scope install is deliberately PRIVATE
- * to this checkout and this agent:
+ * to this checkout and this agent — OPAQUE TO GIT unless it is asked not to be:
  *   - Claude Code registers in `.claude/settings.local.json` (personal, not
- *     committed); `--shared` opts into the committed `.claude/settings.json`;
+ *     committed); `--shared` is the explicit opt-in to the committed
+ *     `.claude/settings.json`. Whichever file a command targets is the only one
+ *     it writes: the other is never rewritten and never created, so one agent's
+ *     install can never edit the file its neighbours depend on;
  *   - every hook command carries this project's `SPARROW_STATE_DIR` and
  *     `SPARROW_PROFILE`, so a hook acts as the agent that installed it, on this
  *     project's own loop switch and heartbeat;

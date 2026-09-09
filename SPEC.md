@@ -1908,8 +1908,9 @@ for the flag; if neither is, it defaults to Claude Code (the historical behavior
 **Claude Code adapter** — unchanged from v3. Playbook + hooks at
 `.claude/skills/sparrow/`; registrations merged into `.claude/settings.local.json`
 (personal; `--shared` targets the committed `.claude/settings.json`, `--user` targets
-`~/.claude/settings.json`), with BOTH files swept every time so exactly one registration
-survives. Events: `Stop` (the loop-drift / online-but-deaf block), `UserPromptSubmit`,
+`~/.claude/settings.json`). The install writes ONLY the file it targets and never touches
+the other one, so a personal install is opaque to git and a committed `settings.json` is
+never rewritten unless `--shared` was asked for. Events: `Stop` (the loop-drift / online-but-deaf block), `UserPromptSubmit`,
 `PostToolUse`, `Notification`. The settings `env` block also gets
 `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, without which Claude Code's
 memory-pressure reaper kills the background `sparrow await` during exactly the idle

@@ -5,9 +5,13 @@
  *
  * Playbook  → `.claude/skills/sparrow/SKILL.md` (+ `hooks/*.sh`).
  * Settings  → `.claude/settings.local.json` (personal) or `settings.json`
- *             (`--shared` / user scope). BOTH files are swept on every install
- *             and uninstall, so an older version's registration in the other
- *             file is removed: one registration, in one file, ever.
+ *             (`--shared` / user scope). An install is OPAQUE TO GIT by
+ *             default: the personal file is Claude Code's own untracked one,
+ *             and `--shared` is the explicit opt-in to the committed file.
+ *             Exactly ONE file is read-modify-written per command — the target.
+ *             The other one is never rewritten and never created, because
+ *             editing a file this install was not asked to own is how one agent
+ *             disarms its neighbours in a shared checkout.
  * Events    → Stop, UserPromptSubmit, PostToolUse, Notification.
  * Also      → `env.CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, which opts the
  *             session out of Claude Code's memory-pressure reaper so a long idle
@@ -20,15 +24,6 @@ import type { CheckLine, ProviderAdapter, Resolved } from './providers.js';
 
 /** The shell scripts a Claude Code install ships. */
 const SCRIPTS: ReadonlyArray<string> = ['sparrow-stop-check.sh', 'sparrow-auto-status.sh'];
-
-/**
- * Scripts SHIPPED BY PAST VERSIONS that this version no longer installs. An
- * upgrade (re-install over an older layout) prunes their hook entries from the
- * settings files and deletes the orphaned files — otherwise a retired hook keeps
- * firing forever (found live: v1's standalone presence hook survived a v2
- * re-install). Every event is swept, since old registrations may sit anywhere.
- */
-export const RETIRED_SCRIPTS: ReadonlyArray<string> = ['sparrow-presence.sh'];
 
 /**
  * A Notification hook's `matcher` is a regex over the event's `notification_type`,
@@ -118,7 +113,11 @@ export function settingsPath(r: Resolved): string {
   return path.join(claudeBaseDir(r), file);
 }
 
-/** Both settings files at this scope — swept on every install and uninstall. */
+/**
+ * Both settings files at this scope. Claude Code LOADS both, so `status` and
+ * `verify` must look in both to answer "is this session actually armed?" —
+ * but only ever to read: the writer below touches the target alone.
+ */
 function settingsCandidates(r: Resolved): string[] {
   return SETTINGS_FILES.map((f) => path.join(claudeBaseDir(r), f));
 }
@@ -283,42 +282,37 @@ function hasReaperOptOut(settings: Settings): boolean {
 }
 
 /**
- * Sweep BOTH settings files, then write our registrations into `target` (pass
- * `undefined` to only sweep — that is `uninstall`).
+ * Read-modify-write THE TARGET settings file: our registrations in on install,
+ * out on uninstall. Nothing else on disk is read for writing.
  *
- * Sweeping both is what makes the settings.local.json default safe on upgrade: a
- * project that registered our hooks in the committed `settings.json` under an
- * older version gets them removed there and re-added in the file this install
- * actually targets. One registration total, and never two hooks racing to post
- * the same status. A non-target file is only rewritten when it really changed.
+ * Within that one file every event is swept of our commands before the current
+ * ones go in, which is what makes a re-install idempotent and lets a matcher
+ * change migrate (the old group is dropped, not left firing alongside the new
+ * one). Foreign hooks and settings are preserved throughout.
+ *
+ * Returns the file when it was actually written — an uninstall against a file
+ * that never mentioned us leaves it byte-identical, and one that does not exist
+ * is not created.
  */
-function syncSettings(r: Resolved, target?: string): string[] {
-  const written: string[] = [];
-  for (const sp of settingsCandidates(r)) {
-    const isTarget = target !== undefined && sp === target;
-    if (!isTarget && !fs.existsSync(sp)) continue;
-    const settings = readSettings(sp);
-    const before = JSON.stringify(settings);
-    for (const file of [...RETIRED_SCRIPTS, ...SCRIPTS]) removeEverywhere(settings, file);
-    if (isTarget) {
-      for (const { file, event, mode, matcher } of HOOKS) {
-        upsertHook(settings, event, file, hookCommand(r, file, mode), matcher ?? '');
-      }
-      setReaperOptOut(settings);
-    } else if (target === undefined) {
-      // Uninstall: strip our env opt-out from BOTH files, since an older (or
-      // `--shared`) install may have written it into the other one. On INSTALL
-      // the non-target file is left alone — `env` is a namespace shared with
-      // the user's own vars, and a duplicate of the same value is harmless
-      // (unlike a duplicate hook, which would fire twice).
-      removeReaperOptOut(settings);
+function syncSettings(r: Resolved, mode: 'install' | 'uninstall'): string[] {
+  const target = settingsPath(r);
+  if (mode === 'uninstall' && !fs.existsSync(target)) return [];
+  const settings = readSettings(target);
+  const before = JSON.stringify(settings);
+  for (const file of SCRIPTS) removeEverywhere(settings, file);
+  if (mode === 'install') {
+    for (const { file, event, mode: hookMode, matcher } of HOOKS) {
+      upsertHook(settings, event, file, hookCommand(r, file, hookMode), matcher ?? '');
     }
-    if (isTarget || JSON.stringify(settings) !== before) {
-      writeSettings(sp, settings);
-      written.push(sp);
-    }
+    setReaperOptOut(settings);
+  } else {
+    removeReaperOptOut(settings);
   }
-  return written;
+  if (mode === 'install' || JSON.stringify(settings) !== before) {
+    writeSettings(target, settings);
+    return [target];
+  }
+  return [];
 }
 
 /* --------------------------------- adapter ---------------------------------- */
@@ -330,13 +324,8 @@ export const CLAUDE_ADAPTER: ProviderAdapter = {
   skillDir,
 
   wire(r: Resolved): void {
-    // Upgrade pruning: delete retired scripts' orphaned files (their hook
-    // entries are stripped from both settings files by syncSettings below).
-    for (const file of RETIRED_SCRIPTS) {
-      fs.rmSync(path.join(skillDir(r), 'hooks', file), { force: true });
-    }
     const sp = settingsPath(r);
-    syncSettings(r, sp);
+    syncSettings(r, 'install');
     r.log(`Hooks merged into ${sp} (Stop + UserPromptSubmit + PostToolUse + Notification).`);
     r.log(BG_REAP_INSTALL_NOTE);
     if (r.scope === 'project') {
@@ -349,7 +338,7 @@ export const CLAUDE_ADAPTER: ProviderAdapter = {
   },
 
   unwire(r: Resolved): void {
-    const cleaned = syncSettings(r);
+    const cleaned = syncSettings(r, 'uninstall');
     const where = cleaned.length > 0 ? cleaned.join(' and ') : settingsPath(r);
     r.log(`Hook entries stripped from ${where}.`);
   },

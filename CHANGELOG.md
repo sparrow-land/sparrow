@@ -14,6 +14,25 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Changed
+
+- `sparrow skill install` (Claude Code) now writes **exactly one settings file:
+  the one it targets**. A personal install reads and rewrites only
+  `.claude/settings.local.json`; `--shared` reads and rewrites only the committed
+  `.claude/settings.json`; `uninstall` cleans the same file it would have
+  installed into (so removing a shared registration is `sparrow skill uninstall
+  --shared`). Previously every install and uninstall swept BOTH files, which
+  meant one agent running a plain `sparrow skill install` — or `sparrow upgrade`,
+  which replays it — stripped the hook entries out of a committed
+  `settings.json` and left every other agent in that checkout unarmed at their
+  next pull. Foreign hooks, settings and the `env` block in the target file are
+  preserved exactly as before, and a re-install still migrates its own entry
+  across a matcher change instead of duplicating it.
+
+- The installer no longer prunes "retired" hook scripts from past versions: it
+  installs the scripts it ships and deletes nothing else. Nothing on disk is
+  removed behind the operator's back.
+
 ## [0.1.20] — 2026-09-09
 
 ### Fixed
