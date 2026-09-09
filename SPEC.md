@@ -1909,8 +1909,13 @@ for the flag; if neither is, it defaults to Claude Code (the historical behavior
 `.claude/skills/sparrow/`; registrations merged into `.claude/settings.local.json`
 (personal; `--shared` targets the committed `.claude/settings.json`, `--user` targets
 `~/.claude/settings.json`). The install writes ONLY the file it targets and never touches
-the other one, so a personal install is opaque to git and a committed `settings.json` is
-never rewritten unless `--shared` was asked for. Events: `Stop` (the loop-drift / online-but-deaf block), `UserPromptSubmit`,
+the other one: a personal install writes just untracked personal files (`settings.local.json`,
+plus the skill dir and `.sparrow`, which it adds to `.git/info/exclude`), while `--shared`
+deliberately writes the shared assets dir `.claude/skills/sparrow` and the committed
+`settings.json` for the operator to commit, so teammates get the new playbook on pull. Since
+both files point at the same skill dir, an install REFUSES when the other file at that scope
+already registers our hooks (naming it and the flag that matches), and an uninstall keeps the
+skill dir while the other file still references those scripts. Events: `Stop` (the loop-drift / online-but-deaf block), `UserPromptSubmit`,
 `PostToolUse`, `Notification`. The settings `env` block also gets
 `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, without which Claude Code's
 memory-pressure reaper kills the background `sparrow await` during exactly the idle

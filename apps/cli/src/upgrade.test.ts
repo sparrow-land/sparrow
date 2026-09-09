@@ -45,6 +45,12 @@ const BUNDLE = [
   "  process.stderr.write('skill install exploded\\n');",
   '  process.exit(3);',
   '}',
+  // A REFUSED install: the reason is printed on stdout (that is where the
+  // installer's own log goes) and the exit code is non-zero.
+  'if (process.env.SPARROW_TEST_REFRESH_REFUSE) {',
+  "  process.stdout.write('Refusing to install: hooks are already registered in .claude/settings.json\\n');",
+  '  process.exit(1);',
+  '}',
   '',
 ].join('\n');
 
@@ -248,6 +254,21 @@ describe('sparrow upgrade — skill refresh', () => {
    * broken skill install must be LOUD and must not turn a good upgrade into a
    * failed command.
    */
+  /**
+   * A refused install says WHY on stdout and exits non-zero. If the refresh
+   * reported only "Command failed", the operator would be told their skill did
+   * not refresh without being told the one thing that fixes it.
+   */
+  it('surfaces a refusal message the child printed on stdout', async () => {
+    expect(await runCli(['skill', 'install', '--codex'], env(), capture().io)).toBe(0);
+    fs.rmSync(refreshLog, { force: true });
+
+    const cap = capture();
+    expect(await runCli(['upgrade'], env({ SPARROW_TEST_REFRESH_REFUSE: '1' }), cap.io)).toBe(0);
+    expect(cap.err()).toContain('skill: refresh failed');
+    expect(cap.err()).toContain('hooks are already registered in .claude/settings.json');
+  });
+
   it('a skill refresh failure prints the error but leaves the upgrade exit code at 0', async () => {
     expect(await runCli(['skill', 'install', '--codex'], env(), capture().io)).toBe(0);
     fs.rmSync(refreshLog, { force: true });

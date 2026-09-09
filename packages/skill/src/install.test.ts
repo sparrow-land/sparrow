@@ -263,33 +263,16 @@ describe('install (project scope) — settings.local.json + stamped commands', (
  * every other agent working in the same checkout.
  */
 describe('install — the target settings file, and only the target', () => {
-  /** A settings file already carrying our registrations (any file name). */
-  const seedOurHooks = (file: string): string => {
+  /** A settings file full of somebody else's content (any file name). */
+  const seedForeign = (file: string): string => {
     seedSettings(
       cwd,
       {
         model: 'opus',
+        permissions: { allow: ['Bash(ls:*)'] },
+        env: { FOO: 'bar' },
         hooks: {
-          Stop: [
-            {
-              matcher: '',
-              hooks: [
-                { type: 'command', command: '$CLAUDE_PROJECT_DIR/.claude/skills/sparrow/hooks/sparrow-stop-check.sh' },
-                { type: 'command', command: 'echo someone-elses-stop' },
-              ],
-            },
-          ],
-          UserPromptSubmit: [
-            {
-              matcher: '',
-              hooks: [
-                {
-                  type: 'command',
-                  command: '$CLAUDE_PROJECT_DIR/.claude/skills/sparrow/hooks/sparrow-auto-status.sh prompt',
-                },
-              ],
-            },
-          ],
+          Stop: [{ matcher: '', hooks: [{ type: 'command', command: 'echo someone-elses-stop' }] }],
         },
       },
       file,
@@ -298,9 +281,9 @@ describe('install — the target settings file, and only the target', () => {
   };
 
   it('leaves the committed settings.json byte-identical on a personal install', async () => {
-    const before = seedOurHooks('settings.json');
+    const before = seedForeign('settings.json');
 
-    await run(['install']);
+    expect(await run(['install'])).toBe(0);
 
     expect(fs.readFileSync(settingsFile(cwd, 'settings.json'), 'utf8')).toBe(before);
     // …and our registration lands in the personal file, exactly once per event.
@@ -309,12 +292,14 @@ describe('install — the target settings file, and only the target', () => {
     for (const event of ['UserPromptSubmit', 'PostToolUse', 'Notification']) {
       expect(commandsFor(local, event).filter((c) => c.includes('sparrow-auto-status.sh'))).toHaveLength(1);
     }
+    // The reaper opt-out goes in the target only — the other file's env is its own.
+    expect(readSettings(cwd, 'settings.json').env).toEqual({ FOO: 'bar' });
   });
 
   it('leaves settings.local.json byte-identical on a --shared install', async () => {
-    const before = seedOurHooks('settings.local.json');
+    const before = seedForeign('settings.local.json');
 
-    await run(['install', '--shared']);
+    expect(await run(['install', '--shared'])).toBe(0);
 
     expect(fs.readFileSync(settingsFile(cwd, 'settings.local.json'), 'utf8')).toBe(before);
     const shared = readSettings(cwd, 'settings.json');
@@ -334,6 +319,100 @@ describe('install — the target settings file, and only the target', () => {
  * untracked, invisible to everyone else). `--shared` means the skill dir is
  * deliberately committed, so only the state dir is excluded.
  */
+/**
+ * TWO FILES, ONE SKILL DIR — so an install that targets the file it was NOT
+ * asked for would fight the other one.
+ *
+ * `.claude/settings.json` (shared, committed) and `.claude/settings.local.json`
+ * (personal) both point at the same `.claude/skills/sparrow`. Since an install
+ * writes only its target, running the WRONG one would leave two registrations
+ * live — the other agents' and this one's, both firing — while overwriting the
+ * playbook and scripts underneath them. There is no safe silent answer, so the
+ * install refuses and names the flag that matches what is already there.
+ */
+describe('install — refuses when the other settings file owns the registration', () => {
+  const ourHooks = {
+    hooks: {
+      Stop: [
+        {
+          matcher: '',
+          hooks: [
+            { type: 'command', command: '$CLAUDE_PROJECT_DIR/.claude/skills/sparrow/hooks/sparrow-stop-check.sh' },
+          ],
+        },
+      ],
+    },
+  };
+  const skillDirPath = () => path.join(cwd, '.claude', 'skills', 'sparrow');
+
+  it('a personal install refuses when settings.json already registers our hooks', async () => {
+    seedSettings(cwd, ourHooks, 'settings.json');
+    const before = fs.readFileSync(settingsFile(cwd, 'settings.json'), 'utf8');
+    fs.mkdirSync(path.join(cwd, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+
+    expect(await run(['install'])).not.toBe(0);
+
+    // NOTHING was written: not the settings, not the assets, not the state.
+    expect(fs.readFileSync(settingsFile(cwd, 'settings.json'), 'utf8')).toBe(before);
+    expect(fs.existsSync(settingsFile(cwd, 'settings.local.json'))).toBe(false);
+    expect(fs.existsSync(skillDirPath())).toBe(false);
+    expect(fs.existsSync(path.join(cwd, '.sparrow'))).toBe(false);
+    expect(fs.existsSync(path.join(cwd, '.git', 'info', 'exclude'))).toBe(false);
+
+    const out = logs.join('\n');
+    expect(out).toContain(`hooks are already registered in ${settingsFile(cwd, 'settings.json')}`);
+    expect(out).toContain('--shared');
+  });
+
+  it('a --shared install refuses when settings.local.json already registers our hooks', async () => {
+    seedSettings(cwd, ourHooks, 'settings.local.json');
+    const before = fs.readFileSync(settingsFile(cwd, 'settings.local.json'), 'utf8');
+
+    expect(await run(['install', '--shared'])).not.toBe(0);
+
+    expect(fs.readFileSync(settingsFile(cwd, 'settings.local.json'), 'utf8')).toBe(before);
+    expect(fs.existsSync(settingsFile(cwd, 'settings.json'))).toBe(false);
+    expect(fs.existsSync(skillDirPath())).toBe(false);
+    const out = logs.join('\n');
+    expect(out).toContain(`hooks are already registered in ${settingsFile(cwd, 'settings.local.json')}`);
+    expect(out).toContain('without --shared');
+  });
+
+  it('an existing asset file is left byte-identical by a refused install', async () => {
+    await run(['install', '--shared']); // a complete shared install
+    const files = ['SKILL.md', 'hooks/sparrow-stop-check.sh', 'hooks/sparrow-auto-status.sh'];
+    const before = files.map((f) => fs.readFileSync(path.join(skillDirPath(), ...f.split('/'))));
+    // Pretend the playbook is older than what we ship — a refused install must
+    // not "helpfully" refresh it.
+    fs.writeFileSync(path.join(skillDirPath(), 'SKILL.md'), 'an older playbook\n');
+
+    expect(await run(['install'])).not.toBe(0);
+
+    expect(fs.readFileSync(path.join(skillDirPath(), 'SKILL.md'), 'utf8')).toBe('an older playbook\n');
+    for (const [i, f] of files.slice(1).entries()) {
+      expect(fs.readFileSync(path.join(skillDirPath(), ...f.split('/')))).toEqual(before[i + 1]);
+    }
+  });
+
+  it('re-installing over OUR OWN registration is still fine (idempotent)', async () => {
+    expect(await run(['install'])).toBe(0);
+    expect(await run(['install'])).toBe(0);
+    expect(await run(['install', '--shared'])).not.toBe(0);
+  });
+
+  it('a project with no other registration installs normally', async () => {
+    seedSettings(cwd, { model: 'opus' }, 'settings.json');
+    expect(await run(['install'])).toBe(0);
+    expect(fs.existsSync(skillFile(cwd))).toBe(true);
+  });
+
+  it('user scope has only one settings file, so nothing can own it but itself', async () => {
+    expect(await run(['install', '--user'])).toBe(0);
+    expect(await run(['install', '--user'])).toBe(0);
+  });
+});
+
 describe('install — .git/info/exclude', () => {
   const excludeFile = (p: string) => path.join(p, '.git', 'info', 'exclude');
   const gitInit = (p: string) => {
@@ -474,10 +553,54 @@ describe('uninstall', () => {
 
     expect(await run(['uninstall'])).toBe(0); // personal: settings.local.json
     expect(fs.readFileSync(settingsFile(cwd, 'settings.json'), 'utf8')).toBe(before);
+    // A registration is worthless without the scripts it points at: every
+    // command still in settings.json must still resolve to a file on disk.
+    expect(fs.existsSync(skillFile(cwd))).toBe(true);
+    const shared = readSettings(cwd, 'settings.json');
+    for (const event of ['Stop', 'UserPromptSubmit', 'PostToolUse', 'Notification']) {
+      for (const command of commandsFor(shared, event)) {
+        const script = /sparrow-[a-z-]+\.sh/.exec(command)![0];
+        expect(fs.existsSync(path.join(cwd, '.claude', 'skills', 'sparrow', 'hooks', script))).toBe(true);
+      }
+    }
 
     // …and `--shared` is what removes a shared registration.
     expect(await run(['uninstall', '--shared'])).toBe(0);
     expect(JSON.stringify(readSettings(cwd, 'settings.json'))).not.toContain('sparrow-');
+    expect(fs.existsSync(path.join(cwd, '.claude', 'skills', 'sparrow'))).toBe(false);
+  });
+
+  it('keeps the skill dir while the OTHER settings file still registers it, and says so', async () => {
+    await run(['install', '--shared']);
+    logs.length = 0;
+
+    expect(await run(['uninstall'])).toBe(0);
+
+    const dir = path.join(cwd, '.claude', 'skills', 'sparrow');
+    expect(fs.existsSync(path.join(dir, 'hooks', 'sparrow-stop-check.sh'))).toBe(true);
+    const out = logs.join('\n');
+    expect(out).toContain(`Skill dir kept at ${dir}`);
+    expect(out).toContain(settingsFile(cwd, 'settings.json'));
+    // It must never claim it removed something it kept.
+    expect(out).not.toContain('Sparrow skill removed');
+  });
+
+  it('the mirror: a --shared uninstall keeps the dir while settings.local.json registers it', async () => {
+    await run(['install']); // personal registration
+    logs.length = 0;
+
+    expect(await run(['uninstall', '--shared'])).toBe(0);
+
+    expect(fs.existsSync(skillFile(cwd))).toBe(true);
+    expect(logs.join('\n')).toContain(settingsFile(cwd, 'settings.local.json'));
+  });
+
+  it('says the skill was removed only when the dir really went', async () => {
+    await run(['install']);
+    logs.length = 0;
+    expect(await run(['uninstall'])).toBe(0);
+    expect(fs.existsSync(path.join(cwd, '.claude', 'skills', 'sparrow'))).toBe(false);
+    expect(logs.join('\n')).toContain('Sparrow skill removed for Claude Code (project scope)');
   });
 });
 

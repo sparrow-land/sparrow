@@ -18,16 +18,32 @@ versions that release shipped with.
 
 - `sparrow skill install` (Claude Code) now writes **exactly one settings file:
   the one it targets**. A personal install reads and rewrites only
-  `.claude/settings.local.json`; `--shared` reads and rewrites only the committed
-  `.claude/settings.json`; `uninstall` cleans the same file it would have
-  installed into (so removing a shared registration is `sparrow skill uninstall
-  --shared`). Previously every install and uninstall swept BOTH files, which
-  meant one agent running a plain `sparrow skill install` — or `sparrow upgrade`,
-  which replays it — stripped the hook entries out of a committed
+  `.claude/settings.local.json` — the untracked personal file — and keeps its
+  other output (the skill dir, `.sparrow`) out of everyone's diff via
+  `.git/info/exclude`. `--shared` is the deliberate opt-in to what a team
+  shares: it writes the committed `.claude/settings.json` and refreshes the
+  assets dir `.claude/skills/sparrow`, which you then commit so teammates pick
+  up the new playbook on their next pull. `uninstall` cleans the same file it
+  would have installed into (so removing a shared registration is `sparrow skill
+  uninstall --shared`). Previously every install and uninstall swept BOTH files,
+  which meant one agent running a plain `sparrow skill install` — or `sparrow
+  upgrade`, which replays it — stripped the hook entries out of a committed
   `settings.json` and left every other agent in that checkout unarmed at their
   next pull. Foreign hooks, settings and the `env` block in the target file are
   preserved exactly as before, and a re-install still migrates its own entry
   across a matcher change instead of duplicating it.
+
+- Both settings files point at the same `.claude/skills/sparrow`, so an install
+  now **refuses to run when the other file at that scope already registers our
+  hooks**, naming that file and the flag that matches it (`re-run with --shared`,
+  or without it) and writing nothing at all — no assets, no settings edit, no
+  exclude entry, no state dir, no install record. Otherwise it would add a
+  second live registration and refresh the playbook underneath the first one.
+  For the same reason `uninstall` keeps the skill dir when the other file still
+  registers those scripts, and says so instead of claiming a removal: deleting
+  the scripts out from under a live registration turns a teammate's hook into a
+  broken one. `sparrow upgrade`'s skill refresh now reports what a failed
+  install printed on stdout, so a refusal reaches the operator verbatim.
 
 - The installer no longer prunes "retired" hook scripts from past versions: it
   installs the scripts it ships and deletes nothing else. Nothing on disk is

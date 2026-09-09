@@ -9,13 +9,19 @@
  * {@link ProviderAdapter} (`provider-claude.ts`, `provider-codex.ts`). This
  * module owns the rest and never branches on the provider itself.
  *
- * ONE MACHINE, SEVERAL AGENTS. A project-scope install is deliberately PRIVATE
- * to this checkout and this agent — OPAQUE TO GIT unless it is asked not to be:
- *   - Claude Code registers in `.claude/settings.local.json` (personal, not
- *     committed); `--shared` is the explicit opt-in to the committed
- *     `.claude/settings.json`. Whichever file a command targets is the only one
- *     it writes: the other is never rewritten and never created, so one agent's
- *     install can never edit the file its neighbours depend on;
+ * ONE MACHINE, SEVERAL AGENTS. A project-scope install is PERSONAL by default —
+ * it writes only files nobody else has to live with:
+ *   - Claude Code registers in `.claude/settings.local.json` (Claude Code's own
+ *     untracked personal file), and the skill dir plus `.sparrow` go into
+ *     `.git/info/exclude`, so a default install adds nothing to anybody's diff.
+ *     `--shared` is the explicit opt-in to what a TEAM shares: the committed
+ *     `.claude/settings.json` and the assets dir `.claude/skills/sparrow`, which
+ *     the operator commits so teammates get the new playbook on their next pull.
+ *     Whichever file a command targets is the only one it writes — and when the
+ *     OTHER file at that scope already owns the registration, the install
+ *     REFUSES rather than adding a second live one (both files point at the same
+ *     skill dir, so proceeding would refresh the playbook under a registration
+ *     it was not asked to own);
  *   - every hook command carries this project's `SPARROW_STATE_DIR` and
  *     `SPARROW_PROFILE`, so a hook acts as the agent that installed it, on this
  *     project's own loop switch and heartbeat;
@@ -45,6 +51,7 @@ import {
   detectProvider,
   type CheckLine,
   type Env,
+  type ProviderAdapter,
   type Resolved,
   type Scope,
 } from './providers.js';
@@ -198,9 +205,34 @@ function writeAsset(rel: string, dest: string): void {
   else fs.writeFileSync(dest, EMBEDDED_ASSETS[rel]!);
 }
 
+/**
+ * OPTIONAL adapter capability, for a harness whose scope has TWO registration
+ * files sharing ONE skill dir (Claude Code's `settings.json` +
+ * `settings.local.json`). Both questions are about the file this command is not
+ * targeting, so only such an adapter can answer them — but the neutral core
+ * asks them, because the consequences are its own: whether a write may happen
+ * at all, and whether the shared assets may be deleted.
+ */
+export interface DualSettingsAdapter {
+  /** Why this install must not run (message), or `undefined` to proceed. */
+  installRefusal?(r: Resolved): string | undefined;
+  /** The other file still registering our hooks — the skill dir must survive. */
+  skillDirHeldBy?(r: Resolved): string | undefined;
+}
+
+const dual = (a: ProviderAdapter): DualSettingsAdapter => a as ProviderAdapter & DualSettingsAdapter;
+
 /** Install: render the playbook, copy scripts, wire hooks, seed loop-state. */
 export function install(r: Resolved): number {
   const adapter = adapterFor(r.provider);
+  // BEFORE ANY WRITE. A refusal has to be worth nothing on disk — no assets, no
+  // settings edit, no exclude entry, no state dir, no marker (the CLI stamps
+  // that only on exit 0) — or "nothing was written" would be a lie.
+  const refusal = dual(adapter).installRefusal?.(r);
+  if (refusal) {
+    r.log(refusal);
+    return 1;
+  }
   const dir = adapter.skillDir(r);
   const hooksDir = path.join(dir, 'hooks');
   fs.mkdirSync(hooksDir, { recursive: true });
@@ -239,12 +271,28 @@ export function install(r: Resolved): number {
   return 0;
 }
 
-/** Uninstall: remove hook registrations (preserving foreign ones) and the skill dir. */
+/**
+ * Uninstall: remove OUR hook registrations from the target file (foreign ones
+ * survive), then the skill dir — but only if nothing still points at it.
+ *
+ * The other settings file at this scope registers the same scripts by path, so
+ * deleting the dir while it does would leave that registration aimed at files
+ * that no longer exist: every other agent in the checkout gets a broken hook
+ * instead of a removed one. When it holds, the assets stay and we say so — the
+ * one thing this command must never do is claim a removal it did not perform.
+ */
 export function uninstall(r: Resolved): number {
   const adapter = adapterFor(r.provider);
-  r.log(`Sparrow skill removed for ${adapter.label} (${r.scope} scope).`);
+  const dir = adapter.skillDir(r);
   adapter.unwire(r);
-  fs.rmSync(adapter.skillDir(r), { recursive: true, force: true });
+  const heldBy = dual(adapter).skillDirHeldBy?.(r);
+  if (heldBy) {
+    r.log(`Sparrow skill hooks removed for ${adapter.label} (${r.scope} scope).`);
+    r.log(`Skill dir kept at ${dir}: ${heldBy} still registers its hooks.`);
+  } else {
+    fs.rmSync(dir, { recursive: true, force: true });
+    r.log(`Sparrow skill removed for ${adapter.label} (${r.scope} scope): ${dir}`);
+  }
   r.log(`Loop state left untouched at ${r.stateDir} (delete it manually if desired).`);
   return 0;
 }

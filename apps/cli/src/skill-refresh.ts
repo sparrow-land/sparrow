@@ -254,17 +254,20 @@ export interface SkillRefreshResult {
 /** Run `sparrow skill install …` — bound by the caller to the NEW bundle. */
 export type SkillInstallExec = (argv: string[], ctx: { cwd: string; env: Env }) => void;
 
-/** The stderr of a failed child, else its error message. */
+/**
+ * What a failed child actually SAID: its stderr, else its stdout, else the
+ * spawn error. Stdout matters because an install that REFUSES to run explains
+ * why on its normal log channel — reporting a bare "Command failed" would hide
+ * the one sentence that tells the operator how to fix it.
+ */
 function execErrorMessage(e: unknown): string {
-  const err = e as { stderr?: unknown; message?: string };
-  const stderr =
-    typeof err.stderr === 'string'
-      ? err.stderr
-      : Buffer.isBuffer(err.stderr)
-        ? err.stderr.toString('utf8')
-        : '';
-  const trimmed = stderr.trim();
-  if (trimmed !== '') return trimmed.split('\n').slice(-3).join(' ');
+  const err = e as { stderr?: unknown; stdout?: unknown; message?: string };
+  const text = (v: unknown): string =>
+    typeof v === 'string' ? v : Buffer.isBuffer(v) ? v.toString('utf8') : '';
+  for (const stream of [err.stderr, err.stdout]) {
+    const trimmed = text(stream).trim();
+    if (trimmed !== '') return trimmed.split('\n').slice(-3).join(' ');
+  }
   return err.message ?? String(e);
 }
 

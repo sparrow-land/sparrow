@@ -5,13 +5,22 @@
  *
  * Playbook  → `.claude/skills/sparrow/SKILL.md` (+ `hooks/*.sh`).
  * Settings  → `.claude/settings.local.json` (personal) or `settings.json`
- *             (`--shared` / user scope). An install is OPAQUE TO GIT by
- *             default: the personal file is Claude Code's own untracked one,
- *             and `--shared` is the explicit opt-in to the committed file.
- *             Exactly ONE file is read-modify-written per command — the target.
- *             The other one is never rewritten and never created, because
- *             editing a file this install was not asked to own is how one agent
- *             disarms its neighbours in a shared checkout.
+ *             (`--shared` / user scope).
+ *
+ * ONE FILE PER COMMAND. A personal install writes only PERSONAL files —
+ * `settings.local.json`, which Claude Code keeps untracked, plus the skill dir
+ * and `.sparrow`, which it adds to `.git/info/exclude`. A `--shared` install
+ * deliberately writes what a team shares: the committed `settings.json` and the
+ * assets dir `.claude/skills/sparrow`, which the operator then commits so
+ * teammates get the new playbook on their next pull. Whichever file a command
+ * targets is the ONLY one it read-modify-writes; the other is never rewritten
+ * and never created, because editing the file this install was not asked to own
+ * is how one agent disarms its neighbours in a shared checkout.
+ *
+ * And since both files point at the SAME skill dir, an install refuses outright
+ * when the other one already owns the registration ({@link installRefusal}):
+ * proceeding would leave two live registrations while overwriting the playbook
+ * underneath them.
  * Events    → Stop, UserPromptSubmit, PostToolUse, Notification.
  * Also      → `env.CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, which opts the
  *             session out of Claude Code's memory-pressure reaper so a long idle
@@ -20,6 +29,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import type { DualSettingsAdapter } from './install.js';
 import type { CheckLine, ProviderAdapter, Resolved } from './providers.js';
 
 /** The shell scripts a Claude Code install ships. */
@@ -315,9 +325,65 @@ function syncSettings(r: Resolved, mode: 'install' | 'uninstall'): string[] {
   return [];
 }
 
+/* --------------------- the OTHER settings file at this scope -------------------- */
+
+/**
+ * The settings file at this scope that this command is NOT targeting, or
+ * `undefined` when there is none (user scope has a single `settings.json`).
+ *
+ * Claude Code loads both project files, and both point at the same
+ * `.claude/skills/sparrow`. So the other file is never written — but it is
+ * always CONSULTED: what it says decides whether an install may proceed and
+ * whether an uninstall may delete the assets.
+ */
+function otherSettingsFile(r: Resolved): string | undefined {
+  if (r.scope !== 'project') return undefined;
+  const target = settingsPath(r);
+  const other = settingsCandidates(r).find((f) => f !== target);
+  return other !== undefined && fs.existsSync(other) ? other : undefined;
+}
+
+/** True when `settings` registers any of the hook scripts we install. */
+function registersOurHooks(settings: Settings): boolean {
+  for (const groups of Object.values(settings.hooks ?? {})) {
+    if (!Array.isArray(groups)) continue;
+    for (const g of groups) {
+      const hooks = Array.isArray(g?.hooks) ? g.hooks : [];
+      if (hooks.some((h) => SCRIPTS.some((file) => targetsOurScript(h.command, file)))) return true;
+    }
+  }
+  return false;
+}
+
+/** The other file, when it currently registers our hooks. */
+function otherRegistrar(r: Resolved): string | undefined {
+  const other = otherSettingsFile(r);
+  if (other === undefined) return undefined;
+  return registersOurHooks(readSettings(other)) ? other : undefined;
+}
+
+/**
+ * Why this install must not run: the OTHER settings file at this scope already
+ * registers our hooks, so this one would add a second live registration (both
+ * firing, one of them stamped for somebody else) and refresh the shared
+ * playbook and scripts underneath it. The message names that file and the flag
+ * that matches it; the operator decides, not us.
+ */
+function installRefusal(r: Resolved): string | undefined {
+  const other = otherRegistrar(r);
+  if (other === undefined) return undefined;
+  const rerun = r.shared
+    ? 're-run without --shared to refresh that personal install'
+    : 're-run with --shared to refresh that install';
+  return (
+    `Refusing to install: hooks are already registered in ${other}; ${rerun}, or remove them ` +
+    `there first. Nothing was written.`
+  );
+}
+
 /* --------------------------------- adapter ---------------------------------- */
 
-export const CLAUDE_ADAPTER: ProviderAdapter = {
+export const CLAUDE_ADAPTER: ProviderAdapter & DualSettingsAdapter = {
   id: 'claude',
   label: 'Claude Code',
   scripts: SCRIPTS,
@@ -394,6 +460,12 @@ export const CLAUDE_ADAPTER: ProviderAdapter = {
   postInstallNotes(): string[] {
     return [];
   },
+
+  // The two-file capabilities the neutral core asks about (see
+  // `DualSettingsAdapter` in install.ts): both answer questions about the
+  // settings file this command is not targeting.
+  installRefusal,
+  skillDirHeldBy: otherRegistrar,
 
   installMarkers(dir: string): string[] {
     return [path.join(dir, '.claude', 'skills', 'sparrow')];
