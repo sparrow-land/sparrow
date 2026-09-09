@@ -14,6 +14,20 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Email threading survives a relay that stamps its own `Message-ID`.** Outbound
+  mail is still minted with `<{emailId}@{agent domain}>` before the relay call,
+  but some relays cannot put that header on the wire and substitute their own.
+  When the relay reports the id it actually sent (`rfcMessageId` in its 2xx
+  body), the stored email is now corrected to it — so a reply naming the wire id
+  joins the right thread instead of starting a new one, the agent's own next
+  reply cites the id the recipient saw, and API/CLI views show the real
+  `rfcMessageId`. The correction happens only on acceptance: a failed, held, or
+  rejected send keeps the locally generated id, as does a malformed value or one
+  already used by another of that agent's emails. Relays that pass our header
+  through verbatim (including the bundled `mail-gateway`) are unaffected.
+
 ## [0.1.19] — 2026-09-09
 
 ### Fixed

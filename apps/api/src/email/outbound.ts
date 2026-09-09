@@ -4,7 +4,11 @@
  *
  * An outbound email's row is written (with its `Message-ID`) BEFORE the relay
  * call, so a crash mid-relay leaves an auditable `send-failed`, never a silent
- * gap. Intra-instance mail is NOT short-circuited: an agent emailing a sibling
+ * gap. On ACCEPTANCE the row's `rfcMessageId` is corrected to the WIRE
+ * `Message-ID` when the relay reports one (some relays stamp their own, and
+ * ours never reaches the wire) — see `correctionFor`.
+ *
+ * Intra-instance mail is NOT short-circuited: an agent emailing a sibling
  * goes out through the relay and comes back through the inbound seam like any
  * other mail — one code path, one trust evaluation.
  */
@@ -25,13 +29,13 @@ import {
 } from '@sparrow/common-types';
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';
-import { emails, emailThreads } from '../db/schema.js';
+import { emailQuarantine, emails, emailThreads } from '../db/schema.js';
 import type { AgentRow, EmailRow, EmailThreadRow, OrgRow } from '../db/schema.js';
 import { badRequest, forbidden, payloadTooLarge } from '../errors.js';
 import { canonicalAddress } from './addresses.js';
 import { buildJudgePrompt, runJudge } from './judge.js';
 import { announceEmail } from './notify.js';
-import { orgEmailSettings } from './inbound.js';
+import { orgEmailSettings, wireMessageId } from './inbound.js';
 import {
   bumpThread,
   decodeAttachments,
@@ -360,6 +364,51 @@ export async function sendOutbound(
 }
 
 /**
+ * Is `rfc` already the `Message-ID` of some OTHER row of this agent's mail
+ * (either side of the trust boundary)? `(agent_id, rfc_message_id)` is the
+ * medium's idempotency key and the DB enforces it per table, so a wire id that
+ * collides is refused rather than allowed to fight the unique index.
+ */
+function rfcTakenByOther(ctx: AppContext, row: EmailRow, rfc: string): boolean {
+  const mine = ctx.db
+    .select()
+    .from(emails)
+    .where(and(eq(emails.agentId, row.agentId), eq(emails.rfcMessageId, rfc)))
+    .get();
+  if (mine && mine.id !== row.id) return true;
+  const quarantined = ctx.db
+    .select()
+    .from(emailQuarantine)
+    .where(and(eq(emailQuarantine.agentId, row.agentId), eq(emailQuarantine.rfcMessageId, rfc)))
+    .get();
+  return quarantined !== undefined && quarantined.id !== row.id;
+}
+
+/**
+ * The WIRE `Message-ID` to correct `row` to, or `null` to keep the local one.
+ *
+ * Only an ACCEPTED send corrects anything (a failed, held, rejected, or
+ * indeterminate send never gets here). The value must be well-formed, actually
+ * different from ours, and free for this agent.
+ */
+function correctionFor(
+  ctx: AppContext,
+  row: EmailRow,
+  reported: string | undefined,
+): string | null {
+  const wire = wireMessageId(reported);
+  if (wire === null || wire === row.rfcMessageId) return null;
+  if (rfcTakenByOther(ctx, row, wire)) {
+    // Two rows of one agent cannot share a Message-ID: keep ours, say so.
+    console.warn(
+      `email: relay reported an already-used Message-ID for ${row.id}; keeping ${row.rfcMessageId}`,
+    );
+    return null;
+  }
+  return wire;
+}
+
+/**
  * Hand a `sent` row to the relay, flipping it to `send-failed`
  * (`reason: "relay-error"`) when the relay refuses. Announces whichever outcome
  * happened — the row is already durable either way.
@@ -424,11 +473,28 @@ export async function relayAndFinish(
 
   const at = nowIso();
   if (result.ok) {
-    ctx.db
-      .update(emails)
-      .set({ disposition: 'sent', reason: null, resolvedAt: at })
-      .where(eq(emails.id, row.id))
-      .run();
+    const done = { disposition: 'sent' as const, reason: null, resolvedAt: at };
+    // Some relays cannot stamp the `Message-ID` we handed them and report the
+    // one they DID put on the wire. Record it — every reply names that id, and
+    // a row still carrying the local one would thread nothing.
+    let corrected = correctionFor(ctx, row, result.rfcMessageId);
+    if (corrected !== null) {
+      try {
+        ctx.db
+          .update(emails)
+          .set({ ...done, rfcMessageId: corrected })
+          .where(eq(emails.id, row.id))
+          .run();
+      } catch {
+        // Lost a race for the id: ours stands.
+        corrected = null;
+      }
+    }
+    if (corrected === null) {
+      ctx.db.update(emails).set(done).where(eq(emails.id, row.id)).run();
+    } else {
+      row.rfcMessageId = corrected;
+    }
     row.disposition = 'sent';
     row.reason = null;
     row.resolvedAt = at;
