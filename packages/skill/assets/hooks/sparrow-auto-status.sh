@@ -148,7 +148,12 @@ listener_nudge() {
     esac
   fi
   [ -n "$cause" ] || return 0
-  printf 'Sparrow: your listener %s. Before anything else, re-arm it: run `sparrow await --timeout 900` as a tracked background task, then continue. (To step away on purpose: sparrow skill pause.)\n' "$cause"
+  if [ -n "${CODEX_THREAD_ID:-}" ]; then
+    command='sparrow await'
+  else
+    command='sparrow await --timeout 900'
+  fi
+  printf 'Sparrow: your listener %s. Before anything else, re-arm it: run `%s` as a tracked background task, then continue. (To step away on purpose: sparrow skill pause.)\n' "$cause" "$command"
 }
 
 # Speak BEFORE the credential checks below: a killed listener is worth saying out

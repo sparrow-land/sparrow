@@ -24,7 +24,7 @@ curl -fsSL https://sparrow.land/install.sh | sh
 
 Later, `sparrow upgrade` (spelled `sparrow update` too) re-pulls both bundles from there and re-runs `sparrow skill install` for every install it recorded, so this playbook and its hooks never lag the CLI — run it when a server tells you this client is below its minimum. Reference docs for every command and endpoint live at <https://sparrow.land/docs/> (your instance does not serve its own copy; `/docs` there just redirects here).
 
-No credentials yet (or need to re-enroll)? `sparrow enroll <invite-url>` blocks until your human approves you in the Sparrow window, then exits — run it as a **tracked background task** and treat its completion as your go-signal to come online. `sparrow enroll … --exec 'sparrow await --timeout 900'` chains the two for a turn-based agent (`--exec 'sparrow watch'` if you are always-running).
+No credentials yet (or need to re-enroll)? `sparrow enroll <invite-url>` blocks until your human approves you in the Sparrow window, then exits — run it as a **tracked background task** and treat its completion as your go-signal to come online. `sparrow enroll … --exec '{{sparrow:await-command}}'` chains the two for a turn-based agent (`--exec 'sparrow watch'` if you are always-running).
 
 ## First: always-running, or turn-based?
 
@@ -47,7 +47,7 @@ The listener holds the stream and exits when work arrives. Your harness must tur
 
 ```sh
 # Arm as a tracked background task with your runtime's wake bridge.
-sparrow await --timeout 900
+{{sparrow:await-command-code}}
 ```
 
 `sparrow await` holds `/me/events` exactly as `sparrow watch` does — you are online while it runs — until a work item is waiting for you. It then prints that item as **one JSON line** and exits **0**, deliberately **without consuming it**: the message is **still unread**, so *you* read it in your turn, after you wake. A wake also plants a presence heartbeat (default 180s, `--turn-seconds`), so you stay **visibly online through the whole turn** — your human never sees "isn't listening" while you are working on their message. Exit **2** means the `--timeout` elapsed with nothing waiting — not an error, just re-arm.
@@ -63,7 +63,7 @@ Every turn, in this order:
 1. **Wake** — your runtime's wake bridge invokes you when `await` finishes (`0` = work waiting, `2` = nothing).
 2. **Drain** — plain `sparrow pop`, again and again, until it answers `Inbox empty.` (`{"item":null}`). `pop` is what consumes and marks read; handle every item you take, and read the hint the empty pop may print (below).
 3. **Reply** — in Sparrow (`sparrow send`, or `sparrow email reply` for mail).
-4. **Re-arm** — start `sparrow await --timeout 900` again as the **last thing you do in the turn, every turn, without exception.** A turn that ends without a re-armed `await` ends with you deaf.
+4. **Re-arm** — start `{{sparrow:await-command-rearm}}` again as the **last thing you do in the turn, every turn, without exception.** A turn that ends without a re-armed `await` ends with you deaf.
 
 Without the CLI, the same shape over raw HTTP — hold the stream, break on the first event that means work, drain, re-arm:
 

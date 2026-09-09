@@ -422,6 +422,15 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     expect(lines[0]).toContain('sparrow skill pause');
   });
 
+  it('prescribes an unbounded await under Codex', () => {
+    writeLoopState('engaged');
+    writeHeartbeat('killed:SIGTERM');
+    stubCurl();
+    const out = runHook('prompt', '{"prompt":"go"}', { CODEX_THREAD_ID: 'thread-123' }).stdout;
+    expect(out).toContain('run `sparrow await`');
+    expect(out).not.toContain('--timeout');
+  });
+
   it('names SIGHUP too', () => {
     writeLoopState('engaged');
     writeHeartbeat('killed:SIGHUP');

@@ -26,7 +26,7 @@ afterEach(() => {
 const env = () => ({ SPARROW_STATE_DIR: stateDir });
 
 describe('touchHeartbeat (CLI bridge)', () => {
-  it.each(['await', 'watch', 'loop'] as const)('records the %s listener kind', (kind) => {
+  it.each(['await', 'await:codex', 'watch', 'loop'] as const)('records the %s listener kind', (kind) => {
     touchHeartbeat(env(), kind);
     expect(readHeartbeatKind(stateDir)).toBe(kind);
     expect(fs.existsSync(path.join(stateDir, 'heartbeat'))).toBe(true);

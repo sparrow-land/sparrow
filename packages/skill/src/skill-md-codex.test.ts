@@ -119,6 +119,9 @@ describe('Codex SKILL.md — the provider-neutral core survives', () => {
     expect(codex).toContain('CODEX_THREAD_ID');
     expect(codex).toContain('automatically queues');
     expect(codex).toContain('Codex requires explicit turn delivery');
+    expect(codex).toContain('unbounded `sparrow await`');
+    expect(codex).toContain('terminal `426 client_upgrade_required`');
+    expect(codex).not.toContain('sparrow await --timeout 900');
     expect(codex).not.toContain('every turn-based harness already understands');
     expect(codex).toMatch(/re-arm/i);
     expect(codex).toMatch(/exits? \*\*0\*\*/);

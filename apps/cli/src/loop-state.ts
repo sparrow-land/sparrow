@@ -35,8 +35,8 @@ type Env = Record<string, string | undefined>;
  * a turn-based agent online but deaf). Omitting it writes an empty heartbeat,
  * which the hook reads as "unknown listener, cannot judge".
  */
-export function touchHeartbeat(env: Env = process.env, kind?: ListenerKind): void {
-  touchHeartbeatAt(resolveStateDir(env), { kind });
+export function touchHeartbeat(env: Env = process.env, kind?: ListenerKind, force = false): void {
+  touchHeartbeatAt(resolveStateDir(env), { kind, force });
 }
 
 /**

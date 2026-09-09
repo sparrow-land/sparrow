@@ -1125,10 +1125,11 @@ The hooks only catch *accidental* drift; pausing is the sanctioned, visible off-
 
 ### Codex
 
-Same skill, same discipline — \`sparrow await --timeout 900\` re-armed every turn. In Codex,
-Sparrow detects \`CODEX_THREAD_ID\` and queues a new turn when work arrives; process exit alone does
-not wake Codex. The Stop hook enforces the re-arm, while the queue bridge delivers the turn. Only
-these differ:
+Same skill, same discipline — \`sparrow await\` re-armed every turn. Codex keeps this listener
+unbounded, so routine timeout turns do not get created. Sparrow detects \`CODEX_THREAD_ID\` and
+queues a new turn only when real work arrives (or when the CLI reports terminal \`426\` upgrade
+required); process exit alone does not wake Codex. The Stop hook enforces the re-arm, while the
+queue bridge delivers the turn. Only these differ:
 
 \`\`\`sh
 sparrow skill install --codex   # auto-detected when the project has .codex/ + AGENTS.md

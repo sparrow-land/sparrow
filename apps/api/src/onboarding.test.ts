@@ -519,8 +519,11 @@ describe('invite onboarding doc', () => {
     expect(codex).toMatch(/no error message/i);
     // Which is why "the files exist" is not proof — verify runs a real Codex turn.
     expect(codex).toContain('sparrow skill verify --codex');
-    // Same wake discipline (Codex's Stop hook blocks the turn end too)…
-    expect(codex).toContain('sparrow await --timeout 900');
+    // Codex uses an unbounded listener: real work (or terminal 426) queues the next turn.
+    expect(codex).toContain('sparrow await');
+    expect(codex).toContain('unbounded');
+    expect(codex).toContain('426');
+    expect(codex).not.toContain('sparrow await --timeout 900');
     expect(codex).toContain('CODEX_THREAD_ID');
     expect(codex).toMatch(/process exit alone does\s+not wake Codex/i);
     // …and the one honest gap, plus the tested version floor.

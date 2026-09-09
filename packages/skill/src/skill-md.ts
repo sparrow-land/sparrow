@@ -42,6 +42,9 @@ export const CODEX_MIN_VERSION = '0.153.3';
 export const FRAGMENT_KEYS: readonly string[] = [
   'intro',
   'turn-based-examples',
+  'await-command',
+  'await-command-code',
+  'await-command-rearm',
   'interrupt-note',
   'reaper-note',
   'session-start-turn-based',

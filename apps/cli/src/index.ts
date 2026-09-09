@@ -1632,10 +1632,21 @@ const execFileAsync = promisify(execFile);
  * deliberate handoff point. The message is intentionally independent of the
  * inbox preview: `await` must never turn a notification into a read.
  */
-async function queueCodexAwaitWake(threadId: string, env: Env, io: CliIO): Promise<void> {
+async function queueCodexAwaitWake(
+  threadId: string,
+  env: Env,
+  io: CliIO,
+  reason: 'work' | 'gap' | 'upgrade',
+): Promise<void> {
   const message =
-    'Sparrow await finished. Run `sparrow pop` until it reports `Inbox empty.`, reply in-room, ' +
-    'then re-arm as the last action: `sparrow await --timeout 900`.';
+    reason === 'work'
+      ? 'Sparrow work is waiting. Run `sparrow pop` until it reports `Inbox empty.`, reply in-room, ' +
+        'then re-arm as the last action: `sparrow await`.'
+      : reason === 'gap'
+        ? 'Sparrow detected a replay gap, so work may be waiting. Run `sparrow pop` until it reports ' +
+          '`Inbox empty.`, reply in-room, then re-arm as the last action: `sparrow await`.'
+      : 'Sparrow await stopped because this client must be upgraded. Run `sparrow upgrade`, then re-arm ' +
+        'as the last action: `sparrow await`.';
   try {
     if (io.notifyCodex) {
       await io.notifyCodex(threadId, message);
@@ -3850,7 +3861,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
    *
    * Exit codes ARE the contract: `0` = work is waiting, drain now; `2` = the
    * `--timeout` elapsed with nothing waiting (re-arm); `1` = a real failure,
-   * including the `426` client floor, which no re-arm can clear.
+   * including the `426` client floor, which requires an upgrade before re-arm.
    */
   const AWAIT_DRAIN_CMD = 'sparrow pop';
   const runAwait = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
@@ -3868,13 +3879,20 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       throw new CliError('--codex-thread requires a non-empty Codex thread id.');
     }
     const codexThread = explicitCodexThread || env.CODEX_THREAD_ID?.trim();
-    const queueCodexWake = async (): Promise<void> => {
+    const awaitHeartbeatKind = codexThread ? 'await:codex' : 'await';
+    const queueCodexWake = async (reason: 'work' | 'gap' | 'upgrade'): Promise<void> => {
       if (!codexThread || readLoopState(env) === 'paused') return;
       try {
-        await queueCodexAwaitWake(codexThread, env, io);
+        await queueCodexAwaitWake(codexThread, env, io, reason);
       } catch (e) {
         markHeartbeatDead(env, 'killed', 'CODEX_QUEUE');
-        io.err(`[await] ${String((e as Error)?.message ?? e)}; work remains unread, but no Codex turn was queued\n`);
+        const consequence =
+          reason === 'upgrade'
+            ? 'the required upgrade remains pending'
+            : reason === 'work'
+              ? 'work remains unread'
+              : 'work may remain unread';
+        io.err(`[await] ${String((e as Error)?.message ?? e)}; ${consequence}, but no Codex turn was queued\n`);
       }
     };
 
@@ -3966,7 +3984,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       }
     };
 
-    const wake = (reason: string, item: InboxEntry | null, extra?: Record<string, unknown>): void =>
+    let emittedReason: string | undefined;
+    const wake = (reason: string, item: InboxEntry | null, extra?: Record<string, unknown>): void => {
+      emittedReason = reason;
       emit({
         type: 'await.item',
         reason,
@@ -3977,6 +3997,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         drain: AWAIT_DRAIN_CMD,
         ...extra,
       });
+    };
 
     /**
      * How `--wake-on mention` recognises "me". Sparrow has no structured mention
@@ -4054,17 +4075,35 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
 
     // A restarting turn-based agent must never block on a stream while its mail
     // sits unread — so ask the queue BEFORE opening anything.
-    const alreadyWaiting = await nextWake();
+    let alreadyWaiting: WakeDecision;
+    try {
+      alreadyWaiting = await nextWake();
+    } catch (e) {
+      if (isUpgradeRequired(e)) await queueCodexWake('upgrade');
+      throw e;
+    }
     if (alreadyWaiting && 'item' in alreadyWaiting) {
       wake('waiting', alreadyWaiting.item, { matched: alreadyWaiting.matched });
       await markTurn();
-      await queueCodexWake();
+      await queueCodexWake('work');
       return;
     }
     if (alreadyWaiting) firstDeferMs = alreadyWaiting.deferMs;
 
     const controller = new AbortController();
     const disarmSignals = armListenerSignals(env, () => controller.abort());
+    touchHeartbeat(env, awaitHeartbeatKind, true);
+    let terminalError: unknown;
+    let upgradeWake: Promise<void> | undefined;
+    const terminateForUpgrade = (e: unknown): boolean => {
+      if (!isUpgradeRequired(e)) return false;
+      if (terminalError === undefined) {
+        terminalError = e;
+        upgradeWake = queueCodexWake('upgrade');
+        controller.abort();
+      }
+      return true;
+    };
 
     // The same cursor discipline as watch/loop: resume with `?since=`, persist
     // per credential, and heal on a gap (see makeEventCursor).
@@ -4109,6 +4148,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
             if (decision) armBatch(decision.deferMs);
           } while (recheck && !emitted);
         } catch (e) {
+          if (terminateForUpgrade(e)) return;
           // A transient inbox read must never end the wait — the next event or
           // poll tick asks again.
           note(
@@ -4148,7 +4188,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         let item: InboxEntry | null = null;
         try {
           item = await oldestWaiting();
-        } catch {
+        } catch (e) {
+          if (terminateForUpgrade(e)) return;
           /* the gap itself is the news */
         }
         wake('replay.gap', item, {
@@ -4188,7 +4229,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         quiet,
         onOpen,
         onActivity: () => {
-          touchHeartbeat(env, 'await');
+          touchHeartbeat(env, awaitHeartbeatKind);
           onActivity();
         },
         dispatcher: transport?.dispatcher,
@@ -4211,11 +4252,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       onEvent,
       onGap: ({ since, latest }) => onGap(since, latest),
       onSeed: (latest) => cursor.seed(latest),
-      onError: (e) =>
+      onError: (e) => {
+        if (terminateForUpgrade(e)) return;
         lifecycle(
           { type: 'await.poll_error', message: String((e as Error)?.message ?? e) },
           `[await] reconcile poll failed (${String((e as Error)?.message ?? e)})`,
-        ),
+        );
+      },
     });
 
     let timedOut = false;
@@ -4254,6 +4297,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           ),
       });
       if (result.reason === 'error') throw result.error;
+    } catch (e) {
+      if (terminateForUpgrade(e)) await upgradeWake;
+      throw e;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       if (batchTimer !== undefined) clearTimeout(batchTimer);
@@ -4264,17 +4310,18 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     // Let an inbox check that was in flight when the stream ended finish, so a
     // wake that had already been decided still wins over the timeout.
     await pending;
+    await upgradeWake;
+    if (terminalError !== undefined) throw terminalError;
     if (emitted) {
       // exit 0 — the wake line is already on stdout; cover the turn it starts.
       await markTurn();
-      await queueCodexWake();
+      await queueCodexWake(emittedReason === 'replay.gap' ? 'gap' : 'work');
       return;
     }
     // A --timeout expiry plants NOTHING: a harness that re-arms is not a turn,
     // and marking it online would be the same lie in the other direction.
     if (timedOut) {
       emit({ type: 'await.timeout', timeoutSeconds });
-      await queueCodexWake();
       ctx.exitCode = 2; // nothing waiting — a harness re-arms
     }
     // Otherwise: interrupted (Ctrl-C). Exit 0 silently, as `watch` does.

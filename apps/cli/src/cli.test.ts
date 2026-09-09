@@ -2586,7 +2586,7 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     ).toBe(0);
     expect(calls).toEqual([[
       'thread-123',
-      'Sparrow await finished. Run `sparrow pop` until it reports `Inbox empty.`, reply in-room, then re-arm as the last action: `sparrow await --timeout 900`.',
+      'Sparrow work is waiting. Run `sparrow pop` until it reports `Inbox empty.`, reply in-room, then re-arm as the last action: `sparrow await`.',
     ]]);
 
     const inbox = capture();
@@ -2662,6 +2662,17 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     expect(JSON.parse(pop.out()).item.message.body).toBe('arrived live');
   });
 
+  it('stamps await:codex as soon as a Codex-bridged listener starts', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtcodexheartbeat');
+    const cap = capture();
+    cap.io.notifyCodex = async () => {};
+    const running = runCli(['await', '--timeout', '15'], { ...env, CODEX_THREAD_ID: 'thread-heartbeat' }, cap.io);
+    await nap(250);
+    expect(fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8').trim()).toBe('await:codex');
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'end heartbeat check' });
+    expect(await running).toBe(0);
+  });
+
   it('--timeout expires with exit 2 (so a harness can re-arm) and one await.timeout line', async () => {
     await awaitFixture('awto');
     const cap = capture();
@@ -2671,7 +2682,7 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     expect(line.timeoutSeconds).toBe(1);
   });
 
-  it('auto-detected CODEX_THREAD_ID queues a timeout wake so an idle Codex turn can re-arm', async () => {
+  it('auto-detected CODEX_THREAD_ID does not queue an ordinary timeout', async () => {
     await awaitFixture('awtcodextimeout');
     const cap = capture();
     const calls: Array<[string, string]> = [];
@@ -2681,9 +2692,7 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
       await runCli(['await', '--timeout', '1'], { ...env, CODEX_THREAD_ID: 'thread-timeout' }, cap.io),
     ).toBe(2);
     expect(wakeLine(cap)).toMatchObject({ type: 'await.timeout', timeoutSeconds: 1 });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]![0]).toBe('thread-timeout');
-    expect(calls[0]![1]).toContain('sparrow await --timeout 900');
+    expect(calls).toEqual([]);
   });
 
   it('does not invoke Codex when CODEX_THREAD_ID and --codex-thread are both absent', async () => {
@@ -4070,8 +4079,15 @@ describe('sparrow CLI — watch/loop stream health', () => {
       res.writeHead(404).end();
     });
     try {
-      const e = { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub' };
+      const e = {
+        ...env,
+        SPARROW_SERVER: stub.url,
+        SPARROW_TOKEN: 'agk_stub',
+        CODEX_THREAD_ID: 'thread-gap',
+      };
       const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
       const code = await runCli(
         ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
         e,
@@ -4090,6 +4106,10 @@ describe('sparrow CLI — watch/loop stream health', () => {
       expect(wake.since).toBe(2634);
       expect(wake.latest).toBe(115);
       expect(wake.cursor).toBe('115');
+      expect(calls).toHaveLength(1);
+      expect(calls[0]![0]).toBe('thread-gap');
+      expect(calls[0]![1]).toContain('replay gap');
+      expect(calls[0]![1]).toContain('sparrow await`');
     } finally {
       await stub.close();
     }
@@ -4318,6 +4338,27 @@ describe('sparrow CLI — typed work items across mediums', () => {
  * ================================================================== */
 
 describe('sparrow CLI — client versioning', () => {
+  const VERSION_SSE_HEAD = {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+  };
+
+  async function listenVersionStub(
+    handler: http.RequestListener,
+  ): Promise<{ url: string; close: () => Promise<void> }> {
+    const server = http.createServer(handler);
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const addr = server.address() as AddressInfo;
+    return {
+      url: `http://127.0.0.1:${addr.port}`,
+      close: () => new Promise<void>((r) => {
+        server.closeAllConnections?.();
+        server.close(() => r());
+      }),
+    };
+  }
+
   it('--version prints the shared build version (<pkg>+dev in tests)', async () => {
     const cap = capture();
     const code = await runCli(['--version'], env, cap.io);
@@ -4441,6 +4482,114 @@ describe('sparrow CLI — client versioning', () => {
       expect(code).toBe(1);
       expect(cap.err()).toContain('sparrow upgrade');
       expect(cap.out()).toBe(''); // no wake line — nothing was learned about work
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it('await: a 426 client floor queues a Codex repair wake without consuming work', async () => {
+    const stub = await gate426();
+    try {
+      const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+      const code = await runCli(
+        ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub', CODEX_THREAD_ID: 'thread-upgrade' },
+        cap.io,
+      );
+      expect(code).toBe(1);
+      expect(cap.out()).toBe('');
+      expect(calls).toEqual([[
+        'thread-upgrade',
+        'Sparrow await stopped because this client must be upgraded. Run `sparrow upgrade`, then re-arm as the last action: `sparrow await`.',
+      ]]);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it('await: a 426 from an event-triggered inbox check queues one Codex repair wake', async () => {
+    let inboxReads = 0;
+    const stub = await listenVersionStub((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/inbox')) {
+        inboxReads += 1;
+        req.resume();
+        if (inboxReads === 1) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ items: [], nextCursor: null }));
+        } else {
+          res.writeHead(426, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 'client_upgrade_required', message: 'upgrade required' } }));
+        }
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        res.writeHead(200, VERSION_SSE_HEAD);
+        res.write(': open\n\n');
+        setTimeout(() => res.write('event: message.new\ndata: {"id":1}\n\n'), 25);
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+      const code = await runCli(
+        ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub', CODEX_THREAD_ID: 'thread-check' },
+        cap.io,
+      );
+      expect(code).toBe(1);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toEqual(['thread-check', expect.stringContaining('sparrow upgrade')]);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it('await: a 426 from reconciliation polling queues one Codex repair wake', async () => {
+    const stub = await listenVersionStub((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/inbox')) {
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ items: [], nextCursor: null }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events/log')) {
+        req.resume();
+        res.writeHead(426, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'client_upgrade_required', message: 'upgrade required' } }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        res.writeHead(200, VERSION_SSE_HEAD);
+        res.write(': open\n\n');
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+      const code = await runCli(
+        ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0'],
+        {
+          ...env,
+          SPARROW_SERVER: stub.url,
+          SPARROW_TOKEN: 'agk_stub',
+          SPARROW_RECONCILE_POLL_MS: '25',
+          CODEX_THREAD_ID: 'thread-poll',
+        },
+        cap.io,
+      );
+      expect(code).toBe(1);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toEqual(['thread-poll', expect.stringContaining('sparrow upgrade')]);
     } finally {
       await stub.close();
     }

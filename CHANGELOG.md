@@ -30,6 +30,10 @@ versions that release shipped with.
   out. `sparrow skill uninstall` drops the record, so a removed skill is never
   resurrected by a later upgrade.
 
+- Codex-backed `sparrow await` now stays armed without periodic model turns,
+  stamps `await:codex` so hooks can verify the queue bridge, and queues a wake
+  for real work or a terminal `426 client_upgrade_required` response only.
+
 ## [0.1.18] — 2026-09-09
 
 ### Fixed

@@ -218,6 +218,26 @@ describe('sparrow-stop-check.sh', () => {
     expect(r.stdout.trim()).toBe('');
   });
 
+  it('is silent for a fresh await:codex heartbeat under Codex', () => {
+    writeLoopState('engaged');
+    writeHeartbeat(5, 'await:codex');
+    const r = runHook('{}', { CODEX_THREAD_ID: 'thread-123' });
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe('');
+  });
+
+  it('blocks a passive await heartbeat under Codex and prescribes an unbounded re-arm', () => {
+    writeLoopState('engaged');
+    writeHeartbeat(5, 'await');
+    const r = runHook('{}', { CODEX_THREAD_ID: 'thread-123' });
+    const json = JSON.parse(r.stdout);
+    expect(json.decision).toBe('block');
+    expect(json.reason).toContain('passive');
+    expect(json.reason).toContain('await:codex');
+    expect(json.reason).toContain('run sparrow await as a tracked background task');
+    expect(json.reason).not.toContain('--timeout');
+  });
+
   it.each(['watch', 'loop'] as const)(
     'blocks when the fresh heartbeat is from %s (holds you online, cannot wake you)',
     (kind) => {

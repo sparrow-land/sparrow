@@ -1,5 +1,5 @@
 #!/bin/sh
-# Sparrow loop Stop-hook (Claude Code).
+# Sparrow loop Stop-hook (Claude Code and Codex).
 #
 # Catches three failures, all of which end a turn with the agent unreachable:
 #   1. DRIFT -- the loop is engaged but nothing has heartbeated recently (no
@@ -21,7 +21,8 @@
 # `watch`, `loop`) as the heartbeat file's content while stamping the mtime, and
 # writes `killed:<signal>` / `stopped:<signal>` as it dies.
 # `killed`/`stopped` (fresh or stale) -> block, naming the cause. Fresh +
-# `await` -> allow. Fresh + `watch`/`loop` -> block with the hold-only reason.
+# `await:codex` -> allow. Fresh + `await` under Codex -> block because it is
+# passive. Fresh + `await` under Claude -> allow. Fresh + `watch`/`loop` -> block.
 # Stale/absent -> the drift block.
 #
 # BE HONEST ABOUT THE REMAINING SCOPE. An EMPTY heartbeat (an older CLI, or a
@@ -70,8 +71,16 @@ state=$(tr -d ' \t\r\n' < "$LOOP_STATE_FILE" 2>/dev/null || echo "")
 # `hold_kind` stays empty unless we found a hold-only listener, so the tail of
 # this script builds the right reason for whichever failure we are in.
 hold_kind=""
+passive_await=""
 dead_word=""
 dead_signal=""
+if [ -n "${CODEX_THREAD_ID:-}" ]; then
+  await_command="sparrow await"
+  runtime="Codex"
+else
+  await_command="sparrow await --timeout 900"
+  runtime="this turn-based session"
+fi
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 now=$(date +%s 2>/dev/null || echo 0)
 if [ -f "$HEARTBEAT_FILE" ]; then
@@ -93,8 +102,11 @@ if [ -f "$HEARTBEAT_FILE" ]; then
       if [ "$age" -ge 0 ] && [ "$age" -lt "$FRESH_SECONDS" ]; then
         case "$content" in
           watch | loop) hold_kind="$content" ;;
-          # `await` (a real wake path) or empty/unknown (legacy or third-party
-          # heartbeat -- we cannot judge, so we do not) → allow, as always.
+          await)
+            if [ -n "${CODEX_THREAD_ID:-}" ]; then passive_await="yes"; else allow_stop; fi
+            ;;
+          await:codex) allow_stop ;;
+          # Empty/unknown (legacy or third-party heartbeat) is unjudgeable.
           *) allow_stop ;;
         esac
       fi
@@ -161,11 +173,13 @@ if [ -n "$dead_word" ]; then
   else
     cause="was stopped (Ctrl-C)"
   fi
-  reason="Sparrow loop is engaged but your listener $cause${suffix} -- nothing is listening now, so nothing can wake this session. Re-arm it: run sparrow await --timeout 900 as a tracked background task (its exit is your wake-up call), then drain with sparrow pop when it exits. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+  reason="Sparrow loop is engaged but your listener $cause${suffix} -- nothing is listening now, so nothing can wake $runtime. Re-arm it: run $await_command as a tracked background task, then drain with sparrow pop when work wakes you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+elif [ -n "$passive_await" ]; then
+  reason="Sparrow loop is engaged and a passive sparrow await listener is alive${suffix}, but it has no verified queue bridge back into this Codex thread. Re-arm with the current CLI: run sparrow await as a tracked background task; a bridged listener stamps await:codex. Then drain with sparrow pop when work wakes you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 elif [ -n "$hold_kind" ]; then
-  reason="Sparrow loop is engaged and a listener IS alive, but it is sparrow $hold_kind${suffix} -- that holds you online (green presence) and can never wake this turn-based session, which is the online-but-deaf state, worse than being offline. Run sparrow await --timeout 900 as a tracked background task instead: it holds the stream the same way but EXITS when work arrives, and that exit is what re-invokes you -- then drain with sparrow pop. Keep sparrow $hold_kind only if you are genuinely always-running (a process that keeps thinking between messages). To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+  reason="Sparrow loop is engaged and a listener IS alive, but it is sparrow $hold_kind${suffix} -- that holds you online (green presence) and can never wake $runtime, which is the online-but-deaf state, worse than being offline. Run $await_command as a tracked background task instead, then drain with sparrow pop when work wakes you. Keep sparrow $hold_kind only if you are genuinely always-running (a process that keeps thinking between messages). To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 else
-  reason="Sparrow loop is engaged but no listener is running${suffix}. Turn-based (you think only when invoked)? Re-arm your wake command: sparrow await --timeout 900 as a background task, then drain with sparrow pop when it exits. Always-running? Re-start sparrow watch/loop. Note this hook checks the heartbeat a listener leaves behind -- a heartbeat with no listener kind (an older CLI, or your own curl loop) it cannot judge, so a re-armed await is on you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+  reason="Sparrow loop is engaged but no listener is running${suffix}. Turn-based (you think only when invoked)? Re-arm your wake command: $await_command as a background task, then drain with sparrow pop when work wakes you. Always-running? Re-start sparrow watch/loop. Note this hook checks the heartbeat a listener leaves behind -- a heartbeat with no listener kind (an older CLI, or your own curl loop) it cannot judge, so a re-armed await is on you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 fi
 
 # Emit the block decision. Keep the reason free of double-quotes/newlines so this

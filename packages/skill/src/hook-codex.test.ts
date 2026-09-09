@@ -107,21 +107,30 @@ describe('sparrow-session-start.sh — the injected payload', () => {
   it('tells an agent with no listener to arm one', () => {
     const ctx = (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext;
     expect(ctx).toContain('No listener is running');
-    expect(ctx).toContain('sparrow await --timeout 900');
+    expect(ctx).toContain('unbounded sparrow await');
+    expect(ctx).not.toContain('--timeout 900');
   });
 
-  it('explains the automatic Codex queue bridge when await is fresh', () => {
+  it('recognizes a fresh Codex-bridged await listener', () => {
+    writeHeartbeat(5, 'await:codex');
+    const ctx = (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext;
+    expect(ctx).toContain('Codex-bridged');
+    expect(ctx).toContain('can deliver the next turn');
+  });
+
+  it('calls out a passive await heartbeat as lacking a verified Codex route', () => {
     writeHeartbeat(5, 'await');
     const ctx = (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext;
-    expect(ctx).toContain('CODEX_THREAD_ID');
-    expect(ctx).toContain('automatically');
+    expect(ctx).toContain('passive');
+    expect(ctx).toContain('no verified route');
+    expect(ctx).toContain('unbounded sparrow await');
   });
 
   it('calls out a hold-only listener as unable to wake you', () => {
     writeHeartbeat(5, 'watch');
     const ctx = (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext;
     expect(ctx).toContain('CANNOT wake you');
-    expect(ctx).toContain('sparrow await --timeout 900');
+    expect(ctx).toContain('unbounded sparrow await');
   });
 
   it('treats a STALE heartbeat as no listener', () => {
@@ -134,7 +143,7 @@ describe('sparrow-session-start.sh — the injected payload', () => {
     writeHeartbeat(1, 'killed:SIGTERM');
     const ctx = (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext;
     expect(ctx).toContain('was killed');
-    expect(ctx).toContain('sparrow await --timeout 900');
+    expect(ctx).toContain('unbounded sparrow await');
   });
 
   it('says it cannot judge an empty (legacy / hand-rolled) heartbeat', () => {
@@ -144,7 +153,7 @@ describe('sparrow-session-start.sh — the injected payload', () => {
   });
 
   it('stays valid JSON for every listener state', () => {
-    for (const hb of ['await', 'watch', 'loop', '', 'killed:SIGHUP', 'stopped:SIGINT', 'garbage']) {
+    for (const hb of ['await', 'await:codex', 'watch', 'loop', '', 'killed:SIGHUP', 'stopped:SIGINT', 'garbage']) {
       writeHeartbeat(5, hb);
       expect(() => JSON.parse(run(SESSION_START))).not.toThrow();
     }

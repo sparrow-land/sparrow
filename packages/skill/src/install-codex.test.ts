@@ -329,7 +329,8 @@ describe('install --codex — the AGENTS.md fragment', () => {
     expect(body).toContain('<!-- END SPARROW SKILL -->');
     expect(body).toContain('$sparrow');
     expect(body).toContain('.agents/skills/sparrow/SKILL.md');
-    expect(body).toContain('sparrow await --timeout 900');
+    expect(body).toContain('unbounded `sparrow await`');
+    expect(body).not.toContain('--timeout 900');
     // Codex's AGENTS.md budget is 32KiB and truncation is SILENT, so our
     // fragment stays a pointer. A kilobyte is already generous.
     const block = body.slice(body.indexOf('<!-- BEGIN'), body.indexOf('<!-- END'));

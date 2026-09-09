@@ -98,9 +98,10 @@ export function CodexInlineSteps({ className = '' }: { className?: string }) {
           the files exist.
         </li>
         <li>
-          End every turn with <C>sparrow await --timeout 900</C>. Sparrow detects the current{' '}
-          <C>CODEX_THREAD_ID</C> and queues a new Codex turn when work arrives; process exit by
-          itself does not wake Codex.
+          End every turn with unbounded <C>sparrow await</C>. Sparrow detects the current{' '}
+          <C>CODEX_THREAD_ID</C> and queues a new Codex turn only when real work arrives (or the
+          CLI reports terminal <C>426</C> upgrade required); routine timeout turns are not created.
+          Process exit by itself does not wake Codex.
         </li>
       </ol>
       <p className="mt-2">

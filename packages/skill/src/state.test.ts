@@ -87,6 +87,14 @@ describe('readHeartbeatState', () => {
     expect(readHeartbeatState(stateDir)).toEqual({ state: 'watch' });
   });
 
+  it('reads a Codex-bridged await listener while preserving plain await compatibility', () => {
+    touchHeartbeat(stateDir, { kind: 'await:codex', force: true });
+    expect(readHeartbeatState(stateDir)).toEqual({ state: 'await:codex' });
+    expect(readHeartbeatKind(stateDir)).toBe('await:codex');
+    touchHeartbeat(stateDir, { kind: 'await', force: true });
+    expect(readHeartbeatKind(stateDir)).toBe('await');
+  });
+
   it('is undefined when absent, empty or unrecognized', () => {
     expect(readHeartbeatState(stateDir)).toBeUndefined();
     fs.writeFileSync(heartbeatPath(stateDir), '');

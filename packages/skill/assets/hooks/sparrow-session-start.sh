@@ -28,8 +28,8 @@ cat >/dev/null 2>&1 || true
 state=$(tr -d ' \t\r\n' < "$LOOP_STATE_FILE" 2>/dev/null || echo "")
 [ "$state" = "engaged" ] || exit 0
 
-# What is listening right now? Same vocabulary as the Stop hook: a fresh `await`
-# is the only state that needs no action.
+# What is listening right now? Same vocabulary as the Stop hook: only a fresh
+# `await:codex` proves the CLI found this Codex thread's queue bridge.
 listener="none"
 if [ -f "$HEARTBEAT_FILE" ]; then
   content=$(head -c 64 "$HEARTBEAT_FILE" 2>/dev/null | tr -d ' \t\r\n' || echo "")
@@ -43,7 +43,7 @@ if [ -f "$HEARTBEAT_FILE" ]; then
         age=$((now - hb))
         if [ "$age" -ge 0 ] && [ "$age" -lt "$FRESH_SECONDS" ] 2>/dev/null; then
           case "$content" in
-            await | watch | loop) listener="$content" ;;
+            await | await:codex | watch | loop) listener="$content" ;;
             *) listener="unknown" ;;
           esac
         fi
@@ -53,14 +53,15 @@ if [ -f "$HEARTBEAT_FILE" ]; then
 fi
 
 case "$listener" in
-  await) advice="A sparrow await heartbeat is present. In Codex, the listener automatically uses CODEX_THREAD_ID to deliver the next turn." ;;
-  watch | loop) advice="A sparrow $listener listener is holding you online but CANNOT wake you: if you are turn-based, replace it with sparrow await --timeout 900 as a background task." ;;
-  unknown) advice="Something is heartbeating but claims no listener kind, so it cannot be judged: if you did not arm a wake path yourself, run sparrow await --timeout 900 as a background task." ;;
-  killed | stopped) advice="Your listener was $listener - nothing can wake you. Run sparrow await --timeout 900 as a background task before anything else." ;;
-  *) advice="No listener is running. Run sparrow await --timeout 900 as a background task before anything else." ;;
+  await:codex) advice="A Codex-bridged sparrow await listener is present and can deliver the next turn." ;;
+  await) advice="A passive sparrow await listener is present, but it has no verified route back into this Codex thread. Re-arm it with the current CLI: run unbounded sparrow await as a background task." ;;
+  watch | loop) advice="A sparrow $listener listener is holding you online but CANNOT wake you: if you are turn-based, replace it with unbounded sparrow await as a background task." ;;
+  unknown) advice="Something is heartbeating but claims no listener kind, so it cannot be judged: if you did not arm a wake path yourself, run unbounded sparrow await as a background task." ;;
+  killed | stopped) advice="Your listener was $listener - nothing can wake you. Run unbounded sparrow await as a background task before anything else." ;;
+  *) advice="No listener is running. Run unbounded sparrow await as a background task before anything else." ;;
 esac
 
-advice="$advice Plain process exit alone does not start a Codex turn; current Sparrow detects CODEX_THREAD_ID and supplies the queue bridge automatically."
+advice="$advice Plain process exit alone does not start a Codex turn; current Sparrow detects CODEX_THREAD_ID and supplies the queue bridge automatically. Ordinary timeouts do not queue turns; a terminal client-upgrade response does."
 
 # Hand-rolled JSON: keep the payload free of double quotes, backslashes and
 # newlines so it stays valid without an escaper.

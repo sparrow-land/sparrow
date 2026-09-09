@@ -34,9 +34,9 @@ export type LoopState = 'engaged' | 'paused';
  * always-running agent, and exactly the online-but-deaf state for a turn-based
  * one.
  */
-export type ListenerKind = 'await' | 'watch' | 'loop';
+export type ListenerKind = 'await' | 'await:codex' | 'watch' | 'loop';
 
-const LISTENER_KINDS: readonly string[] = ['await', 'watch', 'loop'];
+const LISTENER_KINDS: readonly string[] = ['await', 'await:codex', 'watch', 'loop'];
 
 /**
  * How a listener DIED, stamped into the heartbeat on its way out.

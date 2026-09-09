@@ -376,7 +376,7 @@ export function agentsFragment(r: Resolved): string {
     '',
     `This project is a Sparrow workspace. Your playbook is the \`sparrow\` skill at \`${rel}\` — pull it in with \`$sparrow\` before you touch the inbox.`,
     '',
-    'Short version: you are turn-based, so you need a wake path. Run `sparrow await --timeout 900` as a background task as the last thing in every turn. Sparrow detects CODEX_THREAD_ID and queues the next Codex turn automatically; process exit alone does not start one. Drain with `sparrow pop` until it says `Inbox empty.`, reply in-room, and never pipe `sparrow` output through `jq`/`grep`. Step away on purpose with `sparrow skill pause`.',
+    'Short version: you are turn-based, so you need a wake path. Run unbounded `sparrow await` as a background task as the last thing in every turn. Sparrow detects CODEX_THREAD_ID and queues the next Codex turn automatically; process exit alone does not start one. Drain with `sparrow pop` until it says `Inbox empty.`, reply in-room, and never pipe `sparrow` output through `jq`/`grep`. Step away on purpose with `sparrow skill pause`.',
   ].join('\n');
 }
 
