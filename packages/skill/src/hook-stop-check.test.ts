@@ -362,6 +362,57 @@ describe('sparrow-stop-check.sh', () => {
       expect(json.reason).toMatch(/was killed \(usually a session interrupt\)/);
     });
 
+    /* ---------------------------------------------------------------- *
+     * GENERATION-TAGGED STAMPS. Arming `sparrow await` supersedes the
+     * previous listener (newest wins), and that superseded process can be
+     * killed minutes later — its `killed:` stamp then describes a corpse
+     * while a healthy successor is listening. So a stamp may name the
+     * generation that wrote it, and this hook believes it only while that
+     * generation is the live one in `await-owner.json`.
+     * ---------------------------------------------------------------- */
+    const writeOwner = (nonce: string): void =>
+      fs.writeFileSync(
+        path.join(stateDir, 'await-owner.json'),
+        `${JSON.stringify({ version: 1, nonce, pid: 4242, startedAt: '2026-09-09T00:00:00.000Z', kind: 'await' })}\n`,
+      );
+
+    it('judges a tagged stamp that names the LIVE generation exactly as before', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'killed:SIGTERM 4f2c9a01bb33cd10');
+      writeOwner('4f2c9a01bb33cd10');
+      const r = runHook();
+      const json = JSON.parse(r.stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toMatch(/was killed/);
+      expect(json.reason).toContain('SIGTERM'); // and the nonce never leaks in
+      expect(json.reason).not.toContain('4f2c9a01bb33cd10');
+    });
+
+    it('IGNORES a stamp from a superseded generation (a successor is listening)', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'killed:SIGTERM 4f2c9a01bb33cd10');
+      writeOwner('b0b0b0b0b0b0b0b0'); // a newer listener owns the state dir
+      const r = runHook();
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe(''); // unjudgeable, not "dead"
+    });
+
+    it('judges an UNTAGGED stamp as before, whatever the record says', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'killed:SIGTERM'); // watch/loop, or a pre-0.1.20 CLI
+      writeOwner('b0b0b0b0b0b0b0b0');
+      expect(JSON.parse(runHook().stdout).decision).toBe('block');
+    });
+
+    it('judges a tagged stamp as before when there is no owner record at all', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'killed:SIGTERM 4f2c9a01bb33cd10');
+      const r = runHook();
+      const json = JSON.parse(r.stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('SIGTERM');
+    });
+
     it('enriches the killed block with the unread count', () => {
       writeLoopState('engaged');
       writeHeartbeat(2, 'killed:SIGTERM');

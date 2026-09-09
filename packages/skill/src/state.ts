@@ -56,10 +56,18 @@ const DEAD_REASONS: readonly string[] = ['killed', 'stopped'];
  * What the heartbeat file currently claims: either a live listener kind, or a
  * terminal stamp with the signal that caused it (`{ state: 'killed', signal:
  * 'SIGTERM' }`). `signal` is absent when the stamp names none.
+ *
+ * `generation` is the `await` GENERATION nonce the stamp was written by, when
+ * the writer named one (`killed:SIGTERM 4f2c…`). It is what lets a reader throw
+ * away a corpse's opinion about a listener that has since been REPLACED: a
+ * superseded `await` can still be killed minutes later, and without the tag its
+ * stamp would report the live successor as dead. A stamp with no generation
+ * (`watch`, `loop`, or any pre-0.1.20 CLI) is judged exactly as before.
  */
 export interface HeartbeatState {
   state: ListenerKind | DeadReason;
   signal?: string;
+  generation?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -248,12 +256,21 @@ export function markHeartbeatDead(
   stateDir: string,
   reason: DeadReason,
   signal?: string,
+  /**
+   * The writer's `await` generation nonce, appended as a SECOND token
+   * (`killed:SIGTERM 4f2c…`). The first token is unchanged, so every existing
+   * reader still parses the stamp; a reader that understands the tag discards
+   * the stamp when it does not name the live generation (see
+   * `apps/cli/src/await-owner.ts`).
+   */
+  generation?: string,
   now: number = Date.now(),
 ): void {
   try {
     fs.mkdirSync(stateDir, { recursive: true });
     const file = heartbeatPath(stateDir);
-    fs.writeFileSync(file, signal ? `${reason}:${signal}\n` : `${reason}\n`);
+    const word = signal ? `${reason}:${signal}` : reason;
+    fs.writeFileSync(file, generation ? `${word} ${generation}\n` : `${word}\n`);
     try {
       const when = new Date(now);
       fs.utimesSync(file, when, when);
@@ -277,11 +294,17 @@ export function markHeartbeatDead(
 export function readHeartbeatState(stateDir: string): HeartbeatState | undefined {
   try {
     const raw = fs.readFileSync(heartbeatPath(stateDir), 'utf8').trim();
-    if (LISTENER_KINDS.includes(raw)) return { state: raw as ListenerKind };
-    const [word, ...rest] = raw.split(':');
+    // `<stamp> [generation]` — the generation tag is an optional second token.
+    const [head = '', generation] = raw.split(/\s+/).filter(Boolean);
+    if (LISTENER_KINDS.includes(head)) return { state: head as ListenerKind };
+    const [word, ...rest] = head.split(':');
     if (word !== undefined && DEAD_REASONS.includes(word)) {
       const signal = rest.join(':').trim();
-      return signal ? { state: word as DeadReason, signal } : { state: word as DeadReason };
+      return {
+        state: word as DeadReason,
+        ...(signal ? { signal } : {}),
+        ...(generation ? { generation } : {}),
+      };
     }
     return undefined;
   } catch {

@@ -385,19 +385,23 @@ function armListenerSignals(
   env: Env,
   onInterrupt: () => void,
   /**
-   * Last-moment veto on the stamp itself. `await` passes its generation check
-   * here: a signal delivered to a SUPERSEDED listener must not write over the
-   * heartbeat its successor now owns (a delayed kill of yesterday's listener
-   * would otherwise report the live one as dead). Exit codes are unchanged.
+   * Vetoes AND tags the stamp — `await` passes its generation here.
+   *
+   * `false` writes nothing: a signal delivered to a listener that has already
+   * been SUPERSEDED must not mark its successor's heartbeat dead. A string
+   * tags the stamp with that generation nonce, so even a stamp written in the
+   * instant a successor publishes can be discarded on the read side. Omitted
+   * (`watch`/`loop`) means "stamp as before". Exit codes are unchanged.
    */
-  canStamp?: () => boolean,
+  stampAs?: () => false | string | undefined,
 ): () => void {
   let fired = false;
   const stamp = (reason: 'killed' | 'stopped', signal: string): boolean => {
     if (fired) return false;
     fired = true;
     try {
-      if (canStamp === undefined || canStamp()) markHeartbeatDead(env, reason, signal);
+      const tag = stampAs?.();
+      if (tag !== false) markHeartbeatDead(env, reason, signal, typeof tag === 'string' ? tag : undefined);
     } catch {
       /* best-effort: never throw on the way out */
     }
@@ -3944,7 +3948,14 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       try {
         await queueCodexAwaitWake(codexThread, env, io, reason);
       } catch (e) {
-        markHeartbeatDead(env, 'killed', 'CODEX_QUEUE');
+        // The queue call was AWAITED, so a newer generation can have published
+        // while it was in flight. Re-check before stamping: a superseded
+        // listener must never mark the successor's heartbeat dead, and its
+        // "no turn was queued" diagnostic is stale news — the successor queues
+        // for whatever is still waiting. (The stamp is generation-tagged too,
+        // so even a stamp written inside that window is discarded by readers.)
+        if (!owned()) return;
+        markHeartbeatDead(env, 'killed', 'CODEX_QUEUE', generation.nonce());
         const consequence =
           reason === 'upgrade'
             ? 'the required upgrade remains pending'
@@ -4158,6 +4169,12 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       if (isUpgradeRequired(e)) {
         generation.publish();
         await queueCodexWake('upgrade');
+        // Superseded while reporting the floor: stand down silently rather than
+        // exiting 1 over an upgrade the successor now owns.
+        if (!owned()) {
+          reportSuperseded();
+          return;
+        }
       }
       throw e;
     }
@@ -4185,12 +4202,24 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const disarmSignals = armListenerSignals(
       env,
       () => controller.abort(),
-      () => generation.published() && owned(),
+      () => (generation.published() && owned() ? generation.nonce() : false),
     );
     let terminalError: unknown;
     let upgradeWake: Promise<void> | undefined;
     const terminateForUpgrade = (e: unknown): boolean => {
       if (!isUpgradeRequired(e)) return false;
+      // A 426 is a HAND-OFF, exactly like the preflight one: it queues a repair
+      // turn and reports the floor. So a candidate that meets the floor on its
+      // very first stream open claims the state dir FIRST — publish-late, never
+      // publish-never — and only then acts.
+      generation.publish();
+      // …unless it lost: a superseded listener has no upgrade to demand and no
+      // turn to queue. It stands down silently (exit 4); the successor meets the
+      // same floor and reports it.
+      if (!owned()) {
+        controller.abort();
+        return true;
+      }
       if (terminalError === undefined) {
         terminalError = e;
         upgradeWake = queueCodexWake('upgrade');
@@ -4328,6 +4357,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           // listener that has been superseded stays superseded.
           const first = !generation.published();
           generation.publish();
+          // A newer candidate can publish in the gap between that write and
+          // this touch, so the touch is a checkpoint like any other: a listener
+          // that lost the race writes nothing and stands down instead.
+          if (first && !owned()) {
+            onOpen();
+            return;
+          }
           if (first) touchHeartbeat(env, awaitHeartbeatKind, true);
           onOpen();
         },
@@ -4404,7 +4440,17 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       });
       if (result.reason === 'error') throw result.error;
     } catch (e) {
-      if (terminateForUpgrade(e)) await upgradeWake;
+      if (terminateForUpgrade(e)) {
+        await upgradeWake;
+        // Superseded while the floor was being handled: stand down silently.
+        // The successor meets the same 426 and reports it — this listener
+        // exiting 1 would demand an upgrade on behalf of a listener that is
+        // no longer anyone's wake path.
+        if (!owned()) {
+          reportSuperseded();
+          return;
+        }
+      }
       throw e;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
@@ -4417,7 +4463,15 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     // wake that had already been decided still wins over the timeout.
     await pending;
     await upgradeWake;
-    if (terminalError !== undefined) throw terminalError;
+    if (terminalError !== undefined) {
+      // Superseded while the 426 was being handled: silent exit 4 wins — the
+      // successor meets the same floor and reports it.
+      if (!owned()) {
+        reportSuperseded();
+        return;
+      }
+      throw terminalError;
+    }
     if (emitted) {
       // exit 0 — the wake line is already on stdout; cover the turn it starts.
       await markTurn();

@@ -15,6 +15,7 @@ import {
 } from '@sparrow/common-types';
 import { clientBuildVersion } from '@sparrow/client';
 import { PassThrough, Writable } from 'node:stream';
+import { __setAwaitPublishHookForTests } from './await-owner.js';
 import {
   runCli,
   loadUndici,
@@ -3313,6 +3314,32 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     expect(ownerRecord().version).toBe(1);
   });
 
+  it('a candidate that loses between publishing and its first heartbeat touch writes nothing', async () => {
+    // The one gap no ordinary test can reach: a newer generation publishing
+    // between this listener's own record write and the heartbeat touch that
+    // follows it. The touch is a checkpoint like any other, so the loser writes
+    // nothing at all and stands down.
+    await awaitFixture('awtown14');
+    const hbFile = path.join(stateDir, 'heartbeat');
+    fs.writeFileSync(hbFile, 'watch\n'); // a sentinel the loser must not touch
+    __setAwaitPublishHookForTests(() =>
+      fs.writeFileSync(
+        ownerFile(),
+        `${JSON.stringify({ version: 1, nonce: '1111222233334444', pid: 999999, startedAt: new Date().toISOString(), kind: 'await' })}\n`,
+      ),
+    );
+    try {
+      const cap = capture();
+      expect(await runCli(['await', '--timeout', '15'], env, cap.io)).toBe(4);
+      expect(cap.out()).toBe('');
+      expect(cap.err()).toContain('superseded by a newer listener');
+      expect(fs.readFileSync(hbFile, 'utf8')).toBe('watch\n');
+      expect(ownerRecord().nonce).toBe('1111222233334444');
+    } finally {
+      __setAwaitPublishHookForTests(undefined);
+    }
+  });
+
   it('watch --exit-on-item takes the same generation (one implementation)', async () => {
     const { owner, roomId, agentId } = await awaitFixture('awtown13');
     const a = capture();
@@ -4854,6 +4881,197 @@ describe('sparrow CLI — client versioning', () => {
       expect(code).toBe(1);
       expect(calls).toHaveLength(1);
       expect(calls[0]).toEqual(['thread-check', expect.stringContaining('sparrow upgrade')]);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  /* ---------------------------------------------------------------- *
+   * A LOSING GENERATION MUST STAY SILENT EVEN ON THE FAILURE PATHS.
+   * Both of these bit at review: the Codex-queue failure stamp and the
+   * terminal `426` run AFTER an await, so a newer listener can have taken
+   * the state dir in the meantime — and a superseded listener that stamps
+   * `killed:` or exits 1 with an upgrade demand is reporting the LIVE
+   * listener as dead.
+   * ---------------------------------------------------------------- */
+
+  /**
+   * PUBLISH-LATE, NOT PUBLISH-NEVER. A `426` on the very first stream open is a
+   * HAND-OFF like the preflight one — it queues a repair turn and reports the
+   * floor — so the candidate must claim the state dir before doing either.
+   * Otherwise an unpublished candidate queues an upgrade wake beside a healthy
+   * owner that will queue its own: two turns for one floor.
+   */
+  it('await: an initial-SSE 426 publishes the generation, then queues exactly one upgrade wake', async () => {
+    const ownerFile = path.join(stateDir, 'await-owner.json');
+    fs.writeFileSync(
+      ownerFile,
+      `${JSON.stringify({ version: 1, nonce: 'aaaabbbbccccdddd', pid: 999999, startedAt: new Date().toISOString(), kind: 'await' })}\n`,
+    );
+    const stub = await listenVersionStub((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/inbox')) {
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ items: [], nextCursor: null }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        req.resume();
+        res.writeHead(426, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'client_upgrade_required', message: 'upgrade required' } }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => {
+        calls.push([threadId, message]);
+      };
+      const code = await runCli(
+        ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub', CODEX_THREAD_ID: 'thread-initial' },
+        cap.io,
+      );
+      expect(code).toBe(1); // the floor is real and terminal
+      expect(calls).toHaveLength(1);
+      expect(calls[0]![1]).toContain('sparrow upgrade');
+      // It acted, so it owns the state dir: the record names THIS process now.
+      const rec = JSON.parse(fs.readFileSync(ownerFile, 'utf8'));
+      expect(rec.pid).toBe(process.pid);
+      expect(rec.nonce).not.toBe('aaaabbbbccccdddd');
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it('await: an initial-SSE 426 that LOSES the publish race queues nothing and exits 4', async () => {
+    const ownerFile = path.join(stateDir, 'await-owner.json');
+    const stub = await listenVersionStub((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/inbox')) {
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ items: [], nextCursor: null }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        req.resume();
+        res.writeHead(426, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'client_upgrade_required', message: 'upgrade required' } }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    // An even newer candidate publishes in the gap between this one's write and
+    // the ownership check that guards the hand-off.
+    __setAwaitPublishHookForTests(() =>
+      fs.writeFileSync(
+        ownerFile,
+        `${JSON.stringify({ version: 1, nonce: 'eeeeffff00001111', pid: 999999, startedAt: new Date().toISOString(), kind: 'await' })}\n`,
+      ),
+    );
+    try {
+      const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => {
+        calls.push([threadId, message]);
+      };
+      const code = await runCli(
+        ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub', CODEX_THREAD_ID: 'thread-lost' },
+        cap.io,
+      );
+      expect(code).toBe(4); // not 1: the successor owns the floor and the report
+      expect(calls).toEqual([]);
+      expect(cap.out()).toBe('');
+      expect(cap.err()).toContain('superseded by a newer listener');
+    } finally {
+      __setAwaitPublishHookForTests(undefined);
+      await stub.close();
+    }
+  });
+
+  it("await: a delayed queue failure after takeover does not stamp the successor's heartbeat", async () => {
+    const stub = await gate426();
+    const ownerFile = path.join(stateDir, 'await-owner.json');
+    const hbFile = path.join(stateDir, 'heartbeat');
+    try {
+      fs.writeFileSync(hbFile, 'await\n'); // the successor's healthy mark
+      const cap = capture();
+      cap.io.notifyCodex = async () => {
+        // A newer listener publishes WHILE this queue call is in flight…
+        fs.writeFileSync(
+          ownerFile,
+          `${JSON.stringify({ version: 1, nonce: 'b0b0b0b0b0b0b0b0', pid: 999999, startedAt: new Date().toISOString(), kind: 'await:codex' })}\n`,
+        );
+        throw new Error('codex is gone'); // …and only THEN does the queue fail
+      };
+      const code = await runCli(
+        ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub', CODEX_THREAD_ID: 'thread-late' },
+        cap.io,
+      );
+      expect(code).toBe(4); // stood down; the upgrade is the successor's to report
+      expect(cap.out()).toBe('');
+      expect(fs.readFileSync(hbFile, 'utf8').trim()).toBe('await'); // never killed:CODEX_QUEUE
+      expect(cap.err()).not.toContain('no Codex turn was queued'); // stale news
+      expect(cap.err()).toContain('superseded by a newer listener');
+      expect(JSON.parse(fs.readFileSync(ownerFile, 'utf8')).nonce).toBe('b0b0b0b0b0b0b0b0');
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it('await: superseded then a 426 exits 4, not 1 — the successor owns the floor', async () => {
+    const ownerFile = path.join(stateDir, 'await-owner.json');
+    const hbFile = path.join(stateDir, 'heartbeat');
+    let inboxReads = 0;
+    const stub = await listenVersionStub((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/inbox')) {
+        inboxReads += 1;
+        req.resume();
+        if (inboxReads === 1) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ items: [], nextCursor: null }));
+        } else {
+          // The state dir changes hands in the same instant the floor appears.
+          fs.writeFileSync(
+            ownerFile,
+            `${JSON.stringify({ version: 1, nonce: 'c0ffeec0ffeec0ff', pid: 999999, startedAt: new Date().toISOString(), kind: 'await' })}\n`,
+          );
+          res.writeHead(426, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 'client_upgrade_required', message: 'upgrade required' } }));
+        }
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        res.writeHead(200, VERSION_SSE_HEAD);
+        res.write(': open\n\n');
+        setTimeout(() => res.write('event: message.new\ndata: {"id":1}\n\n'), 25);
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => {
+        calls.push([threadId, message]);
+      };
+      const code = await runCli(
+        ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub', CODEX_THREAD_ID: 'thread-floor' },
+        cap.io,
+      );
+      expect(code).toBe(4); // NOT 1: this listener has no upgrade to demand
+      expect(cap.out()).toBe('');
+      expect(calls).toEqual([]); // and no repair turn — the successor queues it
+      expect(cap.err()).toContain('superseded by a newer listener');
+      expect(fs.readFileSync(hbFile, 'utf8')).not.toMatch(/killed|stopped/);
     } finally {
       await stub.close();
     }

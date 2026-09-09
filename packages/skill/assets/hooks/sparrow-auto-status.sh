@@ -108,12 +108,36 @@ fmt_age() {
 #
 # Deliberately silent for a fresh `watch`/`loop`/unknown heartbeat: something IS
 # listening, and judging WHICH is the Stop hook's job, not a prompt-time nag.
+# Read the heartbeat's two tokens: the stamp/kind, and the `await` GENERATION
+# nonce a dead stamp may carry (`killed:SIGTERM 4f2c...`).
+#
+# WHY THE NONCE MATTERS: arming `sparrow await` supersedes the previous listener
+# (newest wins, see the CLI's await-owner.ts), and the superseded process can
+# still be killed minutes later. Its `killed:` stamp would then describe a
+# corpse while a healthy successor is listening. So a tagged stamp counts only
+# while it names the LIVE generation in <state dir>/await-owner.json; otherwise
+# the heartbeat is treated as unjudgeable. An untagged stamp (watch/loop, or any
+# older CLI) is judged exactly as before, as is a missing owner record.
+sparrow_heartbeat_read() {
+  sparrow_hb_raw=$(head -c 96 "$HEARTBEAT_FILE" 2>/dev/null | tr '\t\r\n' '   ' || echo "")
+  sparrow_hb_word=$(printf '%s' "$sparrow_hb_raw" | sed -n 's/^ *\([^ ][^ ]*\).*$/\1/p')
+  sparrow_hb_gen=$(printf '%s' "$sparrow_hb_raw" | sed -n 's/^ *[^ ][^ ]*  *\([A-Za-z0-9][A-Za-z0-9]*\).*$/\1/p')
+  if [ -n "$sparrow_hb_gen" ]; then
+    sparrow_live_gen=$(sed -n 's/.*"nonce"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9][A-Za-z0-9]*\)".*/\1/p' \
+      "$STATE_DIR/await-owner.json" 2>/dev/null | head -n 1)
+    if [ -n "$sparrow_live_gen" ] && [ "$sparrow_hb_gen" != "$sparrow_live_gen" ]; then
+      sparrow_hb_word=""   # a superseded generation's stamp: no judgement
+    fi
+  fi
+  printf '%s' "$sparrow_hb_word"
+}
+
 listener_nudge() {
   cause=""
   if [ ! -f "$HEARTBEAT_FILE" ]; then
     cause="is not running (no heartbeat at all)"
   else
-    content=$(head -c 64 "$HEARTBEAT_FILE" 2>/dev/null | tr -d ' \t\r\n' || echo "")
+    content=$(sparrow_heartbeat_read)
     signal=""
     case "$content" in
       *:*) signal=$(printf '%s' "${content#*:}" | tr -cd 'A-Za-z0-9_') ;;

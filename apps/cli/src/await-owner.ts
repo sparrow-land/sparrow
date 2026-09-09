@@ -25,8 +25,17 @@
  * cursor, no presence, no Codex queue).
  *
  * FAIL OPEN. Every read/write here is best-effort: an unreadable or missing
- * record reads as "still mine". A broken state dir must never turn a working
- * listener into a deaf one.
+ * record reads as "still mine", and a record this process could not WRITE
+ * leaves it `unfenced` — running exactly as pre-0.1.20 did, never standing
+ * down — rather than silently pretending to own the state dir.
+ *
+ * CROSS-PROCESS TOCTOU on the dead stamp is resolved on the READ side: stamps
+ * are generation-tagged (`killed:SIGTERM <nonce>`) and hooks discard a stamp
+ * whose nonce is not the live generation's. Every check-then-write fence here
+ * still has a window — a newer generation can publish between a checkpoint and
+ * the write it guards — but the dead stamp was the one write that could
+ * persist false state (a corpse reporting the live listener as dead), and the
+ * tag makes such a stamp unjudgeable rather than believed.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -45,6 +54,26 @@ export interface AwaitOwnerRecord {
   startedAt: string;
   kind: string;
   profile?: string;
+}
+
+/**
+ * TEST-ONLY seam: run immediately after a generation's record is written,
+ * inside {@link AwaitGeneration.publish}. It exists to exercise the ONE gap no
+ * in-process test can otherwise reach — a newer generation publishing between
+ * this listener's write and the check that guards its next write (see "Known
+ * residual" above). Mirrors `@sparrow/skill`'s `__resetHeartbeatThrottle`;
+ * nothing in production ever sets it.
+ */
+let afterPublishHook: (() => void) | undefined;
+export function __setAwaitPublishHookForTests(fn: (() => void) | undefined): void {
+  afterPublishHook = fn;
+}
+function runPublishHook(): void {
+  try {
+    afterPublishHook?.();
+  } catch {
+    /* a test seam must never break the listener */
+  }
 }
 
 /** `<state dir>/await-owner.json` — the same state dir the heartbeat uses. */
@@ -70,17 +99,33 @@ export function readAwaitOwner(env: Env): AwaitOwnerRecord | undefined {
   }
 }
 
+/**
+ * How a publish landed.
+ *
+ * `published` — the record is on disk and this generation is FENCED: it can be
+ * superseded, and it will stand down when it is.
+ * `unfenced` — the record could not be written (an unwritable or vanished state
+ * dir). The listener runs anyway, exactly as pre-0.1.20 did, and never stands
+ * down: with no record of its own it cannot tell a successor from a stranger,
+ * and being deaf is strictly worse than one duplicate wake. It is a fallback,
+ * never ownership.
+ */
+export type AwaitPublication = 'published' | 'unfenced';
+
 /** The one listener generation this process is (or is about to become). */
 export interface AwaitGeneration {
   /** This generation's nonce — undefined until {@link publish}. */
   nonce(): string | undefined;
-  /** Has this candidate claimed the state dir yet? */
+  /** Has this candidate gone live (fenced OR unfenced)? */
   published(): boolean;
+  /** Is this generation actually FENCED — i.e. did its record reach disk? */
+  fenced(): boolean;
   /**
    * Claim the state dir for this listener: write the record, newest wins.
-   * Idempotent — re-publishing keeps the same nonce (and refreshes nothing).
+   * Idempotent — re-publishing keeps the same nonce and re-writes nothing, so
+   * the first call's outcome is the one that stands.
    */
-  publish(): void;
+  publish(): AwaitPublication;
   /**
    * The CHECKPOINT. `undefined` while this listener still owns the state dir
    * (including before it has published, when it owns nothing and does nothing);
@@ -108,14 +153,19 @@ export function prepareAwaitGeneration(opts: {
   const { env, kind, profile } = opts;
   const nonce = crypto.randomBytes(8).toString('hex');
   let live = false;
+  /** FALSE for an `unfenced` generation — one whose record never reached disk. */
+  let onDisk = false;
   /** Sticky: once superseded, a listener never un-supersedes itself. */
   let lost: string | undefined;
 
   return {
-    nonce: () => (live ? nonce : undefined),
+    // Only a FENCED generation names itself: an unfenced listener tags nothing,
+    // so its stamps are judged exactly as a pre-0.1.20 listener's are.
+    nonce: () => (live && onDisk ? nonce : undefined),
     published: () => live,
-    publish(): void {
-      if (live) return;
+    fenced: () => onDisk,
+    publish(): AwaitPublication {
+      if (live) return onDisk ? 'published' : 'unfenced';
       const record: AwaitOwnerRecord = {
         version: 1,
         nonce,
@@ -130,14 +180,21 @@ export function prepareAwaitGeneration(opts: {
         const tmp = `${file}.${process.pid}.${nonce}.tmp`;
         fs.writeFileSync(tmp, `${JSON.stringify(record)}\n`);
         fs.renameSync(tmp, file); // atomic: no reader ever sees half a record
+        onDisk = true;
       } catch {
         /* best-effort: an unwritable state dir must not stop the listener */
       }
       live = true;
+      runPublishHook();
+      return onDisk ? 'published' : 'unfenced';
     },
     supersededBy(): string | undefined {
       if (lost !== undefined) return lost;
       if (!live) return undefined; // a candidate owns nothing and touches nothing
+      // UNFENCED: no record of our own to compare against, so nothing can be
+      // proven — keep listening (pre-0.1.20 behaviour) rather than stand down
+      // for a record that may not be about us at all.
+      if (!onDisk) return undefined;
       const current = readAwaitOwner(env);
       // No record (wiped state dir) or an unreadable one: fail open and keep
       // listening — being deaf is strictly worse than one duplicate wake.

@@ -57,6 +57,34 @@ describe('markHeartbeatDead', () => {
     expect(readHeartbeatState(stateDir)).toEqual({ state: 'killed' });
   });
 
+  /**
+   * A stamp may name the `await` GENERATION that wrote it (see the CLI's
+   * await-owner.ts): a superseded listener can be killed long after a
+   * successor took over, and without the tag its `killed:` would describe the
+   * live one. The FIRST token is deliberately unchanged, so every existing
+   * reader still parses the stamp.
+   */
+  it('appends the writer generation as a second token, leaving the first intact', () => {
+    markHeartbeatDead(stateDir, 'killed', 'SIGTERM', '4f2c9a01bb33cd10');
+    expect(content()).toBe('killed:SIGTERM 4f2c9a01bb33cd10');
+    expect(readHeartbeatState(stateDir)).toEqual({
+      state: 'killed',
+      signal: 'SIGTERM',
+      generation: '4f2c9a01bb33cd10',
+    });
+  });
+
+  it('tags a signal-less stamp too, and parses back without one', () => {
+    markHeartbeatDead(stateDir, 'stopped', undefined, 'b0b0b0b0b0b0b0b0');
+    expect(content()).toBe('stopped b0b0b0b0b0b0b0b0');
+    expect(readHeartbeatState(stateDir)).toEqual({
+      state: 'stopped',
+      generation: 'b0b0b0b0b0b0b0b0',
+    });
+    markHeartbeatDead(stateDir, 'stopped', 'SIGINT');
+    expect(readHeartbeatState(stateDir)).toEqual({ state: 'stopped', signal: 'SIGINT' });
+  });
+
   it('BYPASSES the touch throttle — a dying listener gets exactly one chance', () => {
     touchHeartbeat(stateDir, { kind: 'await', force: true });
     expect(content()).toBe('await');

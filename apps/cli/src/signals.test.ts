@@ -163,6 +163,22 @@ const heartbeat = (stateDir: string): string => {
   return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim() : '<absent>';
 };
 
+/**
+ * An `await` stamp carries a SECOND token: the generation nonce that wrote it,
+ * so a hook can discard a stamp left by a listener that was superseded before
+ * the signal landed. This asserts the whole stamp — first token unchanged (so
+ * every existing reader still parses it), tag equal to the live generation.
+ */
+const expectStamp = (stateDir: string, word: string): void => {
+  const [stamp, tag, ...extra] = heartbeat(stateDir).split(/\s+/);
+  expect(stamp).toBe(word);
+  expect(extra).toEqual([]);
+  const record = JSON.parse(
+    fs.readFileSync(path.join(stateDir, 'await-owner.json'), 'utf8'),
+  ) as { nonce: string };
+  expect(tag).toBe(record.nonce);
+};
+
 /* --------------------------------- tests --------------------------------- */
 
 describe('sparrow await — termination stamps the heartbeat', () => {
@@ -173,7 +189,7 @@ describe('sparrow await — termination stamps the heartbeat', () => {
     // 128 + 15, from OUR handler — not a default kill (which reports signal, not code).
     expect(code).toBe(143);
     expect(signal).toBeNull();
-    expect(heartbeat(l.stateDir)).toBe('killed:SIGTERM');
+    expectStamp(l.stateDir, 'killed:SIGTERM');
     // No wake line: there is no agent left to read one.
     expect(l.stdout().trim()).toBe('');
   }, 40_000);
@@ -183,7 +199,7 @@ describe('sparrow await — termination stamps the heartbeat', () => {
     l.kill('SIGHUP');
     const { code } = await l.ended;
     expect(code).toBe(129);
-    expect(heartbeat(l.stateDir)).toBe('killed:SIGHUP');
+    expectStamp(l.stateDir, 'killed:SIGHUP');
     expect(l.stdout().trim()).toBe('');
   }, 40_000);
 
@@ -192,7 +208,7 @@ describe('sparrow await — termination stamps the heartbeat', () => {
     l.kill('SIGINT');
     const { code } = await l.ended;
     expect(code).toBe(0); // unchanged behaviour: interrupted, silently
-    expect(heartbeat(l.stateDir)).toBe('stopped:SIGINT');
+    expectStamp(l.stateDir, 'stopped:SIGINT');
     expect(l.stdout().trim()).toBe('');
   }, 40_000);
 

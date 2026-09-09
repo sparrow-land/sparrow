@@ -422,6 +422,28 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     expect(lines[0]).toContain('sparrow skill pause');
   });
 
+  it('ignores a stamp left by a SUPERSEDED generation, and names a live one', () => {
+    writeLoopState('engaged');
+    const owner = (nonce: string): void =>
+      fs.writeFileSync(
+        path.join(stateDir, 'await-owner.json'),
+        `${JSON.stringify({ version: 1, nonce, pid: 4242, startedAt: '2026-09-09T00:00:00.000Z', kind: 'await' })}\n`,
+      );
+
+    // The stamp names the generation that died; a NEWER one owns the state dir,
+    // so this corpse says nothing about whether the agent can be woken.
+    writeHeartbeat('killed:SIGTERM 4f2c9a01bb33cd10', 3);
+    owner('b0b0b0b0b0b0b0b0');
+    expect(runHook('prompt', '{"prompt":"go"}').stdout.trim()).toBe('');
+
+    // Same stamp, and it IS the live generation: the nudge speaks as before.
+    owner('4f2c9a01bb33cd10');
+    const line = runHook('prompt', '{"prompt":"go"}').stdout.trim().split('\n')[0]!;
+    expect(line).toMatch(/^Sparrow: your listener /);
+    expect(line).toMatch(/was killed \(SIGTERM -- usually a session interrupt\)/);
+    expect(line).not.toContain('4f2c9a01bb33cd10');
+  });
+
   it('prescribes an unbounded await under Codex', () => {
     writeLoopState('engaged');
     writeHeartbeat('killed:SIGTERM');

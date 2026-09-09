@@ -33,9 +33,18 @@ versions that release shipped with.
   exits **4** having done nothing at all: no wake line, no queued turn, no
   cursor write, and no heartbeat stamp of any kind, so the successor's health
   is never overwritten. A candidate publishes only once it has real credentials
-  and has either opened the stream or reached the preflight hand-off, so a
-  re-arm that dies on a bad token or an unreachable server can never evict a
-  healthy listener. A crashed owner needs no cleanup — the next arm simply
+  and has either opened the stream or reached a hand-off (work already waiting,
+  or a terminal `426` on the first inbox read or the first stream open — both
+  queue a repair turn, so both claim the state dir first), which means a re-arm
+  that dies on a bad token or an unreachable server can never evict a healthy
+  listener. Heartbeat DEAD stamps written by `await` now carry the writer's
+  generation as a second token (`killed:SIGTERM 4f2c…`; the first token is
+  unchanged, so every existing reader still parses it), and the Stop,
+  UserPromptSubmit and SessionStart hooks discard a stamp whose generation is
+  not the live one in `await-owner.json` — a listener killed long after it was
+  superseded can no longer report its successor as dead. An untagged stamp
+  (`watch`, `loop`, or an older CLI) and a missing record are judged exactly as
+  before. A crashed owner needs no cleanup — the next arm simply
   overwrites its record, and the record is never unlinked. `watch
   --exit-on-item` is the same primitive and takes the same generation.
   Exit codes: `0` work waiting, `2` `--timeout` elapsed, `4` superseded by a

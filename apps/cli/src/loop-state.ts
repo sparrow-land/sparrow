@@ -49,8 +49,16 @@ export function markHeartbeatDead(
   env: Env = process.env,
   reason: DeadReason = 'killed',
   signal?: string,
+  /**
+   * The `await` generation nonce this stamp belongs to (see
+   * `await-owner.ts`), appended as a second token so a reader can discard a
+   * stamp written by a listener that has since been superseded. `watch`/`loop`
+   * pass nothing: they have no generation, and their stamps are judged as
+   * before.
+   */
+  generation?: string,
 ): void {
-  markHeartbeatDeadAt(resolveStateDir(env), reason, signal);
+  markHeartbeatDeadAt(resolveStateDir(env), reason, signal, generation);
 }
 
 /** Read the loop switch (`engaged` | `paused` | `undefined`). */
