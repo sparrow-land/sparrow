@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { InboxItem, Message } from '@sparrow/common-types';
-import { buildConversation, statusById, unreadCounts } from './conversation.js';
+import { appendOlder, buildConversation, mergeTail, statusById, unreadCounts } from './conversation.js';
 
 const SELF = 'agt_self';
 const A = 'agt_alice';
@@ -140,5 +140,134 @@ describe('statusById', () => {
       inItem({ id: 'msg_2', from: bob, kind: 'dm', createdAt: 't', status: 'received' }),
     ];
     expect(statusById(inbox)).toEqual({ msg_1: 'unread', msg_2: 'received' });
+  });
+});
+
+/**
+ * Reverse paging (the room opens on the newest page and walks backwards). The
+ * loaded set is the union of every page fetched so far; a REFETCHED tail must
+ * merge into it rather than replace it, or every older page the reader scrolled
+ * back for would vanish on the next reconcile.
+ */
+describe('appendOlder', () => {
+  const loaded: Message[] = [
+    msg({ id: 'm5', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:05:00Z' }),
+    msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:04:00Z' }),
+  ];
+
+  it('appends an older page BELOW the loaded history, still newest-first', () => {
+    const older: Message[] = [
+      msg({ id: 'm3', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:03:00Z' }),
+      msg({ id: 'm2', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:02:00Z' }),
+    ];
+    expect(appendOlder(loaded, older).map((m) => m.id)).toEqual(['m5', 'm4', 'm3', 'm2']);
+  });
+
+  it('de-dupes an overlapping page, keeping the already-loaded copy', () => {
+    const older: Message[] = [
+      msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', body: 'stale', createdAt: '2026-08-12T10:04:00Z' }),
+      msg({ id: 'm3', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:03:00Z' }),
+    ];
+    const out = appendOlder(loaded, older);
+    expect(out.map((m) => m.id)).toEqual(['m5', 'm4', 'm3']);
+    expect(out.find((m) => m.id === 'm4')!.body).toBe('yo');
+  });
+
+  it('never drops loaded history for an empty page', () => {
+    expect(appendOlder(loaded, []).map((m) => m.id)).toEqual(['m5', 'm4']);
+  });
+});
+
+describe('mergeTail', () => {
+  /** Two older pages the reader scrolled back for, plus the tail on top. */
+  const loaded: Message[] = [
+    msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:04:00Z' }),
+    msg({ id: 'm3', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:03:00Z' }),
+    msg({ id: 'm2', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:02:00Z' }),
+    msg({ id: 'm1', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:01:00Z' }),
+  ];
+
+  it('keeps older pages and folds in messages the tail brings', () => {
+    const tail: Message[] = [
+      msg({ id: 'm5', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:05:00Z' }),
+      msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:04:00Z' }),
+      msg({ id: 'm3', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:03:00Z' }),
+    ];
+    expect(mergeTail(loaded, tail).map((m) => m.id)).toEqual(['m5', 'm4', 'm3', 'm2', 'm1']);
+  });
+
+  it('prefers the TAIL copy of an overlapping message (it is the fresher one)', () => {
+    const tail: Message[] = [
+      msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', body: 'edited', createdAt: '2026-08-12T10:04:00Z' }),
+      msg({ id: 'm3', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:03:00Z' }),
+    ];
+    expect(mergeTail(loaded, tail).find((m) => m.id === 'm4')!.body).toBe('edited');
+  });
+
+  it('drops a loaded message the tail no longer carries INSIDE the tail window (clawed)', () => {
+    // m4 and m3 are inside the refetched window; the tail came back without m3,
+    // so it is gone (SPEC "Clawback" — history excludes clawed rows).
+    const tail: Message[] = [
+      msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:04:00Z' }),
+    ];
+    expect(mergeTail(loaded, tail).map((m) => m.id)).toEqual(['m4', 'm3', 'm2', 'm1']);
+  });
+
+  it('drops a message NEWER than the tail\'s oldest that the tail omits', () => {
+    const tail: Message[] = [
+      msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:04:00Z' }),
+      msg({ id: 'm2', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:02:00Z' }),
+    ];
+    // m3 sits strictly inside the window and is absent → gone. m1 is older than
+    // the window and must survive.
+    expect(mergeTail(loaded, tail).map((m) => m.id)).toEqual(['m4', 'm2', 'm1']);
+  });
+
+  it('keeps a message that merely TIES the tail\'s oldest timestamp', () => {
+    // Only `createdAt` is comparable here — a tie says nothing about which side
+    // of the page boundary the message fell on, so it is kept, not assumed dead.
+    const tied = msg({ id: 'm2b', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:02:00Z' });
+    const tail: Message[] = [
+      msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:04:00Z' }),
+      msg({ id: 'm3', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:03:00Z' }),
+      msg({ id: 'm2', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:02:00Z' }),
+    ];
+    expect(mergeTail([...loaded.slice(0, 3), tied, ...loaded.slice(3)], tail).map((m) => m.id)).toEqual([
+      'm4', 'm3', 'm2', 'm2b', 'm1',
+    ]);
+  });
+
+  it('is the WHOLE truth when the tail covers the whole room', () => {
+    // `nextBefore: null` on a tail listing means the page IS the room; anything
+    // else we hold is stale.
+    const tail: Message[] = [
+      msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:04:00Z' }),
+    ];
+    expect(mergeTail(loaded, tail, { tailIsWholeRoom: true }).map((m) => m.id)).toEqual(['m4']);
+  });
+
+  it('yields to a tail that does not TOUCH the loaded set', () => {
+    // A burst landed between the two listings: every message in the fresh tail
+    // is newer than everything we hold, so there is a hole between them that no
+    // cursor can fill. A transcript with an invisible gap in it is worse than a
+    // short one, so the tail wins outright and the reader pages back again.
+    const tail: Message[] = [
+      msg({ id: 'm9', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:09:00Z' }),
+      msg({ id: 'm8', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:08:00Z' }),
+    ];
+    expect(mergeTail(loaded, tail).map((m) => m.id)).toEqual(['m9', 'm8']);
+  });
+
+  it('orders the merged set newest-first by createdAt', () => {
+    const tail: Message[] = [
+      msg({ id: 'm6', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:06:00Z' }),
+      msg({ id: 'm5', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:05:00Z' }),
+      msg({ id: 'm4', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:04:00Z' }),
+      msg({ id: 'm3', from: alice, to: [me], kind: 'broadcast', createdAt: '2026-08-12T10:03:00Z' }),
+    ];
+    const out = mergeTail(loaded, tail);
+    for (let i = 1; i < out.length; i += 1) {
+      expect(out[i - 1]!.createdAt >= out[i]!.createdAt).toBe(true);
+    }
   });
 });

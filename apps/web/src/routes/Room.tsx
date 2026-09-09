@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Check, Mic, Reply, Settings } from 'lucide-react';
 import type {
@@ -16,6 +16,7 @@ import type {
   Room as RoomResource,
   Draft,
 } from '@sparrow/common-types';
+import { MAX_PAGE_LIMIT, MESSAGE_STATUS_IDS_MAX } from '@sparrow/common-types';
 import { ApiError } from '@sparrow/client';
 import { api } from '../lib/client.js';
 import { wire, orgPath, roomSettingsPath } from '../lib/ids.js';
@@ -23,7 +24,14 @@ import { useAuth } from '../lib/auth.js';
 import { useOrg } from '../lib/org.js';
 import { useWorkspace } from '../lib/workspace.js';
 import { useShell } from '../components/AppShell.js';
-import { buildConversation, statusById, unreadCounts, type ThreadItem } from '../lib/conversation.js';
+import {
+  appendOlder,
+  buildConversation,
+  mergeTail,
+  statusById,
+  unreadCounts,
+  type ThreadItem,
+} from '../lib/conversation.js';
 import { formatRelativeTime } from '../lib/time.js';
 import {
   hydrateStatuses,
@@ -60,8 +68,53 @@ import { stageFiles, fileToAttachmentInput, type PendingAttachment } from '../li
 import { registerHotkey } from '../lib/hotkeys.js';
 import { useDocumentTitle, pageTitle } from '../lib/title.js';
 
-// How many messages of room history the pane loads (SPEC caps `limit` at 200).
-const HISTORY_LIMIT = 100;
+/**
+ * How many messages of room history ONE listing carries. The pane opens on the
+ * newest page and walks backwards from there (`before`), so this is both the
+ * tail size on open and the size of every "load earlier" page — a room with
+ * years of conversation costs one small page to enter. `MESSAGES_LIST_MAX_LIMIT`
+ * (200, SPEC "Room history") is the hard ceiling the API would allow; a page is
+ * deliberately far below it.
+ */
+const HISTORY_PAGE = 50;
+
+/**
+ * The caller's OPEN delivery rows for the room. This is read STATE, never a
+ * content source, and it must cover everything the pane can render however many
+ * pages back the reader has walked — so it asks for the API's ceiling for this
+ * listing rather than a page's worth.
+ */
+const INBOX_LIMIT = MAX_PAGE_LIMIT;
+
+/**
+ * How close to the OLDEST edge of the pane counts as "the reader reached the
+ * top" — a page is fetched a little before the edge so the next batch is
+ * usually there by the time the scroll gets to it.
+ */
+const NEAR_OLDEST_PX = 200;
+
+/**
+ * Distance in px between the viewport and the OLDEST end of a `flex-col-reverse`
+ * message pane.
+ *
+ * Column-reverse inverts the scroll origin: in modern browsers the pane rests at
+ * `scrollTop === 0` showing the NEWEST message, and scrolling up towards older
+ * messages runs NEGATIVE, down to `-(scrollHeight - clientHeight)`. Older WebKit
+ * kept the conventional positive 0…max, with 0 at the top. Reading the raw
+ * number is therefore meaningless without the sign; this normalizes both to the
+ * one thing the pager cares about. With nothing to scroll (a short room — and
+ * every jsdom test, which has no layout at all) the oldest edge is by definition
+ * already on screen, which is `0`.
+ */
+export function distanceFromOldestEdge(el: {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+}): number {
+  const max = el.scrollHeight - el.clientHeight;
+  if (max <= 0) return 0;
+  return el.scrollTop <= 0 ? max + el.scrollTop : el.scrollTop;
+}
 
 // Wake/reconnect reconcile throttle: minimum gap between full reconciles for one
 // room, so tab focus-flapping (visibilitychange/focus/online firing in bursts)
@@ -112,6 +165,19 @@ export function Room() {
   // THE source of what the thread renders. Delivery rows are not a visibility
   // filter: a member who joined late has none, and used to see an empty room.
   const [history, setHistory] = useState<Message[]>([]);
+  /**
+   * The `before` cursor for the NEXT older page: the id of the oldest message
+   * loaded, while the room still has something before it. `null` means the
+   * beginning of the room is on screen and nothing further will ever be
+   * fetched — it is the listing's own `nextBefore`, carried forward.
+   */
+  const [olderCursor, setOlderCursor] = useState<string | null>(null);
+  const olderCursorRef = useRef<string | null>(null);
+  olderCursorRef.current = olderCursor;
+  // One page at a time: the pane fires a scroll event per frame, and without
+  // this guard reaching the top would launch a dozen identical listings.
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const loadingOlderRef = useRef(false);
   // The caller's OPEN delivery rows (unread + received) for this room. Never a
   // content source — only the read-state the thread renders and advances.
   const [inbox, setInbox] = useState<InboxItem[]>([]);
@@ -320,6 +386,51 @@ export function Room() {
   const selectedIdRef = useRef<string | 'all'>('all');
   selectedIdRef.current = selected;
 
+  /**
+   * Receipts for a screen of the caller's OWN messages, in ONE request each
+   * `MESSAGE_STATUS_IDS_MAX` ids (`GET /rooms/:id/messages/status?ids=`).
+   *
+   * This used to be a `getMessageStatus` per bubble: opening a room you had been
+   * talking in cost one request per own message, and every reconcile, arrival
+   * and send paid it again. The single-message route keeps exactly one caller —
+   * the `message.received`/`message.read` events, where one message genuinely is
+   * the subject.
+   *
+   * An id the response omits (clawed, gone, not visible) is NOT an error and not
+   * an absent receipt: whatever that bubble already knew stands. A failed lookup
+   * is benign for the same reason the per-message one was — no receipt is a
+   * cosmetic loss, and never a reason to move anyone out of the room.
+   */
+  const hydrateReceipts = useCallback(
+    async (ids: string[]) => {
+      if (ids.length === 0) return;
+      const chunks: string[][] = [];
+      for (let i = 0; i < ids.length; i += MESSAGE_STATUS_IDS_MAX) {
+        chunks.push(ids.slice(i, i + MESSAGE_STATUS_IDS_MAX));
+      }
+      const pages = await Promise.all(
+        chunks.map((chunk) =>
+          api
+            .listMessageStatuses(roomId, chunk)
+            .then((r) => r.items)
+            .catch((e: unknown) => {
+              handleBenignError(e);
+              return [];
+            }),
+        ),
+      );
+      const items = pages.flat();
+      if (items.length === 0) return;
+      // ONE state update for the whole screen, however many chunks it took.
+      setReceipts((cur) => {
+        const next = { ...cur };
+        for (const it of items) next[it.messageId] = it.status;
+        return next;
+      });
+    },
+    [roomId, handleBenignError],
+  );
+
   // Advance delivery state for what the pane is showing. Bodies no longer need
   // fetching — the history route already returned full Messages — so this is
   // purely the read/receipt half:
@@ -329,8 +440,14 @@ export function Room() {
   // A message the caller has NO delivery row for (everything sent before they
   // joined) is plain history: it is never read-marked, because listing history
   // is a peek (SPEC "Room history") and there is no delivery state to advance.
+  //
+  // `backfill: true` is the OLDER-PAGE mode: a page the reader scrolled back for
+  // is history being revealed, not delivery happening, so nothing in it may be
+  // marked read (that would advance a stranger's receipt because someone
+  // scrolled) and the inbox is not re-listed. Own messages still collect their
+  // receipt — the one thing an older bubble cannot render without asking.
   const hydrateThread = useCallback(
-    async (hist: Message[], inb: InboxItem[]) => {
+    async (hist: Message[], inb: InboxItem[], opts: { backfill?: boolean } = {}) => {
       const me = selfRef.current;
       if (!me) return;
       const open = statusById(inb);
@@ -342,6 +459,9 @@ export function Room() {
         status: open,
       });
       const jobs: Promise<void>[] = [];
+      // Own messages are collected, not fetched one by one — the whole screen's
+      // receipts come back in one request below.
+      const ownIds: string[] = [];
       for (const t of thread) {
         // A message pulled back is gone: asking the server about it is a
         // guaranteed 404, so don't.
@@ -351,6 +471,7 @@ export function Room() {
           // delivered but not engaged, and must be marked read so the sender's
           // receipt advances delivered → read. Treating `received` as "already
           // engaged" froze it forever.
+          if (opts.backfill) continue;
           if ((open[t.id] ?? 'read') === 'read') continue;
           // PER-MESSAGE, so a failure is narrow by construction: one message
           // being gone/forbidden says nothing about the room, and must never
@@ -362,20 +483,18 @@ export function Room() {
               .catch(handleBenignError),
           );
         } else {
-          jobs.push(
-            api
-              .getMessageStatus(roomId, t.id)
-              .then((s) => setReceipts((r) => ({ ...r, [t.id]: s })))
-              .catch(handleBenignError),
-          );
+          ownIds.push(t.id);
         }
       }
+      jobs.push(hydrateReceipts(ownIds));
       await Promise.all(jobs);
+      // A backfill marked nothing read, so there is no delivery state to restate.
+      if (opts.backfill) return;
       // Marking read changed statuses → refresh the inbox + report unread. This
       // one IS room-level: a 403/404 on the room's own inbox listing means the
       // room is gone or we're no longer in it.
       try {
-        const fresh = withoutClawed((await api.listInbox(roomId, { limit: HISTORY_LIMIT })).items);
+        const fresh = withoutClawed((await api.listInbox(roomId, { limit: INBOX_LIMIT })).items);
         inboxRef.current = fresh;
         setInbox(fresh);
         reportBroadcastUnread(roomId, unreadCounts(fresh)['all'] ?? 0);
@@ -383,10 +502,100 @@ export function Room() {
         handleRoomError(e);
       }
     },
-    [handleBenignError, handleRoomError, withoutClawed, isDm, roomId, reportBroadcastUnread],
+    [
+      handleBenignError,
+      handleRoomError,
+      hydrateReceipts,
+      withoutClawed,
+      isDm,
+      roomId,
+      reportBroadcastUnread,
+    ],
   );
   const hydrateRef = useRef(hydrateThread);
   hydrateRef.current = hydrateThread;
+
+  /**
+   * Fold a freshly-listed TAIL into the loaded history and hand back the result.
+   * Every refetch in this file goes through here — the wake/reconnect reconcile,
+   * the `message.new` re-list and the re-list after our own send. They all used
+   * to REPLACE `history` outright, which is exactly right for a pane that only
+   * ever holds one page and exactly wrong now: it would silently throw away
+   * every earlier page the reader scrolled back for.
+   *
+   * The cursor rides along. It keeps pointing at the OLDEST loaded message (a
+   * tail refetch reveals nothing older), unless the listing says the tail is the
+   * whole room, which settles it: there is nothing before this.
+   */
+  const mergeFreshTail = useCallback(
+    (hist: { items: Message[]; nextBefore: string | null }): Message[] => {
+      const wholeRoom = hist.nextBefore === null;
+      const merged = withoutClawed(
+        mergeTail(historyRef.current, hist.items, { tailIsWholeRoom: wholeRoom }),
+      );
+      setOlderCursor((cur) =>
+        wholeRoom || cur === null ? null : (merged[merged.length - 1]?.id ?? null),
+      );
+      return merged;
+    },
+    [withoutClawed],
+  );
+  const mergeFreshTailRef = useRef(mergeFreshTail);
+  mergeFreshTailRef.current = mergeFreshTail;
+
+  /**
+   * Fetch the page BEFORE the oldest message loaded and prepend it (reverse
+   * infinite scroll). Backfill in every sense the pane distinguishes: it never
+   * announces to the live region, never feeds hands-free mode a backlog to read
+   * aloud, and never marks anything read.
+   *
+   * Visual position needs no manual anchoring: the pane is `flex-col-reverse`,
+   * so its scroll origin is the NEWEST end, and older rows are laid out further
+   * from it. Growing that end moves content away from the viewport rather than
+   * under it, and the reader stays exactly where they were.
+   */
+  const loadOlder = useCallback(async () => {
+    const before = olderCursorRef.current;
+    if (before === null || loadingOlderRef.current) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    try {
+      const page = await api.listRoomMessages(roomId, { limit: HISTORY_PAGE, before });
+      const older = withoutClawed(page.items);
+      // Hands-free mode is fed the WHOLE merged history by every later refetch
+      // (a reply the stream was down for is exactly what it waits on), and it
+      // speaks anything it has not already been handed. An earlier page is not
+      // an arrival, so mark it seen here — otherwise the next wake-reconcile
+      // would start narrating the room's backlog.
+      for (const m of older) voiceSeenRef.current.add(m.id);
+      const next = withoutClawed(appendOlder(historyRef.current, older));
+      historyRef.current = next;
+      setHistory(next);
+      setOlderCursor(page.nextBefore);
+      // Receipts only, and only for the page just revealed.
+      await hydrateRef.current(older, inboxRef.current, { backfill: true });
+    } catch (e) {
+      // One page failing to load is not a reason to eject anyone from the room:
+      // the conversation on screen is untouched and the next scroll retries.
+      handleBenignError(e);
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
+  }, [roomId, withoutClawed, handleBenignError]);
+
+  /**
+   * The pane reached (or nearly reached) its OLDEST edge — see
+   * `distanceFromOldestEdge` for why the raw `scrollTop` cannot be read directly
+   * in a column-reverse pane.
+   */
+  const onPaneScroll = useCallback(
+    (e: UIEvent<HTMLDivElement>) => {
+      if (distanceFromOldestEdge(e.currentTarget) > NEAR_OLDEST_PX) return;
+      void loadOlder();
+    },
+    [loadOlder],
+  );
 
   // Wake/reconnect reconciliation. Any event missed while a stream was down (a
   // `status.changed → idle`, presence, a new message, a receipt) leaves the UI
@@ -429,13 +638,15 @@ export function Room() {
         setMembers(mem);
       }
       const [hist, inb, sts] = await Promise.all([
-        api.listRoomMessages(roomId, { limit: HISTORY_LIMIT }),
-        api.listInbox(roomId, { limit: HISTORY_LIMIT }),
+        api.listRoomMessages(roomId, { limit: HISTORY_PAGE }),
+        api.listInbox(roomId, { limit: INBOX_LIMIT }),
         api.listStatuses(roomId).catch(() => ({ items: [], presence: { online: [] } })),
       ]);
       // A reconcile is a BACKFILL, never an arrival: whatever it turns up was
-      // already sent, so it must not fire the live-region announcer.
-      const items = withoutClawed(hist.items);
+      // already sent, so it must not fire the live-region announcer. It MERGES
+      // rather than replaces — the tail is fresh truth about the tail, and says
+      // nothing about the earlier pages the reader has scrolled back for.
+      const items = mergeFreshTailRef.current(hist);
       const inbItems = withoutClawed(inb.items);
       historyRef.current = items;
       inboxRef.current = inbItems;
@@ -476,8 +687,8 @@ export function Room() {
         const [rm, mem, hist, inb, sts] = await Promise.all([
           api.getRoom(roomId).catch(() => null),
           api.listMembers(roomId, { limit: 100 }).then((r) => r.items),
-          api.listRoomMessages(roomId, { limit: HISTORY_LIMIT }),
-          api.listInbox(roomId, { limit: HISTORY_LIMIT }),
+          api.listRoomMessages(roomId, { limit: HISTORY_PAGE }),
+          api.listInbox(roomId, { limit: INBOX_LIMIT }),
           api.listStatuses(roomId).catch(() => ({ items: [], presence: { online: [] } })),
         ]);
         if (cancelled) return;
@@ -489,6 +700,10 @@ export function Room() {
         inboxRef.current = inb.items;
         setHistory(hist.items);
         setInbox(inb.items);
+        // Where the room's earlier pages start, or `null` when this tail IS the
+        // whole room. Room is keyed by roomId in App, so a room switch remounts
+        // and this seeds fresh — no cursor can survive into another room.
+        setOlderCursor(hist.nextBefore);
         setStatuses(hydrateStatuses(sts.items));
         setOnlineIds(new Set(sts.presence.online));
         setPresenceHydrated(true);
@@ -556,10 +771,10 @@ export function Room() {
               // arrival from the rest of the page we just re-listed.
               const known = new Set(historyRef.current.map((m) => m.id));
               const [hist, inb] = await Promise.all([
-                api.listRoomMessages(roomId, { limit: HISTORY_LIMIT }),
-                api.listInbox(roomId, { limit: HISTORY_LIMIT }),
+                api.listRoomMessages(roomId, { limit: HISTORY_PAGE }),
+                api.listInbox(roomId, { limit: INBOX_LIMIT }),
               ]);
-              const items = withoutClawed(hist.items);
+              const items = mergeFreshTailRef.current(hist);
               const inbItems = withoutClawed(inb.items);
               historyRef.current = items;
               inboxRef.current = inbItems;
@@ -718,10 +933,10 @@ export function Room() {
         setAttachError(null);
       }
       const [hist, inb] = await Promise.all([
-        api.listRoomMessages(roomId, { limit: HISTORY_LIMIT }),
-        api.listInbox(roomId, { limit: HISTORY_LIMIT }),
+        api.listRoomMessages(roomId, { limit: HISTORY_PAGE }),
+        api.listInbox(roomId, { limit: INBOX_LIMIT }),
       ]);
-      const items = withoutClawed(hist.items);
+      const items = mergeFreshTail(hist);
       const inbItems = withoutClawed(inb.items);
       historyRef.current = items;
       inboxRef.current = inbItems;
@@ -1152,8 +1367,27 @@ export function Room() {
           </p>
         </div>
       )}
-      <div className={`flex min-h-0 flex-col-reverse overflow-y-auto px-4 py-3 ${rows.length === 0 ? '' : 'flex-1'}`}>
+      {/* The conversation feed. `flex-col-reverse` pins it to the NEWEST message
+          and makes "older" the upward direction — which also means the browser
+          anchors on the newest end, so prepending an earlier page below does not
+          move what the reader is looking at. Reaching the top loads that page. */}
+      <div
+        data-testid="message-pane"
+        onScroll={onPaneScroll}
+        className={`flex min-h-0 flex-col-reverse overflow-y-auto px-4 py-3 ${rows.length === 0 ? '' : 'flex-1'}`}
+      >
         <div className="flex flex-col gap-3">
+          {/* Deliberately not a live region: an earlier page is something the
+              reader asked for by scrolling, not an event to be narrated over
+              whatever they were reading. */}
+          {loadingOlder && (
+            <p
+              data-testid="loading-earlier"
+              className="py-1 text-center text-xs text-[var(--sparrow-faint)]"
+            >
+              Loading earlier messages…
+            </p>
+          )}
           {rows.map((r, i) => {
             if (r.kind === 'agent-dm') {
               // An interleaved oversight box: this agent's DM with another

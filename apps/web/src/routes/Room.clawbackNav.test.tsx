@@ -99,7 +99,7 @@ interface Opts {
   inbox?: InboxItem[];
   /** Fail `GET /whoami` with this status (a ROOM-level load failure). */
   whoamiStatus?: number;
-  /** Fail every per-message status/read call with this status. */
+  /** Fail every receipts lookup (bulk or single) and per-message read with this. */
   perMessageStatus?: number;
 }
 
@@ -131,6 +131,23 @@ function stubRoom(opts: Opts = {}) {
       const msg = outbox.find((m) => m.id === id);
       if (!msg) return errorJson('not_found', 404);
       return json({ message: msg });
+    }
+    // Receipts are hydrated in BULK (`?ids=`) — the ids asked about are recorded
+    // in the same list the per-message route used to fill, because what these
+    // tests care about is WHICH messages the pane asks after, not the shape of
+    // the request. A clawed message must appear in neither.
+    if (url.endsWith('/messages/status')) {
+      const asked = (new URLSearchParams(String(input).split('?')[1] ?? '').get('ids') ?? '')
+        .split(',')
+        .filter((id) => id.length > 0);
+      statusCalls.push(...asked);
+      if (opts.perMessageStatus) return errorJson('not_found', opts.perMessageStatus);
+      return json({
+        items: asked.map((id) => ({
+          messageId: id,
+          status: { id, kind: 'broadcast', createdAt: '2026-08-20T10:05:00Z', recipients: [] },
+        })),
+      });
     }
     const st = url.match(/\/messages\/([^/]+)\/status$/);
     if (st) {

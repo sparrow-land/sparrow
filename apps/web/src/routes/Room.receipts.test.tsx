@@ -74,9 +74,9 @@ const OWN: Message = {
 // The receipt the /status endpoint returns, mutated by the test to model the
 // server-observed delivery progression the SSE events announce.
 let phase: ReadStatus = 'unread';
-function statusBody() {
+function statusBody(id = 'msg_1') {
   return {
-    id: 'msg_1',
+    id,
     kind: 'broadcast',
     createdAt: '2026-08-20T10:05:00Z',
     recipients: [
@@ -101,6 +101,14 @@ function stubRoom() {
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
     if (url.includes('/drafts')) return json({ items: [] });
+    // Receipts hydrate for a whole screen at once (`GET …/messages/status?ids=`);
+    // answered before the per-message route whose prefix it shares.
+    if (url.endsWith('/messages/status')) {
+      const asked = (new URLSearchParams(String(input).split('?')[1] ?? '').get('ids') ?? '')
+        .split(',')
+        .filter((id) => id.length > 0);
+      return json({ items: asked.map((id) => ({ messageId: id, status: statusBody(id) })) });
+    }
     if (url.includes('/messages/') && url.endsWith('/status')) return json(statusBody());
     // The room history the thread renders — the caller's own message included.
     if (url.endsWith('/messages') && method === 'GET') return json({ items: [OWN], nextBefore: null });

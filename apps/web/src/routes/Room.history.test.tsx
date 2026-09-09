@@ -109,6 +109,24 @@ function stubRoom(opts: Opts = {}) {
     if (url.includes('/inbox')) return json({ items: server.inbox, nextCursor: null });
     if (url.includes('/outbox')) return json({ items: [], nextCursor: null });
     if (url.includes('/drafts')) return json({ items: [] });
+    // Receipts come back for a whole screen at once (`?ids=`); this shadows the
+    // per-message route below, so it is answered first.
+    if (url.endsWith('/messages/status')) {
+      const asked = (new URLSearchParams(full.split('?')[1] ?? '').get('ids') ?? '')
+        .split(',')
+        .filter((id) => id.length > 0);
+      return json({
+        items: asked.map((id) => ({
+          messageId: id,
+          status: {
+            id,
+            kind: 'broadcast',
+            createdAt: '2026-09-03T10:05:00Z',
+            recipients: opts.recipients ?? [],
+          },
+        })),
+      });
+    }
     if (url.includes('/messages/') && url.endsWith('/status')) {
       return json({
         id: url.split('/').at(-2),

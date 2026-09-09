@@ -126,3 +126,68 @@ export function statusById(inbox: InboxItem[]): Record<string, ReadStatus> {
   for (const it of inbox) map[it.id] = it.status;
   return map;
 }
+
+/**
+ * Append an OLDER page of history below what is already loaded (both
+ * newest-first, as `GET /rooms/:id/messages` returns them).
+ *
+ * Reverse paging: the room opens on the newest page and walks backwards with
+ * `before`. A page can overlap what we hold (a message arrived between the two
+ * requests and shifted the window), so the union is taken by id; the copy we
+ * already had wins, because it can only be the same-or-fresher one.
+ */
+export function appendOlder(loaded: Message[], older: Message[]): Message[] {
+  if (older.length === 0) return loaded;
+  const have = new Set(loaded.map((m) => m.id));
+  return [...loaded, ...older.filter((m) => !have.has(m.id))];
+}
+
+/**
+ * Merge a freshly-listed TAIL (the newest page) into the loaded history — the
+ * shape every refetch takes once older pages exist. Replacing outright, which
+ * is what a single-page pane could afford, would throw away every page the
+ * reader scrolled back for.
+ *
+ * The rule, in one pass:
+ * - union by id, and the TAIL's copy of an overlapping message wins (it is the
+ *   fresher read of the same row);
+ * - a loaded message the tail does NOT carry, but which is strictly NEWER than
+ *   the tail's oldest item, sat inside the refetched window and came back
+ *   absent: it is gone (clawed back — history excludes clawed rows) and is
+ *   dropped. A mere timestamp TIE with the tail's oldest is not evidence either
+ *   way (which side of the page boundary it fell on is unknowable from
+ *   `createdAt` alone), so it is kept;
+ * - everything older than the window is untouched, PROVIDED the two sets touch
+ *   at all: a tail entirely newer than everything loaded means a burst landed
+ *   between the listings, and the unfillable hole between them makes the tail
+ *   the only honest answer;
+ * - `tailIsWholeRoom` (the listing's `nextBefore` came back `null`) means the
+ *   page IS the entire room, so nothing outside it can still be alive.
+ *
+ * The result stays newest-first, ordered by `createdAt` with the server's tie
+ * order preserved — exactly what `buildConversation` expects to reverse.
+ */
+export function mergeTail(
+  loaded: Message[],
+  tail: Message[],
+  opts: { tailIsWholeRoom?: boolean } = {},
+): Message[] {
+  const inTail = new Set(tail.map((m) => m.id));
+  if (opts.tailIsWholeRoom || tail.length === 0) return [...tail];
+  const oldestInTail = tail[tail.length - 1]!.createdAt;
+  // The two sets must TOUCH. If the whole tail is newer than everything loaded,
+  // a burst landed between the two listings and there is a hole between them
+  // that no cursor can fill — a transcript with an invisible gap in it is worse
+  // than a short one, so the tail wins outright and the reader pages back again.
+  if (loaded.length > 0 && oldestInTail > loaded[0]!.createdAt) return [...tail];
+  const kept = loaded.filter(
+    (m) => !inTail.has(m.id) && !(m.createdAt > oldestInTail),
+  );
+  // The tail is newest-first and every kept item is at most as new as the
+  // tail's oldest, so concatenating already yields descending order; the stable
+  // sort only guards against a server that hands back an unsorted page, and
+  // leaves tie order exactly as it arrived.
+  const merged = [...tail, ...kept];
+  merged.sort((a, b) => (a.createdAt > b.createdAt ? -1 : a.createdAt < b.createdAt ? 1 : 0));
+  return merged;
+}

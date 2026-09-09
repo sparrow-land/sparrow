@@ -146,6 +146,14 @@ function stubRoom(opts: Opts = {}) {
       if (!msg) return errorJson('not_found', 404);
       return json({ message: msg });
     }
+    // Receipts hydrate for a whole screen at once (`GET …/messages/status?ids=`);
+    // answered before the per-message route whose prefix it shares.
+    if (url.endsWith('/messages/status')) {
+      const asked = (new URLSearchParams(String(input).split('?')[1] ?? '').get('ids') ?? '')
+        .split(',')
+        .filter((id) => id.length > 0);
+      return json({ items: asked.map((id) => ({ messageId: id, status: { id, kind: 'broadcast', createdAt: '2026-08-20T10:05:00Z', recipients: [] } })) });
+    }
     if (url.includes('/messages/') && url.endsWith('/status')) {
       return json({ id: 'msg_1', kind: 'broadcast', createdAt: '2026-08-20T10:05:00Z', recipients: [] });
     }

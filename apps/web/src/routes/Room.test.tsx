@@ -97,6 +97,14 @@ function stubRoom(opts: Opts = {}) {
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
     if (url.includes('/drafts')) return json({ items: [] });
+    // Receipts hydrate for a whole screen at once (`GET …/messages/status?ids=`);
+    // answered before the per-message route whose prefix it shares.
+    if (url.endsWith('/messages/status')) {
+      const asked = (new URLSearchParams(String(input).split('?')[1] ?? '').get('ids') ?? '')
+        .split(',')
+        .filter((id) => id.length > 0);
+      return json({ items: asked.map((id) => ({ messageId: id, status: { id, kind: 'broadcast', createdAt: '2026-08-20T10:05:00Z', recipients: [] } })) });
+    }
     if (url.includes('/messages/') && url.endsWith('/status')) {
       return json({ id: 'msg_1', kind: 'broadcast', createdAt: '2026-08-20T10:05:00Z', recipients: [] });
     }
