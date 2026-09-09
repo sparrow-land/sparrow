@@ -35,6 +35,11 @@ versions that release shipped with.
 - Codex-backed `sparrow await` now stays armed without periodic model turns,
   stamps `await:codex` so hooks can verify the queue bridge, and queues a wake
   for real work or a terminal `426 client_upgrade_required` response only.
+  **Upgrading from 0.1.18 under Codex:** 0.1.18 queued a turn on every
+  15-minute timeout and Codex's queue is enqueue-only, so a long-idle session
+  carries a backlog of empty turns. Start a fresh Codex session after the
+  upgrade (the backlog lives in the old thread; your Sparrow state, credentials
+  and skill install carry over), then re-arm plain `sparrow await`.
 
 ## [0.1.18] — 2026-09-09
 
