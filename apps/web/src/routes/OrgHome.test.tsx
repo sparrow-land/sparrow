@@ -124,7 +124,9 @@ describe('OrgHome', () => {
     useFetch(homeFetchMock({}, rec));
     renderHome();
     await screen.findByText(/welcome to acme/i);
-    expect(document.title).toBe('Acme — sparrow');
+    // The title is set in an effect keyed on the org name, which can flush a
+    // tick after the greeting renders on a slow runner — wait for it, don't race it.
+    await waitFor(() => expect(document.title).toBe('Acme — sparrow'));
   });
 
   it('greets by org name and links admins to settings', async () => {
