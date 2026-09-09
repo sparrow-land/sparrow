@@ -127,6 +127,68 @@ describe('sparrow-session-start.sh — the injected payload', () => {
     expect(ctx).toContain('can deliver the next turn');
   });
 
+  /* ---------------------------------------------------------------- *
+   * GENERATION TAGS. Arming `sparrow await` supersedes the previous
+   * listener, and the loser can still be inside the window between its
+   * ownership check and a heartbeat write. So both halves of the heartbeat
+   * vocabulary — a LIVE claim and a DEAD stamp — may name the generation
+   * that wrote them, and this hook believes one only while it names the
+   * live generation in `await-owner.json`. Untagged, or no record at all,
+   * is judged exactly as before.
+   * ---------------------------------------------------------------- */
+  const writeOwner = (nonce: string): void =>
+    fs.writeFileSync(
+      path.join(stateDir, 'await-owner.json'),
+      `${JSON.stringify({ version: 1, nonce, pid: 4242, startedAt: '2026-09-09T00:00:00.000Z', kind: 'await' })}\n`,
+    );
+  const context = (): string =>
+    (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext as string;
+
+  it('trusts a LIVE claim tagged with the live generation', () => {
+    writeHeartbeat(5, 'await:codex 4f2c9a01bb33cd10');
+    writeOwner('4f2c9a01bb33cd10');
+    const ctx = context();
+    expect(ctx).toContain('Codex-bridged');
+    expect(ctx).not.toContain('4f2c9a01bb33cd10'); // the tag never leaks into prose
+  });
+
+  it('ignores a LIVE claim from a SUPERSEDED generation (it cannot be judged)', () => {
+    // Exactly the demotion this tag prevents: a stale plain `await` claim
+    // written over a live `await:codex` one would read as "no queue bridge".
+    writeHeartbeat(5, 'await 4f2c9a01bb33cd10');
+    writeOwner('b0b0b0b0b0b0b0b0');
+    const ctx = context();
+    expect(ctx).toContain('cannot be judged');
+    expect(ctx).not.toContain('no verified route');
+  });
+
+  it('trusts a DEAD stamp tagged with the live generation', () => {
+    writeHeartbeat(5, 'killed:SIGTERM 4f2c9a01bb33cd10');
+    writeOwner('4f2c9a01bb33cd10');
+    expect(context()).toContain('Your listener was killed');
+  });
+
+  it('ignores a DEAD stamp from a SUPERSEDED generation', () => {
+    writeHeartbeat(5, 'killed:SIGTERM 4f2c9a01bb33cd10');
+    writeOwner('b0b0b0b0b0b0b0b0');
+    const ctx = context();
+    expect(ctx).not.toContain('Your listener was killed');
+    expect(ctx).toContain('cannot be judged'); // fresh, but unjudgeable
+  });
+
+  it('judges untagged claims and stamps as before, whatever the record says', () => {
+    writeOwner('b0b0b0b0b0b0b0b0');
+    writeHeartbeat(5, 'await:codex');
+    expect(context()).toContain('Codex-bridged');
+    writeHeartbeat(5, 'killed:SIGTERM');
+    expect(context()).toContain('Your listener was killed');
+  });
+
+  it('judges a tagged claim as before when there is no owner record at all', () => {
+    writeHeartbeat(5, 'await:codex 4f2c9a01bb33cd10');
+    expect(context()).toContain('Codex-bridged');
+  });
+
   it('calls out a passive await heartbeat as lacking a verified Codex route', () => {
     writeHeartbeat(5, 'await');
     const ctx = (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext;

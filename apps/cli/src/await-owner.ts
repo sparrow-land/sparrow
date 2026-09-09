@@ -29,9 +29,18 @@
  * leaves it `unfenced` — running exactly as pre-0.1.20 did, never standing
  * down — rather than silently pretending to own the state dir.
  *
- * CROSS-PROCESS TOCTOU on the dead stamp is resolved on the READ side: stamps
- * are generation-tagged (`killed:SIGTERM <nonce>`) and hooks discard a stamp
- * whose nonce is not the live generation's. Every check-then-write fence here
+ * NOT TAGGED: THE EVENT CURSOR. The cursor lives in the shared `state.json`
+ * read by the CLI itself, not by hooks; a stale cursor written by a superseded
+ * listener can only move the cursor backwards by at most the successor's own
+ * progress, and the successor's next reconcile poll reports a gap and adopts
+ * `latest` (0.1.17 semantics) — worst case one duplicate wake, fail-open by
+ * construction. Tagging it would change the state.json shape every command
+ * shares, for a failure that already heals.
+ *
+ * CROSS-PROCESS TOCTOU on the heartbeat (live claims and dead stamps alike) is
+ * resolved on the READ side: stamps
+ * are generation-tagged (`await:codex <nonce>`, `killed:SIGTERM <nonce>`) and
+ * hooks discard a claim whose nonce is not the live generation's. Every check-then-write fence here
  * still has a window — a newer generation can publish between a checkpoint and
  * the write it guards — but the dead stamp was the one write that could
  * persist false state (a corpse reporting the live listener as dead), and the

@@ -2669,7 +2669,13 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     cap.io.notifyCodex = async () => {};
     const running = runCli(['await', '--timeout', '15'], { ...env, CODEX_THREAD_ID: 'thread-heartbeat' }, cap.io);
     await nap(250);
-    expect(fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8').trim()).toBe('await:codex');
+    // Tagged with the generation that wrote it, so a superseded listener can
+    // never quietly replace this claim with a plain `await` one.
+    const claim = fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8').trim().split(/\s+/);
+    expect(claim[0]).toBe('await:codex');
+    expect(claim[1]).toBe(
+      JSON.parse(fs.readFileSync(path.join(stateDir, 'await-owner.json'), 'utf8')).nonce,
+    );
     await owner.client.sendMessage(roomId, { to: agentId, body: 'end heartbeat check' });
     expect(await running).toBe(0);
   });
@@ -3107,8 +3113,11 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     expect(cap.out()).toBe(''); // never a wake line — the successor owns this work
     expect(cap.err()).toContain('superseded by a newer listener');
     expect(cap.err()).toContain('f00dcafef00dcafe');
-    // Retirement is SILENT: the successor's heartbeat must survive intact.
+    // Retirement is SILENT: the successor's heartbeat must survive intact —
+    // not just unstamped, but UNTOUCHED. The loser's periodic activity touch is
+    // fenced by the same checkpoint, so it never replaces the live claim.
     const hb = fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8');
+    expect(hb.trim()).toBe('await');
     expect(hb).not.toContain('killed');
     expect(hb).not.toContain('stopped');
     expect(hb).not.toContain('retired');
@@ -3338,6 +3347,49 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     } finally {
       __setAwaitPublishHookForTests(undefined);
     }
+  });
+
+  /**
+   * THE LIVE CLAIM IS TAGGED TOO. `owned()` guards the heartbeat touch, but the
+   * window between that check and the write is real — and an untagged claim
+   * written inside it would silently REPLACE the successor's (a stale `await`
+   * over a live `await:codex` reads, to the hooks, as a listener with no queue
+   * bridge). Tagged, such a claim is discarded instead of inherited.
+   */
+  it('writes a generation-tagged live heartbeat naming its own record', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown15');
+    const cap = capture();
+    const running = runCli(['await', '--timeout', '15'], env, cap.io);
+    await nap(300);
+    const claim = fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8').trim().split(/\s+/);
+    expect(claim[0]).toBe('await');
+    expect(claim[1]).toBe(ownerRecord().nonce);
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'done looking' });
+    expect(await running).toBe(0);
+  });
+
+  it('the successor owns the live claim after a takeover, tag and all', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtown16');
+    const a = capture();
+    const first = runCli(['await', '--timeout', '15'], env, a.io);
+    await nap(300);
+    const loser = ownerRecord().nonce;
+
+    const b = capture();
+    const second = runCli(['await', '--timeout', '15'], env, b.io);
+    await nap(400);
+    const winner = ownerRecord().nonce;
+    expect(winner).not.toBe(loser);
+    const claim = fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8').trim().split(/\s+/);
+    expect(claim[0]).toBe('await');
+    expect(claim[1]).toBe(winner); // never the loser's, whoever wrote last
+
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'wake the winner' });
+    expect(await first).toBe(4);
+    expect(await second).toBe(0);
+    expect(
+      fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8').trim().split(/\s+/)[1],
+    ).toBe(winner);
   });
 
   it('watch --exit-on-item takes the same generation (one implementation)', async () => {

@@ -4364,14 +4364,19 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
             onOpen();
             return;
           }
-          if (first) touchHeartbeat(env, awaitHeartbeatKind, true);
+          // TAGGED: the window between that check and this write is real, so
+          // the claim names the generation making it. A successor's reader
+          // discards a claim that is not the live generation's instead of
+          // inheriting it (an untagged `await` would demote a live
+          // `await:codex` to "no verified bridge").
+          if (first) touchHeartbeat(env, awaitHeartbeatKind, true, generation.nonce());
           onOpen();
         },
         onActivity: () => {
           // The CHECKPOINT that rides the stream's own cadence (events and
           // server heartbeats): no new timer, and an idle listener still
           // notices it was superseded.
-          if (owned()) touchHeartbeat(env, awaitHeartbeatKind);
+          if (owned()) touchHeartbeat(env, awaitHeartbeatKind, false, generation.nonce());
           onActivity();
         },
         dispatcher: transport?.dispatcher,

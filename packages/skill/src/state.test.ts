@@ -57,6 +57,22 @@ describe('markHeartbeatDead', () => {
     expect(readHeartbeatState(stateDir)).toEqual({ state: 'killed' });
   });
 
+  it('tags a LIVE claim the same way, and both readers see through the tag', () => {
+    __resetHeartbeatThrottle();
+    touchHeartbeat(stateDir, { kind: 'await:codex', generation: '4f2c9a01bb33cd10', force: true });
+    expect(content()).toBe('await:codex 4f2c9a01bb33cd10');
+    expect(readHeartbeatState(stateDir)).toEqual({
+      state: 'await:codex',
+      generation: '4f2c9a01bb33cd10',
+    });
+    // `readHeartbeatKind` answers "which listener?", tag or no tag.
+    expect(readHeartbeatKind(stateDir)).toBe('await:codex');
+    __resetHeartbeatThrottle();
+    touchHeartbeat(stateDir, { kind: 'await', force: true }); // watch/loop-style, untagged
+    expect(content()).toBe('await');
+    expect(readHeartbeatState(stateDir)).toEqual({ state: 'await' });
+  });
+
   /**
    * A stamp may name the `await` GENERATION that wrote it (see the CLI's
    * await-owner.ts): a superseded listener can be killed long after a

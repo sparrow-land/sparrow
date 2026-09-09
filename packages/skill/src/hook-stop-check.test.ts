@@ -362,6 +362,12 @@ describe('sparrow-stop-check.sh', () => {
       expect(json.reason).toMatch(/was killed \(usually a session interrupt\)/);
     });
 
+    const writeOwner = (nonce: string): void =>
+      fs.writeFileSync(
+        path.join(stateDir, 'await-owner.json'),
+        `${JSON.stringify({ version: 1, nonce, pid: 4242, startedAt: '2026-09-09T00:00:00.000Z', kind: 'await' })}\n`,
+      );
+
     /* ---------------------------------------------------------------- *
      * GENERATION-TAGGED STAMPS. Arming `sparrow await` supersedes the
      * previous listener (newest wins), and that superseded process can be
@@ -370,11 +376,27 @@ describe('sparrow-stop-check.sh', () => {
      * generation that wrote it, and this hook believes it only while that
      * generation is the live one in `await-owner.json`.
      * ---------------------------------------------------------------- */
-    const writeOwner = (nonce: string): void =>
-      fs.writeFileSync(
-        path.join(stateDir, 'await-owner.json'),
-        `${JSON.stringify({ version: 1, nonce, pid: 4242, startedAt: '2026-09-09T00:00:00.000Z', kind: 'await' })}\n`,
-      );
+    it('trusts a LIVE claim tagged with the live generation (still passive under Codex)', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await 4f2c9a01bb33cd10');
+      writeOwner('4f2c9a01bb33cd10');
+      const r = runHook('{}', { CODEX_THREAD_ID: 'thr_1' });
+      const json = JSON.parse(r.stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toMatch(/no verified queue bridge/);
+    });
+
+    it('IGNORES a LIVE claim from a superseded generation instead of inheriting it', () => {
+      // The demotion this tag prevents: a stale plain `await` claim landing on
+      // top of a live `await:codex` one would block the turn over a bridge the
+      // successor demonstrably has.
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await 4f2c9a01bb33cd10');
+      writeOwner('b0b0b0b0b0b0b0b0');
+      const r = runHook('{}', { CODEX_THREAD_ID: 'thr_1' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe(''); // unjudgeable — allow the stop
+    });
 
     it('judges a tagged stamp that names the LIVE generation exactly as before', () => {
       writeLoopState('engaged');

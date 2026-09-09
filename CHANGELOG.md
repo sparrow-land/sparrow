@@ -37,14 +37,20 @@ versions that release shipped with.
   or a terminal `426` on the first inbox read or the first stream open — both
   queue a repair turn, so both claim the state dir first), which means a re-arm
   that dies on a bad token or an unreachable server can never evict a healthy
-  listener. Heartbeat DEAD stamps written by `await` now carry the writer's
-  generation as a second token (`killed:SIGTERM 4f2c…`; the first token is
-  unchanged, so every existing reader still parses it), and the Stop,
-  UserPromptSubmit and SessionStart hooks discard a stamp whose generation is
-  not the live one in `await-owner.json` — a listener killed long after it was
-  superseded can no longer report its successor as dead. An untagged stamp
-  (`watch`, `loop`, or an older CLI) and a missing record are judged exactly as
-  before. A crashed owner needs no cleanup — the next arm simply
+  listener. Every heartbeat `await` writes — the LIVE claim (`await:codex 4f2c…`)
+  as well as a DEAD stamp (`killed:SIGTERM 4f2c…`) — now carries the writer's
+  generation as a second token; the first token is unchanged, so every existing
+  reader still parses it. The Stop, UserPromptSubmit and SessionStart hooks
+  discard a claim or stamp whose generation is not the live one in
+  `await-owner.json`, so neither a listener killed long after it was superseded
+  can report its successor as dead, nor a stale plain `await` claim demote a
+  live `await:codex` one to "no verified queue bridge". An untagged heartbeat
+  (`watch`, `loop`, an older CLI, or a listener whose record could not be
+  written) and a missing record are judged exactly as before. The event cursor
+  is deliberately NOT tagged: it lives in the shared `state.json` the CLI reads,
+  a stale write can only move it back by at most the successor's own progress,
+  and the successor's next reconcile poll reports a gap and adopts `latest` —
+  worst case one duplicate wake. A crashed owner needs no cleanup — the next arm simply
   overwrites its record, and the record is never unlinked. `watch
   --exit-on-item` is the same primitive and takes the same generation.
   Exit codes: `0` work waiting, `2` `--timeout` elapsed, `4` superseded by a

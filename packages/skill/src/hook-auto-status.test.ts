@@ -422,6 +422,20 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     expect(lines[0]).toContain('sparrow skill pause');
   });
 
+  it('stays silent for a fresh LIVE claim whether or not it carries a generation tag', () => {
+    writeLoopState('engaged');
+    fs.writeFileSync(
+      path.join(stateDir, 'await-owner.json'),
+      `${JSON.stringify({ version: 1, nonce: '4f2c9a01bb33cd10', pid: 4242, startedAt: '2026-09-09T00:00:00.000Z', kind: 'await' })}\n`,
+    );
+    // Tagged and live, tagged and superseded, untagged: a fresh claim is never
+    // a nudge — the tag must not turn one into a phantom "not running".
+    for (const content of ['await 4f2c9a01bb33cd10', 'await b0b0b0b0b0b0b0b0', 'await']) {
+      writeHeartbeat(content, 3);
+      expect(runHook('prompt', '{"prompt":"go"}').stdout.trim()).toBe('');
+    }
+  });
+
   it('ignores a stamp left by a SUPERSEDED generation, and names a live one', () => {
     writeLoopState('engaged');
     const owner = (nonce: string): void =>

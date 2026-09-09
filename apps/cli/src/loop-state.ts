@@ -35,8 +35,20 @@ type Env = Record<string, string | undefined>;
  * a turn-based agent online but deaf). Omitting it writes an empty heartbeat,
  * which the hook reads as "unknown listener, cannot judge".
  */
-export function touchHeartbeat(env: Env = process.env, kind?: ListenerKind, force = false): void {
-  touchHeartbeatAt(resolveStateDir(env), { kind, force });
+export function touchHeartbeat(
+  env: Env = process.env,
+  kind?: ListenerKind,
+  force = false,
+  /**
+   * The `await` generation this claim belongs to (see `await-owner.ts`),
+   * written as a second token so a reader can discard a LIVE claim from a
+   * listener that has since been superseded — the check/write window is real,
+   * and an untagged claim would quietly demote the successor's kind.
+   * `watch`/`loop` pass nothing.
+   */
+  generation?: string,
+): void {
+  touchHeartbeatAt(resolveStateDir(env), { kind, force, generation });
 }
 
 /**

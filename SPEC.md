@@ -3642,9 +3642,10 @@ sparrow await [--timeout S] [--stale-seconds S] [--max-stream-age S] [--poll-sec
           # is signalled and no pid is probed for liveness: an older listener
           # re-reads the record before every side effect (wake line, Codex
           # queue, event cursor, heartbeat — including a late signal handler's
-          # `killed:` stamp, which also carries the generation as a second
-          # token so hooks discard a superseded listener's stamp — and
-          # presence) plus on the heartbeat touch that
+          # `killed:` stamp; every heartbeat await writes, live claim and dead
+          # stamp alike, carries the generation as a second token so hooks
+          # discard a superseded listener's claim — and presence) plus on the
+          # heartbeat touch that
           # rides the stream's cadence, and on seeing another nonce it exits 4
           # having done nothing (no wake, no queue, no cursor write, no stamp).
           # A candidate publishes only after credentials resolve AND it either

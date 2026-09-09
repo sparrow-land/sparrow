@@ -224,6 +224,13 @@ describe('sparrow await — termination stamps the heartbeat', () => {
   it('a superseded listener stamps NOTHING when it is killed afterwards', async () => {
     const l = await startListener(['await', '--timeout', '60', '--poll-seconds', '0', '--json']);
     const hbFile = path.join(l.stateDir, 'heartbeat');
+    // Wait for the child to PUBLISH its own generation first: an open socket is
+    // not proof it has claimed the state dir, and a record written before its
+    // publish would simply be overwritten (newest wins).
+    const ownerFile = path.join(l.stateDir, 'await-owner.json');
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && !fs.existsSync(ownerFile)) await nap(25);
+    expect(fs.existsSync(ownerFile), 'listener never published its generation').toBe(true);
     // A newer generation publishes and owns the heartbeat from here on.
     fs.writeFileSync(
       path.join(l.stateDir, 'await-owner.json'),

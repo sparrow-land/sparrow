@@ -216,9 +216,25 @@ export function touchHeartbeat(
   stateDir: string,
   {
     kind,
+    generation,
     now = Date.now(),
     force = false,
-  }: { kind?: ListenerKind; now?: number; force?: boolean } = {},
+  }: {
+    kind?: ListenerKind;
+    /**
+     * The writer's `await` GENERATION nonce, appended as a SECOND token
+     * (`await:codex 4f2c…`) exactly as {@link markHeartbeatDead} does. A LIVE
+     * claim needs the tag for the same reason a dead one does: a superseded
+     * listener can still be inside the window between its ownership check and
+     * this write, and an untagged claim would silently replace the successor's
+     * (`await` over `await:codex` demotes a Codex-bridged listener to a
+     * "passive" one in the hooks' eyes). Tagged, such a claim is simply
+     * unjudgeable. `watch`/`loop` — and any unfenced listener — pass nothing.
+     */
+    generation?: string;
+    now?: number;
+    force?: boolean;
+  } = {},
 ): void {
   if (!force && now - lastTouch < HEARTBEAT_THROTTLE_MS) return;
   lastTouch = now;
@@ -228,7 +244,7 @@ export function touchHeartbeat(
     const when = new Date(now);
     // Always (re)write the content: the claim must match the listener doing the
     // touching, never a stale one from a previous process.
-    fs.writeFileSync(file, kind ? `${kind}\n` : '');
+    fs.writeFileSync(file, kind ? `${kind}${generation ? ` ${generation}` : ''}\n` : '');
     try {
       fs.utimesSync(file, when, when);
     } catch {
@@ -296,7 +312,11 @@ export function readHeartbeatState(stateDir: string): HeartbeatState | undefined
     const raw = fs.readFileSync(heartbeatPath(stateDir), 'utf8').trim();
     // `<stamp> [generation]` — the generation tag is an optional second token.
     const [head = '', generation] = raw.split(/\s+/).filter(Boolean);
-    if (LISTENER_KINDS.includes(head)) return { state: head as ListenerKind };
+    if (LISTENER_KINDS.includes(head)) {
+      return generation
+        ? { state: head as ListenerKind, generation }
+        : { state: head as ListenerKind };
+    }
     const [word, ...rest] = head.split(':');
     if (word !== undefined && DEAD_REASONS.includes(word)) {
       const signal = rest.join(':').trim();
@@ -319,8 +339,11 @@ export function readHeartbeatState(stateDir: string): HeartbeatState | undefined
  */
 export function readHeartbeatKind(stateDir: string): ListenerKind | undefined {
   try {
-    const raw = fs.readFileSync(heartbeatPath(stateDir), 'utf8').trim();
-    return LISTENER_KINDS.includes(raw) ? (raw as ListenerKind) : undefined;
+    // `<kind> [generation]` — the optional generation tag is not this reader's
+    // business (a stale claim is caught by the tag-aware readers), but it must
+    // not stop the kind itself from being recognized.
+    const [head = ''] = fs.readFileSync(heartbeatPath(stateDir), 'utf8').trim().split(/\s+/);
+    return LISTENER_KINDS.includes(head) ? (head as ListenerKind) : undefined;
   } catch {
     return undefined;
   }
