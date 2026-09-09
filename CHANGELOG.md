@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.18] — 2026-09-09
+
 ### Fixed
 
 - `sparrow await` now detects `CODEX_THREAD_ID` and queues its drain/re-arm turn
