@@ -76,11 +76,20 @@ import type {
   MessageOrigin,
 } from '@sparrow/common-types';
 import {
+  awaitCommand,
+  detectTurnBasedRuntime,
+  sparrowCommand,
+  PROVIDER_LABEL,
+  type ListenerScope,
+  type TurnBasedRuntime,
+} from '@sparrow/skill';
+import {
   clearPending,
   loadPending,
   savePending,
   dedupeProfileName,
   loadCredentials,
+  resolveProfile,
   saveProfile,
   type SaveProfileResult,
   type PendingEnrollment,
@@ -1488,40 +1497,134 @@ function defaultProfileNote(r: SaveProfileResult): string {
   );
 }
 
+/** Everything the enroll banner needs to speak to THIS agent, in THIS runtime. */
+interface EnrolledBanner {
+  agentName: string;
+  orgName: string;
+  profileName: string;
+  emailAddress?: string | null;
+  defaultNote?: string;
+  /** How commands must be written to act as this agent (path-free — see roomSafeScope). */
+  scope?: ListenerScope;
+  /** True when a custom `SPARROW_CONFIG_DIR` is in effect (described, never printed). */
+  scopedStore?: boolean;
+  /** The turn-based harness printing this, when it can be read off the environment. */
+  runtime?: TurnBasedRuntime;
+  /** The owner DM room the enrollment opened, when the delivery carried one. */
+  ownerDmRoomId?: string | null;
+}
+
 /**
- * Success banner for a completed agent enrollment. Enrolling only mints a key —
- * an agent is online only while it holds an open events stream — so the banner
- * pushes the agent to START LISTENING (`sparrow watch` holds `/me/events` open,
- * which is what flips presence to online) rather than stopping here.
+ * Success banner for a completed agent enrollment.
+ *
+ * Enrolling only mints a key — an agent is online only while it holds an open
+ * events stream — so the banner's job is to get the agent LISTENING. Which
+ * command does that depends on what is reading this:
+ *
+ *   - a TURN-BASED harness (Codex, Claude Code — it thinks only when invoked)
+ *     needs `sparrow await`, whose EXIT is the wake. `sparrow watch` would hold
+ *     the stream, turn presence green, and never re-enter the session: the
+ *     online-but-deaf trap, prescribed by the banner itself. Field report,
+ *     2026-09-10.
+ *   - an ALWAYS-RUNNING agent (a process that keeps thinking between messages)
+ *     wants `watch`, which is why it stays — as the alternative, never first.
+ *
+ * When the runtime cannot be read, BOTH branches are printed, `await` first,
+ * with the fork named so the agent can pick.
+ *
+ * Every command is rendered through the ONE prescription shared with the skill
+ * fragments and the hook nudges (`@sparrow/skill`'s `sparrowCommand`), so a
+ * non-default profile is named here exactly as it is named there. Paths never
+ * are: this text is written to be pasted into a room.
  */
-function enrolledMessage(
-  agentName: string,
-  orgName: string,
-  profileName: string,
-  emailAddress: string | null = null,
-  defaultNote = '',
-): string {
+function enrolledMessage(b: EnrolledBanner): string {
+  const scope = b.scope ?? {};
+  const listen = awaitCommand(scope);
+  const watch = sparrowCommand('watch', scope);
+  const send = sparrowCommand('send', scope);
+  const inbox = sparrowCommand('inbox', scope);
+  // The always-running alternative, on its own indented line so it stays
+  // copy-runnable however long the profile qualifier makes it.
+  const alwaysRunning = [
+    `Always-running instead — a process that keeps thinking between messages? Use`,
+    ``,
+    `  ${watch}`,
+    ``,
+  ];
+  const turnBased = b.runtime !== undefined;
   return [
-    `You are ${agentName} in ${orgName}.`,
+    `You are ${b.agentName} in ${b.orgName}.`,
     // When the delivery carries an address, the very FIRST thing the agent learns
     // about its second medium is that it HAS one (SPEC → CLI, enroll banner).
-    ...(emailAddress ? [`People outside ${orgName} can reach you at ${emailAddress}.`] : []),
-    `Saved profile "${profileName}".`,
-    ...(defaultNote ? [defaultNote] : []),
+    ...(b.emailAddress ? [`People outside ${b.orgName} can reach you at ${b.emailAddress}.`] : []),
+    `Saved profile "${b.profileName}".`,
+    ...(b.defaultNote ? [b.defaultNote] : []),
+    ...(scope.profile
+      ? [
+          `Every command below is written for that profile — keep the \`--profile\` flag when you`,
+          `copy one, or it runs as whichever agent on this machine owns the default profile.`,
+        ]
+      : []),
+    // The path itself is deliberately absent — described, not printed.
+    ...(b.scopedStore
+      ? [`(keep SPARROW_CONFIG_DIR exported as it is in this session — it selects this store)`]
+      : []),
     ``,
     `Enrollment is complete — but you are NOT online yet. You are online only while you`,
     `hold an open events stream. Start listening now and keep it running:`,
     ``,
-    `  sparrow watch          # streams events and is what marks you ONLINE`,
+    ...(turnBased
+      ? [
+          `  ${listen}`,
+          ``,
+          `You are turn-based (${PROVIDER_LABEL[b.runtime!]} thinks only when invoked), so run that as a`,
+          `TRACKED BACKGROUND TASK: it holds the stream — you are online while it runs — and it`,
+          `exits when work arrives. That exit is your wake. Drain with \`${sparrowCommand('pop', scope)}\`,`,
+          `reply in-room, then re-arm it as the LAST action of every turn, without exception.`,
+          ``,
+          ...alwaysRunning,
+          `which holds the stream open and marks you ONLINE — but it can never wake you, so keep`,
+          `it only if you are genuinely always-running.`,
+        ]
+      : [
+          `  ${listen}`,
+          ``,
+          `Turn-based (you think only when your harness invokes you)? That is the one to run, as a`,
+          `TRACKED BACKGROUND TASK: it holds the stream and EXITS when work arrives, and that exit`,
+          `is your wake. Drain with \`${sparrowCommand('pop', scope)}\`, reply in-room, then re-arm it as`,
+          `the LAST action of every turn.`,
+          ``,
+          ...alwaysRunning,
+          `which holds the stream open and marks you ONLINE — right for that shape, and the`,
+          `online-but-deaf trap for a turn-based one.`,
+        ]),
     ``,
-    `Come online FIRST: start \`sparrow watch\` before you report back to your human, then say`,
-    `"I'm online" (as a \`sparrow send\`). Never leave a gap where you're enrolled but dark.`,
-    `Handle each message as it arrives (reply with \`sparrow send\`), and run \`sparrow inbox\``,
+    `Come online FIRST: start the listener above before you report back to your human,`,
+    `then say "I'm online" (as a \`${send}\`).`,
+    `Never leave a gap where you're enrolled but dark. Handle each message as it arrives`,
+    `(reply with \`${send}\`), and run \`${inbox}\``,
     `to catch anything already waiting.`,
+    // Where "report back to your human" actually goes. Enrollment opens the
+    // owner DM as a convenience, so the destination is known at this exact
+    // moment — printing it saves a `rooms` call and a guess. Nothing sticky is
+    // set: this names the room on the command, it does not adopt it as default.
+    ...(b.ownerDmRoomId
+      ? [
+          ``,
+          `Your owner is one DM away (that room was opened for you by this enrollment):`,
+          ``,
+          `  ${sparrowCommand(`send --room ${b.ownerDmRoomId}`, scope)} "I'm online"`,
+        ]
+      : [
+          ``,
+          `Say hello to your owner — \`${sparrowCommand('dm <owner name>', scope)}\` opens that room`,
+          `(your owner's name is on \`${sparrowCommand('whoami', scope)}\`).`,
+        ]),
     ``,
-    `You installed the CLI, so \`sparrow watch\`/\`send\` are now your main line in. To lean on`,
-    `sparrow for everything, add \`sparrow skill install\` so a Stop hook keeps your loop alive.`,
-    `Not happy with the name? Change it anytime with \`sparrow rename <name>\`.`,
+    `You installed the CLI, so those two are now your main line in. To lean on sparrow for`,
+    `everything, add \`${sparrowCommand('skill install', scope)}\``,
+    `so a Stop hook keeps your loop alive. Not happy with the name? Change it anytime:`,
+    `\`${sparrowCommand('rename <name>', scope)}\`.`,
   ].join('\n');
 }
 
@@ -1646,25 +1749,93 @@ function runEnrollExec(cmd: string): Promise<number> {
 const execFileAsync = promisify(execFile);
 
 /**
+ * How a command must be written so it acts as THIS agent, not its neighbour.
+ *
+ * Several agents on one machine share one `credentials.json`, so a bare
+ * `sparrow pop` in a fresh shell drains whichever inbox `defaultProfile` names.
+ * Two facts decide what has to be said:
+ *
+ *   - a custom `SPARROW_CONFIG_DIR` — a store of its own. `--profile` cannot
+ *     disambiguate it (both stores may hold the same NAME), so the dir has to be
+ *     named too, and the profile is always spelled out alongside it.
+ *   - otherwise, a resolved profile that is NOT `defaultProfile` — a bare
+ *     command would resolve to somebody else, so name it.
+ *
+ * When neither holds, the answer is EMPTY and every rendered command stays
+ * exactly the bare string it has always been: the common single-agent case gets
+ * no new noise.
+ *
+ * `configDir` is only ever rendered into text that is PRIVATE to one session
+ * (the queued Codex turn). Anything an agent might paste into a room —
+ * the enroll banner — takes {@link roomSafeScope} instead.
+ */
+export function listenerScope(opts: GlobalOpts, env: Env): ListenerScope {
+  const configDir = env.SPARROW_CONFIG_DIR?.trim();
+  const profile = activeProfileName(opts, env);
+  if (configDir) return { profile, configDir };
+  if (profile && profile !== loadCredentials(env).defaultProfile) return { profile };
+  return {};
+}
+
+/**
+ * {@link listenerScope} with the path stripped. A banner can be copy-pasted into
+ * a room, and a filesystem path is nobody else's business — so the profile is
+ * named (it is public routing information) and the custom store is described in
+ * words by the caller instead.
+ */
+export function roomSafeScope(opts: GlobalOpts, env: Env): ListenerScope {
+  const { profile } = listenerScope(opts, env);
+  return profile ? { profile } : {};
+}
+
+/**
+ * How the ENROLL banner must write its commands.
+ *
+ * Not {@link roomSafeScope}: the profile this enrollment just wrote is the one
+ * the banner is about, and it is NOT necessarily the one a bare command would
+ * resolve to — an explicit `--profile` never moves `defaultProfile`, so on a
+ * shared machine the freshly enrolled agent is very often not the default. The
+ * comparison is therefore against what was saved, not against what resolves.
+ *
+ * Path-free by contract: a banner gets pasted into rooms. A custom store is
+ * DESCRIBED by the caller ("keep SPARROW_CONFIG_DIR exported"), never printed.
+ */
+function enrolledScope(env: Env, profileName: string, defaultProfile: string): ListenerScope {
+  if (env.SPARROW_CONFIG_DIR?.trim()) return { profile: profileName };
+  return profileName === defaultProfile ? {} : { profile: profileName };
+}
+
+/**
  * Queue a new input into an idle Codex thread after `await` has reached a
  * deliberate handoff point. The message is intentionally independent of the
  * inbox preview: `await` must never turn a notification into a read.
+ *
+ * Every command it names is rendered through the ONE prescription
+ * (`@sparrow/skill`'s `sparrowCommand`) with this listener's {@link
+ * listenerScope}: the turn this queues runs in a FRESH shell, which inherits
+ * none of the `--profile`/`SPARROW_CONFIG_DIR` this listener was started with,
+ * so an unqualified command there acts as whichever agent owns the default
+ * profile. Reported from a shared machine, 2026-09-10.
  */
 async function queueCodexAwaitWake(
   threadId: string,
   env: Env,
   io: CliIO,
   reason: 'work' | 'gap' | 'upgrade',
+  scope: ListenerScope = {},
 ): Promise<void> {
+  const pop = sparrowCommand('pop', scope);
+  const rearm = awaitCommand(scope);
+  const upgrade = sparrowCommand('upgrade', scope);
   const message =
     reason === 'work'
-      ? 'Sparrow work is waiting. Run `sparrow pop` until it reports `Inbox empty.`, reply in-room, ' +
-        'then re-arm as the last action: `sparrow await`.'
+      ? `Sparrow work is waiting. Run \`${pop}\` until it reports \`Inbox empty.\`, reply in-room, ` +
+        `then re-arm as the last action: \`${rearm}\`.`
       : reason === 'gap'
-        ? 'Sparrow detected a replay gap, so work may be waiting. Run `sparrow pop` until it reports ' +
-          '`Inbox empty.`, reply in-room, then re-arm as the last action: `sparrow await`.'
-      : 'Sparrow await stopped because this client must be upgraded. Run `sparrow upgrade`, then re-arm ' +
-        'as the last action: `sparrow await`.';
+        ? `Sparrow detected a replay gap, so work may be waiting. Run \`${pop}\` until it reports ` +
+          `\`Inbox empty.\`, reply in-room, then re-arm as the last action: \`${rearm}\`.`
+      : `Sparrow await stopped because this client must be upgraded. Run \`${upgrade}\`, then re-arm ` +
+        `as the last action: \`${rearm}\`.`;
   try {
     if (io.notifyCodex) {
       await io.notifyCodex(threadId, message);
@@ -1774,6 +1945,81 @@ async function fetchServerVersion(server: string): Promise<string | undefined> {
     return body?.server?.version ?? body?.version;
   } catch {
     return undefined;
+  }
+}
+
+/** The instance's client-version policy, as `GET /api/v1/meta` advertises it. */
+export interface ClientVersionPolicy {
+  minimum?: string;
+  recommended?: string;
+}
+
+/**
+ * Best-effort read of the server's CLIENT-VERSION POLICY from `GET /api/v1/meta`
+ * (unauthenticated, never gated, and never version-checked itself). `undefined`
+ * means we could not ask — a dead server, an old server, no network — and the
+ * caller then says nothing at all.
+ */
+export async function fetchClientPolicy(server: string): Promise<ClientVersionPolicy | undefined> {
+  try {
+    const res = await fetch(`${server.replace(/\/+$/, '')}/api/v1/meta`);
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { client?: { minimum?: string | null; recommended?: string | null } };
+    return {
+      minimum: body?.client?.minimum ?? undefined,
+      recommended: body?.client?.recommended ?? undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The version line every enrollment and every skill install opens with.
+ *
+ * WHY IT LEADS. On a shared machine ONE `sparrow` binary serves every agent on
+ * the box — so an upgrade is not a private act, and finding out you are below
+ * the floor by being rejected mid-turn (a `426` on the events stream) is the
+ * worst possible moment. The server already publishes both numbers; this asks
+ * before doing anything, and says what it found in one line.
+ *
+ * The advice is attached ONLY when this build is below the RECOMMENDED version
+ * (the soft nudge). At or above it, the line states the facts and stops —
+ * nagging a current client is how a warning stops being read.
+ */
+export function versionLines(installed: string, policy: ClientVersionPolicy | undefined): string[] {
+  if (!policy) return [];
+  const none = '(none advertised)';
+  const lines = [
+    `sparrow CLI ${installed} — server minimum ${policy.minimum ?? none}, ` +
+      `recommended ${policy.recommended ?? none}.`,
+  ];
+  const behind =
+    policy.recommended !== undefined &&
+    compareClientVersions(installed, policy.recommended) === -1;
+  if (behind) {
+    lines.push(
+      'This build is below the recommended version: run `sparrow upgrade` first; on a shared ' +
+        'machine the CLI is shared by every agent using it.',
+    );
+  }
+  return lines;
+}
+
+/**
+ * Print {@link versionLines} on stderr — never stdout, which carries the banner
+ * and, under `-j`, machine-readable JSON. Best-effort by construction: an
+ * unreachable or policy-free server yields no lines, and nothing here can fail
+ * the command that called it.
+ */
+async function reportClientVersion(server: string | undefined, io: CliIO): Promise<void> {
+  if (!server) return;
+  try {
+    for (const line of versionLines(clientBuildVersion(), await fetchClientPolicy(server))) {
+      io.err(`${line}\n`);
+    }
+  } catch {
+    /* a courtesy line never fails a command */
   }
 }
 
@@ -2197,13 +2443,17 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         profile: pending.profileName,
         defaultProfile: saved.defaultProfile,
       },
-      enrolledMessage(
-        agent.name,
-        org.name,
-        pending.profileName,
-        agent.emailAddress,
-        defaultProfileNote(saved),
-      ),
+      enrolledMessage({
+        agentName: agent.name,
+        orgName: org.name,
+        profileName: pending.profileName,
+        emailAddress: agent.emailAddress,
+        defaultNote: defaultProfileNote(saved),
+        scope: enrolledScope(env, pending.profileName, saved.defaultProfile),
+        scopedStore: Boolean(env.SPARROW_CONFIG_DIR?.trim()),
+        runtime: detectTurnBasedRuntime(env),
+        ownerDmRoomId: dmRoomId,
+      }),
     );
   };
 
@@ -2287,6 +2537,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         if (opts.resume) {
           const pending = loadPending(env);
           if (!pending) throw new CliError('No pending enrollment to resume. Run `sparrow enroll <url>` first.');
+          await reportClientVersion(pending.server, io);
           if (!ctx.json) io.err(WAITING_FOR_APPROVAL_MSG);
           await resolvePendingEnrollment(pending, timeoutMs);
           await runPostEnrollExec();
@@ -2296,6 +2547,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         const target = args[0];
         if (!target) throw new CliError('enroll requires an invite URL (or use --resume).');
         const { token: inviteToken, server } = parseInviteUrl(target, opts.server ?? env.SPARROW_SERVER);
+        // Say where this client stands BEFORE anything is written: the invite
+        // named the server, the server publishes its floor, and an agent that
+        // must upgrade should learn it here rather than from a 426 mid-turn.
+        await reportClientVersion(server, io);
         const name =
           (opts.name as string | undefined) ?? env.SPARROW_NAME ?? deriveDefaultAgentName();
 
@@ -2346,13 +2601,17 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
               profile: profileName,
               defaultProfile: saved.defaultProfile,
             },
-            enrolledMessage(
-              res.agent.name,
-              res.org.name,
+            enrolledMessage({
+              agentName: res.agent.name,
+              orgName: res.org.name,
               profileName,
-              res.agent.emailAddress,
-              defaultProfileNote(saved),
-            ),
+              emailAddress: res.agent.emailAddress,
+              defaultNote: defaultProfileNote(saved),
+              scope: enrolledScope(env, profileName, saved.defaultProfile),
+              scopedStore: Boolean(env.SPARROW_CONFIG_DIR?.trim()),
+              runtime: detectTurnBasedRuntime(env),
+              ownerDmRoomId: res.dmRoomId,
+            }),
           );
           await runPostEnrollExec();
           return;
@@ -3896,6 +4155,17 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           ...(opts.profile ? ['--profile', String(opts.profile)] : []),
         ];
         const cwd = process.cwd();
+        // Same version line as enroll, for the same reason — the hooks this
+        // writes call back into THIS binary. There may be no server in scope
+        // here, so it is taken from the profile's credentials when they resolve
+        // and skipped in silence when they do not.
+        if (argv[0] === 'install') {
+          await reportClientVersion(
+            resolveProfile(env, (opts.profile as string | undefined) ?? env.SPARROW_PROFILE)?.profile
+              .server,
+            io,
+          );
+        }
         // Resolve the harness BEFORE running the command: an `uninstall`
         // deletes the installed skill dir, which is the very thing detection
         // uses to break the tie in a project that looks like both harnesses.
@@ -4053,7 +4323,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const queueCodexWake = async (reason: 'work' | 'gap' | 'upgrade'): Promise<void> => {
       if (!codexThread || readLoopState(env) === 'paused' || !owned()) return;
       try {
-        await queueCodexAwaitWake(codexThread, env, io, reason);
+        await queueCodexAwaitWake(codexThread, env, io, reason, listenerScope(opts, env));
       } catch (e) {
         // The queue call was AWAITED, so a newer generation can have published
         // while it was in flight. Re-check before stamping: a superseded

@@ -174,7 +174,18 @@ listener_nudge() {
   [ -n "$cause" ] || return 0
   # Both runtimes re-arm the same way now: plain, unbounded `sparrow await` —
   # the CLI owns its own liveness, so there is no timer to re-arm on.
-  command='sparrow await'
+  #
+  # QUALIFIED BY PROFILE. Several agents on one machine share ONE
+  # credentials.json, so a bare re-arm in a fresh shell arms whichever neighbour
+  # owns defaultProfile. A project-scope install stamps SPARROW_PROFILE into this
+  # hook's command for exactly that reason; when it is set the nudge names it.
+  # This must render exactly what the CLI's `awaitCommand()` renders
+  # (packages/skill/src/listener.ts); listener.test.ts pins the pair.
+  if [ -n "${SPARROW_PROFILE:-}" ]; then
+    command="sparrow await --profile $SPARROW_PROFILE"
+  else
+    command='sparrow await'
+  fi
   printf 'Sparrow: your listener %s. Before anything else, re-arm it: run `%s` as a tracked background task, then continue. (To step away on purpose: sparrow skill pause.)\n' "$cause" "$command"
 }
 

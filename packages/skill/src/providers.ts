@@ -69,6 +69,12 @@ export interface ProviderAdapter {
   statusLines(r: Resolved): CheckLine[];
   /** Provider-specific checks for `sparrow skill verify`. */
   verifyLines(r: Resolved): CheckLine[];
+  /**
+   * Prose printed INSTEAD of `verify`'s generic unverified summary, when this
+   * provider can say something more specific about why nothing is proven.
+   * Empty (or absent) keeps the generic summary.
+   */
+  verifyNotes?(r: Resolved): string[];
   /** Printed after a successful install (manual steps the installer cannot do). */
   postInstallNotes(r: Resolved): string[];
   /** Filesystem markers that mean "this provider's skill is installed here". */

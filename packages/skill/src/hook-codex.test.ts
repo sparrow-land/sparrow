@@ -21,6 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { awaitCommand, sparrowCommand } from './listener.js';
 
 const HOOKS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'hooks');
 const SESSION_START = path.join(HOOKS, 'sparrow-session-start.sh');
@@ -215,6 +216,28 @@ describe('sparrow-session-start.sh — the injected payload', () => {
     const ctx = (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext;
     expect(ctx).toContain('was killed');
     expect(ctx).toContain('unbounded sparrow await');
+  });
+
+  it('names SPARROW_PROFILE in every re-arm it prescribes, identically to awaitCommand()', () => {
+    // Codex hooks inherit the stamped SPARROW_PROFILE; the injected context must
+    // prescribe THAT store, not whichever neighbour owns defaultProfile.
+    const want = awaitCommand({ profile: 'cubes-vm4-codex' });
+    for (const hb of ['watch', 'await', 'killed:SIGTERM', 'garbage']) {
+      writeHeartbeat(5, hb);
+      const ctx = (
+        JSON.parse(run(SESSION_START, [], { env: { SPARROW_PROFILE: 'cubes-vm4-codex' } })) as any
+      ).hookSpecificOutput.additionalContext as string;
+      expect(ctx).toContain(want);
+      expect(ctx.replace(new RegExp(want, 'g'), '')).not.toContain('sparrow await');
+      expect(ctx).toContain(sparrowCommand('pop', { profile: 'cubes-vm4-codex' }));
+    }
+  });
+
+  it('stays byte-identical to the bare commands when no profile is stamped', () => {
+    writeHeartbeat(5, 'watch');
+    const ctx = (JSON.parse(run(SESSION_START)) as any).hookSpecificOutput.additionalContext;
+    expect(ctx).toContain(`unbounded ${awaitCommand()}`);
+    expect(ctx).not.toContain('--profile');
   });
 
   it('says it cannot judge an empty (legacy / hand-rolled) heartbeat', () => {

@@ -34,6 +34,15 @@ export {
 } from './skill-md.js';
 
 export {
+  awaitCommand,
+  sparrowCommand,
+  shellQuote,
+  detectTurnBasedRuntime,
+  type ListenerScope,
+  type TurnBasedRuntime,
+} from './listener.js';
+
+export {
   adapterFor,
   detectProvider,
   ADAPTERS,

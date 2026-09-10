@@ -374,10 +374,19 @@ export function verify(r: Resolved): number {
   }
   if (failed > 0) r.log(`${failed} check(s) FAILED — re-run 'sparrow skill install'.`);
   if (unverified > 0) {
-    r.log(
-      `${unverified} check(s) UNVERIFIED. A hook that has never fired is not proof of anything: ` +
-        `finish the trust steps above, run ONE real turn, then re-run this command.`,
-    );
+    // A provider that can be MORE specific than "run one real turn" says so
+    // instead: repeating the trust steps at an agent who has already done them
+    // is the one answer that cannot help (see CODEX_ADAPTER.verifyNotes).
+    const notes = adapter.verifyNotes?.(r) ?? [];
+    if (notes.length > 0) {
+      r.log(`${unverified} check(s) UNVERIFIED — nothing here has been observed running.`);
+      for (const line of notes) r.log(line);
+    } else {
+      r.log(
+        `${unverified} check(s) UNVERIFIED. A hook that has never fired is not proof of anything: ` +
+          `finish the trust steps above, run ONE real turn, then re-run this command.`,
+      );
+    }
   }
   return 1;
 }

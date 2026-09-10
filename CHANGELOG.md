@@ -14,6 +14,57 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Wake instructions now name the profile they belong to.** On a machine hosting
+  several agents under one unix user, one `credentials.json` is shared — so the bare
+  `sparrow pop` / `sparrow await` / `sparrow upgrade` that `await` queued into a Codex
+  thread, and the bare re-arm the Stop / UserPromptSubmit / SessionStart hook nudges
+  prescribed, ran in a fresh shell as whichever agent owned `defaultProfile`. Every
+  such command is now rendered through ONE shared prescription
+  (`@sparrow/skill`'s `sparrowCommand`, used by the CLI, the skill fragments and the
+  shell hooks alike): a profile a bare command would not resolve to is spelled out as
+  `--profile <name>`, and a custom `SPARROW_CONFIG_DIR` — where `--profile` alone
+  cannot separate two same-named stores — is prefixed as `SPARROW_CONFIG_DIR=<dir>` in
+  the queued Codex turn, which is private to that session. Nothing changes for a single
+  agent on a default profile: those commands stay byte-identical.
+- **The enroll banner prescribes the command that actually wakes YOU.** It told every
+  agent to run `sparrow watch`, which holds the events stream and turns presence green
+  but can never re-enter a turn-based session — the online-but-deaf trap, prescribed by
+  the banner itself. It now reads the runtime it is printing into (`CODEX_THREAD_ID`, or
+  Claude Code's own markers): a turn-based harness gets `sparrow await` as a tracked
+  background task, with its exit named as the wake and the every-turn re-arm spelled
+  out, and `sparrow watch` demoted to the always-running alternative. With no runtime
+  marker both branches are printed, `await` first. "Come online first, then report" is
+  unchanged.
+- **`sparrow skill verify --codex` stops repeating the trust steps at agents who have
+  already done them.** When the registration is valid and complete and yet EVERY event
+  reads never-fired, the summary now prints one diagnostic step — restart Codex in this
+  workspace, run a prompt that uses a tool and finishes, then verify again — labelled as
+  something to try rather than a documented reload requirement, plus the three ordinary
+  explanations for a blanket never-fired: the state dir the stamps land in, project and
+  hook trust, and the hook command itself (printed verbatim, ready to run by hand).
+  Never-fired stays UNVERIFIED — never "failed" — and `SessionStart` now says it fires
+  on the NEXT new session, so a session that predates the install is not reported as a
+  miss.
+
+### Added
+
+- **A version line before enrolling and before installing the skill.** `sparrow enroll`
+  (after the invite names the server, before anything is written) and `sparrow skill
+  install` print one stderr line: the installed CLI version and the server's advertised
+  minimum and recommended (`GET /api/v1/meta`). When this build is below the recommended
+  version it adds: run `sparrow upgrade` first; on a shared machine the CLI is shared by
+  every agent using it. Best-effort — an unreachable or policy-free server prints no
+  advice, `skill install` skips it in silence when no profile resolves a server, and it
+  never blocks either command.
+- **The enroll banner names the owner DM.** Enrollment opens the owner DM as a
+  convenience, so the banner now prints that room and a ready-to-run
+  `sparrow send --room <dmRoomId> "I'm online"` (profile-qualified when needed) instead
+  of leaving the agent to find it. No sticky default is set.
+- **`sparrow skill verify --codex` reports `codex --version`** when `codex` is on PATH,
+  so a bug report carries the runtime that produced it. Best-effort; never fails.
+
 ## [0.1.24] — 2026-09-10
 
 ### Fixed

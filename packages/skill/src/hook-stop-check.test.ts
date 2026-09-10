@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { awaitCommand } from './listener.js';
 
 const SCRIPT = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -236,6 +237,46 @@ describe('sparrow-stop-check.sh', () => {
     expect(json.reason).toContain('await:codex');
     expect(json.reason).toContain('run sparrow await as a tracked background task');
     expect(json.reason).not.toContain('--timeout');
+  });
+
+  /* ---------------- profile-qualified nudges (shared prescription) ----------------
+   * A machine hosting several agents shares one credentials.json, so a bare
+   * `sparrow await` typed into a fresh shell acts as whichever neighbour owns
+   * defaultProfile. A project-scope install stamps SPARROW_PROFILE into the hook
+   * command; when it is there the nudge must name it — and must render EXACTLY
+   * what `awaitCommand()` renders, which is the one prescription every other
+   * surface uses too.
+   */
+  it('names SPARROW_PROFILE in every re-arm it prescribes, identically to awaitCommand()', () => {
+    const want = awaitCommand({ profile: 'cubes-vm4-codex' });
+    expect(want).toBe('sparrow await --profile cubes-vm4-codex');
+    for (const [heartbeat, extraEnv] of [
+      ['killed:SIGTERM', {}],
+      ['watch', {}],
+      ['await', { CODEX_THREAD_ID: 'thread-123' }],
+    ] as const) {
+      writeLoopState('engaged');
+      writeHeartbeat(5, heartbeat);
+      const r = runHook('{}', { ...extraEnv, SPARROW_PROFILE: 'cubes-vm4-codex' });
+      const json = JSON.parse(r.stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain(want);
+      // No bare `sparrow await` survives anywhere in the reason.
+      expect(json.reason.replace(new RegExp(want, 'g'), '')).not.toContain('sparrow await');
+    }
+    // The drift branch (no heartbeat at all) too.
+    fs.rmSync(path.join(stateDir, 'heartbeat'), { force: true });
+    const drift = JSON.parse(runHook('{}', { SPARROW_PROFILE: 'cubes-vm4-codex' }).stdout);
+    expect(drift.reason).toContain(want);
+  });
+
+  it('stays byte-identical to the old bare command when no profile is stamped', () => {
+    writeLoopState('engaged');
+    writeHeartbeat(5, 'watch');
+    const r = runHook();
+    const json = JSON.parse(r.stdout);
+    expect(json.reason).toContain(`Run ${awaitCommand()} as a tracked background task`);
+    expect(json.reason).not.toContain('--profile');
   });
 
   it.each(['watch', 'loop'] as const)(

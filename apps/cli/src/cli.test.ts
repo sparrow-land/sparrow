@@ -52,7 +52,11 @@ beforeAll(async () => {
   // first signup bootstraps its own org — but the fastify build is created here.
 });
 
-async function startServer(opts?: { presenceGraceSeconds?: number }): Promise<void> {
+async function startServer(opts?: {
+  presenceGraceSeconds?: number;
+  clientMinVersion?: string;
+  clientRecommendedVersion?: string;
+}): Promise<void> {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-cli-api-'));
   app = buildServer({
     dataDir,
@@ -629,6 +633,136 @@ describe('sparrow CLI — enroll', () => {
     expect(out).toContain('sparrow rename');
   });
 
+  /* -------------------- runtime-correct completion + owner DM --------------------
+   * `sparrow watch` holds the stream and marks you ONLINE — and can never
+   * re-enter a turn-based session. Telling every agent to run it is the
+   * online-but-deaf trap, prescribed by the banner itself. So the banner reads
+   * the runtime it is printing INTO and prescribes the command that actually
+   * wakes that runtime, keeping `watch` for the always-running alternative.
+   */
+  it('under Codex the banner prescribes await (profile-qualified), never watch as the primary', async () => {
+    const owner = await boot('codexenroll@x.com');
+    await setAgentPolicy(owner, 'open');
+    const inv = await owner.client.createInvite(owner.orgId);
+    // A neighbour already owns defaultProfile — this agent must qualify.
+    const neighbour = await makeAgent(owner, 'codexenroll-neighbour');
+    await runCli(['login-agent', neighbour.key, '--server', url], env, capture().io);
+
+    const cap = capture();
+    expect(
+      await runCli(
+        ['enroll', inv.url, '--server', url, '--name', 'codexbot', '--profile', 'cubes-vm4-codex'],
+        { ...env, CODEX_THREAD_ID: 'thread-enroll' },
+        cap.io,
+      ),
+    ).toBe(0);
+    const out = cap.out();
+    expect(out).toContain('sparrow await --profile cubes-vm4-codex');
+    // `watch` survives ONLY as the always-running alternative, after await.
+    expect(out.indexOf('sparrow await')).toBeLessThan(out.indexOf('sparrow watch'));
+    expect(out).toMatch(/Always-running/);
+    // The wake contract is stated: exit IS the wake, and re-arm every turn.
+    expect(out).toMatch(/exits when work arrives/i);
+    expect(out).toMatch(/re-arm/i);
+    expect(out).toMatch(/background task/i);
+    // Come online first, report second — kept from the live-dogfood fix.
+    expect(out).toContain('Come online FIRST');
+    // A banner can be pasted into a room: never a filesystem path.
+    expect(out).not.toContain('SPARROW_CONFIG_DIR=');
+  });
+
+  it('with no runtime marker the banner offers BOTH branches, await first', async () => {
+    const owner = await boot('bothbranch@x.com');
+    await setAgentPolicy(owner, 'open');
+    const inv = await owner.client.createInvite(owner.orgId);
+    const cap = capture();
+    expect(await runCli(['enroll', inv.url, '--server', url, '--name', 'bothbot'], env, cap.io)).toBe(0);
+    const out = cap.out();
+    expect(out).toMatch(/Turn-based/);
+    expect(out).toMatch(/Always-running/);
+    expect(out).toContain('sparrow await');
+    expect(out).toContain('sparrow watch');
+    // The default profile needs no qualifier — no new noise for one agent.
+    expect(out).not.toContain('--profile');
+  });
+
+  it('says how to reach the owner: the DM room and a ready-to-run hello', async () => {
+    const owner = await boot('ownerdm@x.com');
+    await setAgentPolicy(owner, 'open');
+    const inv = await owner.client.createInvite(owner.orgId);
+    const cap = capture();
+    expect(
+      await runCli(['enroll', inv.url, '--server', url, '--name', 'dmbot', '--json'], env, cap.io),
+    ).toBe(0);
+    const dmRoomId = JSON.parse(cap.out()).dmRoomId as string;
+    expect(dmRoomId).toMatch(/^room_|^rom_/);
+
+    const human = capture();
+    const inv2 = await owner.client.createInvite(owner.orgId);
+    expect(
+      await runCli(['enroll', inv2.url, '--server', url, '--name', 'dmbot2'], env, human.io),
+    ).toBe(0);
+    const out = human.out();
+    expect(out).toMatch(/sparrow send --room room_\w+|sparrow send --room rom_\w+/);
+    expect(out).toContain(`"I'm online"`);
+    // A sticky default is NOT set by printing this.
+    expect(out).not.toContain('sparrow use');
+  });
+
+  /* ---------------------- the version line (item 4) ----------------------
+   * On a shared machine ONE `sparrow` binary serves every agent on the box, so
+   * "am I current?" is a question the agent must answer BEFORE it enrolls and
+   * before it installs hooks — not after a 426 rejects it mid-turn. The server
+   * already advertises both numbers on `/api/v1/meta`; this reads them and says
+   * so in one line. Best-effort throughout: it never blocks and never fails.
+   */
+  it('prints installed/minimum/recommended before enrolling, and advises an upgrade when behind', async () => {
+    await stopServer();
+    // A minimum this build satisfies (so the gate lets us enroll) and a
+    // recommended it does not — the "you are behind" case.
+    await startServer({ clientMinVersion: '0.0.1', clientRecommendedVersion: '99.1.0' });
+    const owner = await boot('vsnbehind@x.com');
+    await setAgentPolicy(owner, 'open');
+    const inv = await owner.client.createInvite(owner.orgId);
+
+    const cap = capture();
+    expect(await runCli(['enroll', inv.url, '--server', url, '--name', 'vsnbot'], env, cap.io)).toBe(0);
+    const err = cap.err();
+    expect(err).toContain(clientBuildVersion());
+    expect(err).toContain('0.0.1');
+    expect(err).toContain('99.1.0');
+    expect(err).toContain('sparrow upgrade');
+    expect(err).toMatch(/shared machine/i);
+    // stdout stays the banner (and, under -j, parseable JSON): the line is stderr.
+    expect(cap.out()).not.toContain('99.1.0');
+  });
+
+  it('says nothing about upgrading when the client is at or above the recommended version', async () => {
+    await stopServer();
+    await startServer({ clientMinVersion: '0.0.1', clientRecommendedVersion: '0.0.1' });
+    const owner = await boot('vsncurrent@x.com');
+    await setAgentPolicy(owner, 'open');
+    const inv = await owner.client.createInvite(owner.orgId);
+
+    const cap = capture();
+    expect(await runCli(['enroll', inv.url, '--server', url, '--name', 'vsnok'], env, cap.io)).toBe(0);
+    const err = cap.err();
+    expect(err).toContain(clientBuildVersion());
+    expect(err).not.toContain('sparrow upgrade');
+  });
+
+  it('never blocks enrollment when the server cannot be asked for a version policy', async () => {
+    const owner = await boot('vsnquiet@x.com');
+    await setAgentPolicy(owner, 'open');
+    const inv = await owner.client.createInvite(owner.orgId);
+    // This server advertises no policy at all — the line still says what is
+    // installed, and enrollment proceeds either way.
+    const cap = capture();
+    expect(await runCli(['enroll', inv.url, '--server', url, '--name', 'vsnquietbot'], env, cap.io)).toBe(0);
+    expect(cap.err()).not.toContain('sparrow upgrade');
+    expect(cap.out()).toContain('You are vsnquietbot');
+  });
+
   it('open policy honors --name', async () => {
     const owner = await boot('open2@x.com');
     await setAgentPolicy(owner, 'open');
@@ -1150,6 +1284,27 @@ describe('sparrow CLI — skill install flags', () => {
     // The user-scope switch is untouched — this agent's pause is its own.
     expect(fs.existsSync(path.join(fakeHome, '.sparrow'))).toBe(false);
     expect(cap.out()).toContain('settings.local.json');
+  });
+
+  it('opens with the version line when the profile resolves a server, and skips it otherwise', async () => {
+    // No credentials in scope → no server to ask → not a word, and no failure.
+    const quiet = capture();
+    expect(await runCli(['skill', 'install'], skillEnv(), quiet.io)).toBe(0);
+    expect(quiet.err()).not.toContain('sparrow CLI ');
+
+    // With a profile whose server advertises a policy, the line leads — the
+    // hooks this writes call back into THIS binary, shared by every agent here.
+    await stopServer();
+    await startServer({ clientMinVersion: '0.0.1', clientRecommendedVersion: '99.1.0' });
+    const owner = await boot('skillvsn@x.com');
+    const agent = await makeAgent(owner, 'skillvsn-bot');
+    await runCli(['login-agent', agent.key, '--server', url], skillEnv(), capture().io);
+
+    const cap = capture();
+    expect(await runCli(['skill', 'install'], skillEnv(), cap.io)).toBe(0);
+    expect(cap.err()).toContain(clientBuildVersion());
+    expect(cap.err()).toContain('99.1.0');
+    expect(cap.err()).toContain('sparrow upgrade');
   });
 
   it('--shared targets the committed .claude/settings.json', async () => {
@@ -2593,6 +2748,106 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     const inbox = capture();
     expect(await runCli(['inbox', '--json'], env, inbox.io)).toBe(0);
     expect(JSON.parse(inbox.out()).items.map((i: any) => i.id)).toContain(sent.message.id);
+  });
+
+  /* ------------------- profile-qualified wake instructions -------------------
+   * A Codex agent on a SHARED machine: the neighbour owns `defaultProfile`, so a
+   * bare `sparrow pop` in the fresh shell the queued turn runs in drains the
+   * NEIGHBOUR's inbox and re-arms the NEIGHBOUR's listener. The listener knows
+   * which store it is holding open, so the text it queues must say so.
+   *
+   * The queued message is PRIVATE to this Codex session (it goes through
+   * `codex queue`, never into a room), which is why it — alone among these
+   * texts — may carry the config-dir prefix: `--profile` cannot disambiguate two
+   * stores that both hold a profile of that name.
+   */
+  it('queues profile-qualified commands when the listener runs a NON-DEFAULT profile', async () => {
+    const { owner, roomId } = await awaitFixture('awtqual');
+    // A second agent whose profile is NOT the default: the first login-agent
+    // above took `defaultProfile`, exactly like a neighbour on a shared box.
+    const other = await makeAgent(owner, 'awtqual-vm4');
+    await owner.client.addMember(roomId, other.id);
+    await runCli(
+      ['login-agent', other.key, '--server', url, '--profile', 'cubes-vm4-codex'],
+      env,
+      capture().io,
+    );
+    await owner.client.sendMessage(roomId, { to: other.id, body: 'wake the neighbour' });
+
+    const cap = capture();
+    const calls: Array<[string, string]> = [];
+    cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+    expect(
+      await runCli(
+        ['await', '--timeout', '10', '--profile', 'cubes-vm4-codex'],
+        { ...env, CODEX_THREAD_ID: 'thread-vm4' },
+        cap.io,
+      ),
+    ).toBe(0);
+
+    const [, message] = calls[0]!;
+    expect(message).toContain('`sparrow pop --profile cubes-vm4-codex`');
+    expect(message).toContain('`sparrow await --profile cubes-vm4-codex`');
+    // EVERY sparrow command in the text is qualified — a single bare one is the
+    // whole bug.
+    for (const m of message.matchAll(/sparrow (pop|await|upgrade)(?! --profile)/g)) {
+      throw new Error(`unqualified command in queued wake text: ${m[0]}`);
+    }
+    // Never a filesystem path when no custom store is in play.
+    expect(message).not.toContain('SPARROW_CONFIG_DIR');
+  });
+
+  it('adds the SPARROW_CONFIG_DIR prefix when a custom credential store is in effect', async () => {
+    const { owner, roomId } = await awaitFixture('awtcfgdir');
+    const scoped = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-cli-scoped-'));
+    try {
+      const agent = await makeAgent(owner, 'awtcfgdir-vm4');
+      await owner.client.addMember(roomId, agent.id);
+      // The SAME profile name exists in BOTH stores — the default store's copy is
+      // a different agent's. `--profile` alone cannot tell them apart; only the
+      // config dir can.
+      const scopedEnv = { ...env, SPARROW_CONFIG_DIR: scoped };
+      await runCli(
+        ['login-agent', agent.key, '--server', url, '--profile', 'twin'],
+        scopedEnv,
+        capture().io,
+      );
+      const neighbour = await makeAgent(owner, 'awtcfgdir-neighbour');
+      await runCli(['login-agent', neighbour.key, '--server', url, '--profile', 'twin'], env, capture().io);
+      expect(fs.existsSync(path.join(scoped, 'credentials.json'))).toBe(true);
+      expect(credentials().profiles.twin).toBeDefined();
+
+      await owner.client.sendMessage(roomId, { to: agent.id, body: 'wake the isolated store' });
+      const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+      expect(
+        await runCli(
+          ['await', '--timeout', '10'],
+          { ...scopedEnv, CODEX_THREAD_ID: 'thread-scoped' },
+          cap.io,
+        ),
+      ).toBe(0);
+      const [, message] = calls[0]!;
+      expect(message).toContain(`SPARROW_CONFIG_DIR=${scoped} sparrow pop --profile twin`);
+      expect(message).toContain(`SPARROW_CONFIG_DIR=${scoped} sparrow await --profile twin`);
+    } finally {
+      fs.rmSync(scoped, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the default-profile wake text byte-identical (no new noise)', async () => {
+    const { owner, roomId, agentId } = await awaitFixture('awtbare');
+    await owner.client.sendMessage(roomId, { to: agentId, body: 'wake up' });
+    const cap = capture();
+    const calls: Array<[string, string]> = [];
+    cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+    expect(
+      await runCli(['await', '--timeout', '10'], { ...env, CODEX_THREAD_ID: 'thread-bare' }, cap.io),
+    ).toBe(0);
+    expect(calls[0]![1]).toBe(
+      'Sparrow work is waiting. Run `sparrow pop` until it reports `Inbox empty.`, reply in-room, then re-arm as the last action: `sparrow await`.',
+    );
   });
 
   it('--codex-thread makes a queue failure loud while preserving exit 0 and unread work', async () => {

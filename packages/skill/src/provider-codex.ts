@@ -43,10 +43,11 @@
  *             prints exactly what a human must do — and `status`/`verify` read
  *             per-event FIRING STAMPS instead of checking that files exist.
  */
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CODEX_MIN_VERSION } from './skill-md.js';
-import type { CheckLine, ProviderAdapter, Resolved } from './providers.js';
+import type { CheckLine, Env, ProviderAdapter, Resolved } from './providers.js';
 
 /** Scripts a Codex install ships: the two shared ones plus its own two. */
 const SCRIPTS: ReadonlyArray<string> = [
@@ -402,6 +403,37 @@ function fmtAge(seconds: number): string {
   return `${Math.floor(seconds / 3600)}h ago`;
 }
 
+/**
+ * `codex --version`, best-effort — so a bug report carries the runtime that
+ * produced it. Never fails the command: no `codex` on PATH, a non-zero exit, a
+ * hang, a machine without a shell — all read as "we don't know", which is what
+ * the caller prints (nothing).
+ */
+export function codexVersion(env: Env): string | undefined {
+  try {
+    const out = execFileSync('codex', ['--version'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: env as NodeJS.ProcessEnv,
+    });
+    const line = out.split('\n')[0]?.trim();
+    return line ? line : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The exact command Codex was told to run for `event`, as registered on disk. */
+function registeredCommand(raw: CodexHooksFile, event: string): string | undefined {
+  for (const group of raw.hooks?.[event] ?? []) {
+    for (const h of group.hooks ?? []) {
+      if (isOurs(h.command)) return h.command;
+    }
+  }
+  return undefined;
+}
+
 /* --------------------------------- adapter ---------------------------------- */
 
 export const CODEX_ADAPTER: ProviderAdapter = {
@@ -565,16 +597,75 @@ export const CODEX_ADAPTER: ProviderAdapter = {
         : { level: 'fail', text: `AGENTS.md:  sparrow section MISSING (${ap})` },
     );
 
+    // The runtime that produced this report — best-effort, never a failure.
+    const version = codexVersion(r.env);
+    if (version) lines.push({ level: 'ok', text: `codex CLI:  ${version}` });
+
     // The only check that proves anything about TRUST: did each hook run?
+    //
+    // A never-fired event is UNVERIFIED — never "failed", and never "overdue".
+    // SessionStart says so out loud: it fires when a session STARTS, so a
+    // session that was already open when the install landed was never going to
+    // stamp it, and calling that a miss would be a false accusation.
     for (const event of CODEX_EVENTS) {
       const age = hookFiredAge(r, event);
+      const note = event === 'SessionStart' ? ' (fires on the next new session)' : '';
       lines.push(
         age === undefined
-          ? { level: 'warn', text: `fired ${event}: NEVER — UNVERIFIED` }
+          ? { level: 'warn', text: `fired ${event}: NEVER — UNVERIFIED${note}` }
           : { level: 'ok', text: `fired ${event}: yes, ${fmtAge(age)}` },
       );
     }
     return lines;
+  },
+
+  /**
+   * The BLANKET never-fired report.
+   *
+   * Field case (2026-09-10): an agent installed the hooks, did both trust steps,
+   * ran turns — and all four events still read never-fired. At that point
+   * repeating the trust instructions is the one answer that cannot help. So this
+   * replaces them with a diagnostic step to TRY (offered as a suggestion,
+   * because whether Codex loads newly written hook files into a session that is
+   * already open is undocumented — we do not claim a reload requirement), plus
+   * the three ordinary explanations for nothing at all stamping: the stamps
+   * landing in a different state dir, project trust, and a hook command that
+   * errors before it can stamp.
+   *
+   * Empty in every other case: if ANY hook has fired, or the registration is not
+   * valid and complete, the generic summary is the right one.
+   */
+  verifyNotes(r: Resolved): string[] {
+    const hp = hooksJsonPath(r);
+    if (!fs.existsSync(hp)) return [];
+    const raw = readHooksFile(hp);
+    if (validateCodexHooks(raw).length > 0) return [];
+    const allRegistered = CODEX_EVENTS.every((e) => registeredCommand(raw, e) !== undefined);
+    if (!allRegistered) return [];
+    if (CODEX_EVENTS.some((e) => hookFiredAge(r, e) !== undefined)) return [];
+
+    const sample = registeredCommand(raw, 'Stop') ?? registeredCommand(raw, 'PostToolUse') ?? '';
+    return [
+      '',
+      'EVERY wired hook reads never-fired, and the registration itself is valid.',
+      'That is UNVERIFIED, not failed: nothing here proves the hooks are broken, and',
+      'nothing here proves they run.',
+      '',
+      'DIAGNOSTIC STEP (something to try — not a documented root cause, and not a claim',
+      'that Codex requires a reload; whether a running session picks up newly written',
+      'hook files is undocumented):',
+      '  After installing and trusting hooks, restart Codex in this workspace, run a prompt that uses a tool and finishes, then run verify again.',
+      '',
+      'Three things explain a blanket never-fired. Check them in this order:',
+      '  1. The stamps land somewhere else. This command reads exactly one directory:',
+      `       ${firedDir(r)}`,
+      '     A hook running with a different SPARROW_STATE_DIR stamps its own and reads',
+      '     as never-fired here.',
+      '  2. Project trust state. An untrusted project has its whole .codex/ layer ignored,',
+      '     and hook trust is a second, separate gate. Neither one reports anything.',
+      '  3. The hook command errors before it can stamp. Run it by hand and read the error:',
+      ...(sample ? [`       echo '{}' | ${sample}`] : []),
+    ];
   },
 
   postInstallNotes(r: Resolved): string[] {

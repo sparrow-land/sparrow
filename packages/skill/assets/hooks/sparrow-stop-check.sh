@@ -81,7 +81,22 @@ dead_signal=""
 # Codex runs hooks as children of the session process, so they inherit its
 # CODEX_THREAD_ID; if a future runner strips it we simply name the runtime
 # generically and treat plain `await` as unjudgeable.
-await_command="sparrow await"
+# ONE PRESCRIPTION, TWO LANGUAGES. A machine hosting several agents under one
+# unix user shares ONE credentials.json, so a bare `sparrow await` typed into a
+# fresh shell acts as whichever neighbour owns defaultProfile. A project-scope
+# install stamps SPARROW_PROFILE into this hook's command precisely so the hook
+# knows which agent it speaks for -- so when it is set, every command this nudge
+# prescribes names it. The rendering must match the CLI's `awaitCommand()`
+# (packages/skill/src/listener.ts) exactly; listener.test.ts pins the pair.
+sparrow_cmd() {
+  if [ -n "${SPARROW_PROFILE:-}" ]; then
+    printf 'sparrow %s --profile %s' "$1" "$SPARROW_PROFILE"
+  else
+    printf 'sparrow %s' "$1"
+  fi
+}
+await_command=$(sparrow_cmd await)
+pop_command=$(sparrow_cmd pop)
 if [ -n "${CODEX_THREAD_ID:-}" ]; then
   runtime="Codex"
 else
@@ -203,13 +218,13 @@ if [ -n "$dead_word" ]; then
   else
     cause="was stopped (Ctrl-C)"
   fi
-  reason="Sparrow loop is engaged but your listener $cause${suffix} -- nothing is listening now, so nothing can wake $runtime. Re-arm it: run $await_command as a tracked background task, then drain with sparrow pop when work wakes you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+  reason="Sparrow loop is engaged but your listener $cause${suffix} -- nothing is listening now, so nothing can wake $runtime. Re-arm it: run $await_command as a tracked background task, then drain with $pop_command when work wakes you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 elif [ -n "$passive_await" ]; then
-  reason="Sparrow loop is engaged and a passive sparrow await listener is alive${suffix}, but it has no verified queue bridge back into this Codex thread. Re-arm with the current CLI: run sparrow await as a tracked background task; a bridged listener stamps await:codex. Then drain with sparrow pop when work wakes you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+  reason="Sparrow loop is engaged and a passive await listener is alive${suffix}, but it has no verified queue bridge back into this Codex thread. Re-arm with the current CLI: run $await_command as a tracked background task; a bridged listener stamps await:codex. Then drain with $pop_command when work wakes you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 elif [ -n "$hold_kind" ]; then
-  reason="Sparrow loop is engaged and a listener IS alive, but it is sparrow $hold_kind${suffix} -- that holds you online (green presence) and can never wake $runtime, which is the online-but-deaf state, worse than being offline. Run $await_command as a tracked background task instead, then drain with sparrow pop when work wakes you. Keep sparrow $hold_kind only if you are genuinely always-running (a process that keeps thinking between messages). To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+  reason="Sparrow loop is engaged and a listener IS alive, but it is sparrow $hold_kind${suffix} -- that holds you online (green presence) and can never wake $runtime, which is the online-but-deaf state, worse than being offline. Run $await_command as a tracked background task instead, then drain with $pop_command when work wakes you. Keep sparrow $hold_kind only if you are genuinely always-running (a process that keeps thinking between messages). To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 else
-  reason="Sparrow loop is engaged but no listener is running${suffix}. Turn-based (you think only when invoked)? Re-arm your wake command: $await_command as a background task, then drain with sparrow pop when work wakes you. Always-running? Re-start sparrow watch/loop. Note this hook checks the heartbeat a listener leaves behind -- a heartbeat with no listener kind (an older CLI, or your own curl loop) it cannot judge, so a re-armed await is on you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+  reason="Sparrow loop is engaged but no listener is running${suffix}. Turn-based (you think only when invoked)? Re-arm your wake command: $await_command as a background task, then drain with $pop_command when work wakes you. Always-running? Re-start sparrow watch/loop. Note this hook checks the heartbeat a listener leaves behind -- a heartbeat with no listener kind (an older CLI, or your own curl loop) it cannot judge, so a re-armed await is on you. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 fi
 
 # Emit the block decision. Keep the reason free of double-quotes/newlines so this

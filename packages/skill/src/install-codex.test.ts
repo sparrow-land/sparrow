@@ -474,8 +474,10 @@ describe('verify --codex', () => {
     expect(await run(['verify', '--codex'])).toBe(1);
     const out = logs.join('\n');
     for (const event of EVENTS) expect(out).toContain(`fired ${event}: NEVER — UNVERIFIED`);
-    expect(out).toMatch(/UNVERIFIED/);
-    expect(out).toMatch(/never fired is not proof/i);
+    // Nothing has fired at all here, so the summary is the blanket-never-fired
+    // diagnostic (below), not the generic "run one real turn" line.
+    expect(out).toMatch(/4 check\(s\) UNVERIFIED/);
+    expect(out).toMatch(/nothing here has been observed running/i);
   });
 
   it('reports registration and the playbook separately from firing', async () => {
@@ -498,6 +500,83 @@ describe('verify --codex', () => {
     const out = logs.join('\n');
     expect(out).toContain('All checks passed.');
     for (const event of EVENTS) expect(out).toMatch(new RegExp(`fired ${event}: yes,`));
+  });
+
+  /* ------------------ blanket never-fired: a diagnostic, not a verdict ------------------
+   * The field report this answers: an agent installed the hooks, did BOTH trust
+   * steps, ran turns — and all four events still read never-fired. Repeating the
+   * trust instructions at that point is the one answer that cannot help. What it
+   * needs instead is a diagnostic step (offered as a suggestion, since whether
+   * Codex loads new hook files into a live session is undocumented) plus the
+   * three things that actually explain a BLANKET never-fired.
+   */
+  it('answers a blanket never-fired with one diagnostic step, not the trust instructions again', async () => {
+    await run(['install', '--codex']);
+    logs.length = 0;
+    expect(await run(['verify', '--codex'])).toBe(1);
+    const out = logs.join('\n');
+    // The diagnostic step, labelled as a suggestion to try.
+    expect(out).toMatch(/diagnostic step/i);
+    expect(out).toContain(
+      'After installing and trusting hooks, restart Codex in this workspace, run a prompt ' +
+        'that uses a tool and finishes, then run verify again',
+    );
+    expect(out).toMatch(/not a documented|not a known root cause|undocumented/i);
+    // The three explanations for a blanket never-fired, each actionable.
+    expect(out).toContain(path.join(stateDir, 'hooks-fired'));
+    expect(out).toMatch(/trust/i);
+    expect(out).toMatch(/run it by hand/i);
+    // The exact hook command line, copy-pasteable.
+    expect(out).toContain(hookScript(cwd, 'sparrow-codex-hook.sh'));
+    // Never a verdict: not "failed", not "expected to have fired".
+    expect(out).not.toMatch(/expected to have fired/i);
+    expect(out).not.toMatch(/fired \w+: FAIL/);
+    // And it does NOT re-run the two trust steps as if they were the answer.
+    expect(out).not.toContain('Run /hooks in the Codex TUI');
+  });
+
+  it('words SessionStart as firing on the NEXT new session, never as overdue', async () => {
+    await run(['install', '--codex']);
+    logs.length = 0;
+    await run(['verify', '--codex']);
+    const out = logs.join('\n');
+    expect(out).toContain('fired SessionStart: NEVER — UNVERIFIED (fires on the next new session');
+    // The other three carry no such excuse.
+    expect(out).toContain('fired Stop: NEVER — UNVERIFIED');
+    expect(out).not.toContain('fired Stop: NEVER — UNVERIFIED (fires');
+  });
+
+  it('keeps the generic wording when only SOME hooks are unproven', async () => {
+    await run(['install', '--codex']);
+    for (const event of EVENTS.slice(0, 3)) markFired(event);
+    logs.length = 0;
+    expect(await run(['verify', '--codex'])).toBe(1);
+    const out = logs.join('\n');
+    // Something HAS fired here, so a restart is not the story — the ordinary
+    // "run one real turn" summary is right.
+    expect(out).not.toMatch(/restart Codex in this workspace/);
+    expect(out).toMatch(/never fired is not proof/i);
+  });
+
+  it('prints `codex --version` when codex is on PATH, and never fails without it', async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-codex-bin-'));
+    const codex = path.join(binDir, 'codex');
+    fs.writeFileSync(codex, '#!/bin/sh\nprintf "codex-cli 0.153.3\\n"\n');
+    fs.chmodSync(codex, 0o755);
+    try {
+      await run(['install', '--codex']);
+      logs.length = 0;
+      await run(['verify', '--codex'], { env: { ...env(), PATH: binDir } });
+      expect(logs.join('\n')).toContain('codex-cli 0.153.3');
+
+      // No codex on PATH: no line, no crash, same exit code.
+      logs.length = 0;
+      const code = await run(['verify', '--codex'], { env: { ...env(), PATH: '/nonexistent' } });
+      expect(code).toBe(1);
+      expect(logs.join('\n')).not.toContain('codex-cli 0.153.3');
+    } finally {
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
   });
 
   it('fails loudly when the hooks file was replaced with a Claude-shaped one', async () => {

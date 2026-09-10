@@ -76,19 +76,35 @@ if [ -f "$HEARTBEAT_FILE" ]; then
   esac
 fi
 
+# ONE PRESCRIPTION, TWO LANGUAGES. Several agents on one machine share ONE
+# credentials.json, so a bare `sparrow await` in a fresh shell arms whichever
+# neighbour owns defaultProfile. A project-scope install stamps SPARROW_PROFILE
+# into this hook's command precisely so it knows which agent it speaks for. The
+# rendering must match the CLI's `awaitCommand()`
+# (packages/skill/src/listener.ts) exactly; listener.test.ts pins the pair.
+sparrow_cmd() {
+  if [ -n "${SPARROW_PROFILE:-}" ]; then
+    printf 'sparrow %s --profile %s' "$1" "$SPARROW_PROFILE"
+  else
+    printf 'sparrow %s' "$1"
+  fi
+}
+await_command=$(sparrow_cmd await)
+pop_command=$(sparrow_cmd pop)
+
 case "$listener" in
-  await:codex) advice="A Codex-bridged sparrow await listener is present and can deliver the next turn." ;;
-  await) advice="A passive sparrow await listener is present, but it has no verified route back into this Codex thread. Re-arm it with the current CLI: run unbounded sparrow await as a background task." ;;
-  watch | loop) advice="A sparrow $listener listener is holding you online but CANNOT wake you: if you are turn-based, replace it with unbounded sparrow await as a background task." ;;
-  unknown) advice="Something is heartbeating but claims no listener kind, so it cannot be judged: if you did not arm a wake path yourself, run unbounded sparrow await as a background task." ;;
-  killed | stopped) advice="Your listener was $listener - nothing can wake you. Run unbounded sparrow await as a background task before anything else." ;;
-  *) advice="No listener is running. Run unbounded sparrow await as a background task before anything else." ;;
+  await:codex) advice="A Codex-bridged await listener is present and can deliver the next turn." ;;
+  await) advice="A passive await listener is present, but it has no verified route back into this Codex thread. Re-arm it with the current CLI: run unbounded $await_command as a background task." ;;
+  watch | loop) advice="A sparrow $listener listener is holding you online but CANNOT wake you: if you are turn-based, replace it with unbounded $await_command as a background task." ;;
+  unknown) advice="Something is heartbeating but claims no listener kind, so it cannot be judged: if you did not arm a wake path yourself, run unbounded $await_command as a background task." ;;
+  killed | stopped) advice="Your listener was $listener - nothing can wake you. Run unbounded $await_command as a background task before anything else." ;;
+  *) advice="No listener is running. Run unbounded $await_command as a background task before anything else." ;;
 esac
 
 advice="$advice Plain process exit alone does not start a Codex turn; current Sparrow detects CODEX_THREAD_ID and supplies the queue bridge automatically. Ordinary timeouts do not queue turns; a terminal client-upgrade response does."
 
 # Hand-rolled JSON: keep the payload free of double quotes, backslashes and
 # newlines so it stays valid without an escaper.
-printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Sparrow: this workspace is Sparrow-enabled and your loop switch is engaged (state dir %s). Read the sparrow skill at %s (invoke it with $sparrow) before you touch the inbox. %s Then drain with sparrow pop until it answers Inbox empty., reply in-room, and re-arm await as the LAST thing you do in every turn. Never pipe sparrow output through jq or grep. To step away on purpose: sparrow skill pause."}}\n' \
-  "$STATE_DIR" "$SKILL_PATH" "$advice"
+printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Sparrow: this workspace is Sparrow-enabled and your loop switch is engaged (state dir %s). Read the sparrow skill at %s (invoke it with $sparrow) before you touch the inbox. %s Then drain with %s until it answers Inbox empty., reply in-room, and re-arm await as the LAST thing you do in every turn. Never pipe sparrow output through jq or grep. To step away on purpose: sparrow skill pause."}}\n' \
+  "$STATE_DIR" "$SKILL_PATH" "$advice" "$pop_command"
 exit 0

@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { awaitCommand } from './listener.js';
 
 const HOOKS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'hooks');
 const SCRIPT = path.join(HOOKS_DIR, 'sparrow-auto-status.sh');
@@ -468,6 +469,28 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     const out = runHook('prompt', '{"prompt":"go"}', { CODEX_THREAD_ID: 'thread-123' }).stdout;
     expect(out).toContain('run `sparrow await`');
     expect(out).not.toContain('--timeout');
+  });
+
+  it('names SPARROW_PROFILE in the re-arm, identically to awaitCommand()', () => {
+    // A shared machine: this hook is stamped with the profile it speaks for, so
+    // the command it hands back must select that same store — a bare re-arm in a
+    // fresh shell would arm the NEIGHBOUR who owns defaultProfile.
+    writeLoopState('engaged');
+    writeHeartbeat('killed:SIGTERM');
+    stubCurl();
+    const want = awaitCommand({ profile: 'cubes-vm4-codex' });
+    const out = runHook('prompt', '{"prompt":"go"}', { SPARROW_PROFILE: 'cubes-vm4-codex' }).stdout;
+    expect(out).toContain(`run \`${want}\``);
+    expect(out.replace(new RegExp(want, 'g'), '')).not.toContain('sparrow await');
+  });
+
+  it('stays byte-identical to the bare command when no profile is stamped', () => {
+    writeLoopState('engaged');
+    writeHeartbeat('killed:SIGTERM');
+    stubCurl();
+    const out = runHook('prompt', '{"prompt":"go"}').stdout;
+    expect(out).toContain(`run \`${awaitCommand()}\``);
+    expect(out).not.toContain('--profile');
   });
 
   it('names SIGHUP too', () => {
