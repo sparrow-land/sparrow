@@ -306,6 +306,26 @@ describe('sparrow-codex-hook.sh — the firing stamp', () => {
     expect(fs.existsSync(stamp('SessionStart'))).toBe(true);
   });
 
+  /**
+   * A HAND-RUN of the hook command is a script check, not evidence that Codex
+   * invoked anything — but it writes the same stamp, which would otherwise turn
+   * `verify` green on the strength of the agent's own typing. So the diagnostic
+   * line `verify` prints carries `SPARROW_HOOK_SELFTEST=1`, and the wrapper
+   * records WHICH kind of run made the stamp.
+   */
+  it('records a runtime stamp normally and a manual one under SPARROW_HOOK_SELFTEST', () => {
+    const inner = innerHook('exit 0');
+    run(WRAPPER, ['Stop', inner]);
+    expect(fs.readFileSync(stamp('Stop'), 'utf8').trim()).toBe('runtime');
+
+    run(WRAPPER, ['Stop', inner], { env: { SPARROW_HOOK_SELFTEST: '1' } });
+    expect(fs.readFileSync(stamp('Stop'), 'utf8').trim()).toBe('manual');
+
+    // …and back: a real firing after a self-test tells the truth again.
+    run(WRAPPER, ['Stop', inner]);
+    expect(fs.readFileSync(stamp('Stop'), 'utf8').trim()).toBe('runtime');
+  });
+
   it('refreshes the stamp mtime on every firing', () => {
     const inner = innerHook('exit 0');
     run(WRAPPER, ['Stop', inner]);

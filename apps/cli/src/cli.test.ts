@@ -661,8 +661,12 @@ describe('sparrow CLI — enroll', () => {
     // `watch` survives ONLY as the always-running alternative, after await.
     expect(out.indexOf('sparrow await')).toBeLessThan(out.indexOf('sparrow watch'));
     expect(out).toMatch(/Always-running/);
-    // The wake contract is stated: exit IS the wake, and re-arm every turn.
-    expect(out).toMatch(/exits when work arrives/i);
+    // The wake contract, stated CORRECTLY for Codex: the listener queues a turn
+    // through the Codex bridge. Process exit alone delivers nothing here — the
+    // misconception that cost an agent seven unread DMs.
+    expect(out).toContain('queues a turn into this Codex session');
+    expect(out).toContain('Process exit alone does not deliver a turn');
+    expect(out).not.toContain('That exit is your wake');
     expect(out).toMatch(/re-arm/i);
     expect(out).toMatch(/background task/i);
     // Come online first, report second — kept from the live-dogfood fix.
@@ -682,8 +686,34 @@ describe('sparrow CLI — enroll', () => {
     expect(out).toMatch(/Always-running/);
     expect(out).toContain('sparrow await');
     expect(out).toContain('sparrow watch');
+    // Runtime unknown ⇒ BOTH delivery routes, and the honest warning that a bare
+    // process exit is not a wake unless the harness makes it one.
+    expect(out).toContain('queues a turn into that session');
+    expect(out).toContain('re-invokes the session on the tracked task’s exit');
+    expect(out).toContain('a bare process exit is not a wake');
+    expect(out).not.toContain('That exit is your wake');
     // The default profile needs no qualifier — no new noise for one agent.
     expect(out).not.toContain('--profile');
+  });
+
+  it('under Claude Code the banner says the tracked task’s exit re-invokes the session', async () => {
+    const owner = await boot('claudeenroll@x.com');
+    await setAgentPolicy(owner, 'open');
+    const inv = await owner.client.createInvite(owner.orgId);
+    const cap = capture();
+    expect(
+      await runCli(
+        ['enroll', inv.url, '--server', url, '--name', 'claudebot'],
+        { ...env, CLAUDECODE: '1' },
+        cap.io,
+      ),
+    ).toBe(0);
+    const out = cap.out();
+    expect(out).toContain('sparrow await');
+    expect(out).toContain('re-invokes this session on the tracked task’s exit');
+    // Codex's delivery route must not leak into the Claude Code banner.
+    expect(out).not.toContain('Codex');
+    expect(out).not.toContain('That exit is your wake');
   });
 
   it('says how to reach the owner: the DM room and a ready-to-run hello', async () => {
@@ -762,6 +792,95 @@ describe('sparrow CLI — enroll', () => {
     expect(cap.err()).not.toContain('sparrow upgrade');
     expect(cap.out()).toContain('You are vsnquietbot');
   });
+
+  /* ------------------- a stalled server must not hold anyone -------------------
+   * The version line is a COURTESY, but it is awaited before enrollment and
+   * before a purely local skill install — so an unresponsive server (accepting
+   * the connection and never answering, or answering headers and then stalling
+   * mid-body) would hang both indefinitely. The fetch is bounded by an
+   * AbortSignal that stays live through `res.json()`; either way the line is
+   * skipped in silence and the command carries on.
+   */
+  interface Stall {
+    origin: string;
+    close: () => Promise<void>;
+  }
+
+  /**
+   * A server that stalls `/api/v1/meta` — before headers, or mid-body — and
+   * reverse-proxies everything else to the real test API, so enrollment against
+   * it is a genuine end-to-end enroll.
+   */
+  async function stallingProxy(mode: 'headers' | 'body'): Promise<Stall> {
+    const sockets = new Set<Socket>();
+    const server = http.createServer((req, res) => {
+      if ((req.url ?? '').startsWith('/api/v1/meta')) {
+        if (mode === 'body') {
+          res.writeHead(200, { 'content-type': 'application/json', 'transfer-encoding': 'chunked' });
+          res.write('{"client":{"minimum":"0.0.1"');   // valid so far… then nothing
+        }
+        return; // never end() — the client must time itself out
+      }
+      const upstream = new URL(url);
+      const proxied = http.request(
+        {
+          hostname: upstream.hostname,
+          port: upstream.port,
+          path: req.url,
+          method: req.method,
+          headers: { ...req.headers, host: upstream.host },
+        },
+        (up) => {
+          res.writeHead(up.statusCode ?? 502, up.headers);
+          up.pipe(res);
+        },
+      );
+      proxied.on('error', () => res.destroy());
+      req.pipe(proxied);
+    });
+    server.on('connection', (s) => {
+      sockets.add(s);
+      s.on('close', () => sockets.delete(s));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+    return {
+      origin: `http://127.0.0.1:${port}`,
+      close: async () => {
+        for (const s of sockets) s.destroy();
+        await new Promise<void>((r) => server.close(() => r()));
+      },
+    };
+  }
+
+  it.each(['headers', 'body'] as const)(
+    'enroll survives a server that stalls /api/v1/meta (%s) — no line, no error, no hang',
+    async (mode) => {
+      const owner = await boot(`stall${mode}@x.com`);
+      await setAgentPolicy(owner, 'open');
+      const inv = await owner.client.createInvite(owner.orgId);
+      const stall = await stallingProxy(mode);
+      try {
+        const cap = capture();
+        const started = Date.now();
+        expect(
+          await runCli(
+            ['enroll', inv.url, '--server', stall.origin, '--name', `stallbot-${mode}`],
+            env,
+            cap.io,
+          ),
+        ).toBe(0);
+        const elapsed = Date.now() - started;
+        expect(elapsed).toBeLessThan(10_000);
+        expect(cap.out()).toContain(`You are stallbot-${mode}`);
+        expect(cap.err()).not.toContain('sparrow CLI ');
+        expect(cap.err()).not.toMatch(/abort|timeout|fetch failed/i);
+      } finally {
+        await stall.close();
+      }
+    },
+    20_000,
+  );
 
   it('open policy honors --name', async () => {
     const owner = await boot('open2@x.com');
@@ -1306,6 +1425,49 @@ describe('sparrow CLI — skill install flags', () => {
     expect(cap.err()).toContain('99.1.0');
     expect(cap.err()).toContain('sparrow upgrade');
   });
+
+  it.each(['headers', 'body'] as const)(
+    'skill install survives a profile server that stalls /api/v1/meta (%s)',
+    async (mode) => {
+      // A purely LOCAL install must never be held up by a courtesy line: this
+      // server accepts and then answers nothing (or stalls mid-body).
+      const sockets = new Set<Socket>();
+      const server = http.createServer((_req, res) => {
+        if (mode === 'body') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.write('{"client":{"minimum":"0.0.1"');
+        }
+        /* never end() */
+      });
+      server.on('connection', (s) => {
+        sockets.add(s);
+        s.on('close', () => sockets.delete(s));
+      });
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+      const stalled = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      try {
+        fs.mkdirSync(path.join(configDir, 'sparrow'), { recursive: true });
+        fs.writeFileSync(
+          path.join(configDir, 'sparrow', 'credentials.json'),
+          JSON.stringify({
+            profiles: { stalled: { server: stalled, token: 'agk_x', kind: 'agent' } },
+            defaultProfile: 'stalled',
+          }),
+        );
+        const cap = capture();
+        const started = Date.now();
+        expect(await runCli(['skill', 'install'], skillEnv(), cap.io)).toBe(0);
+        expect(Date.now() - started).toBeLessThan(10_000);
+        expect(cap.err()).not.toContain('sparrow CLI ');
+        expect(cap.err()).not.toMatch(/abort|timeout|fetch failed/i);
+        expect(fs.existsSync(path.join(projectDir, '.claude', 'settings.local.json'))).toBe(true);
+      } finally {
+        for (const s of sockets) s.destroy();
+        await new Promise<void>((r) => server.close(() => r()));
+      }
+    },
+    20_000,
+  );
 
   it('--shared targets the committed .claude/settings.json', async () => {
     const cap = capture();

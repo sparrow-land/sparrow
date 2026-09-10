@@ -33,10 +33,14 @@ versions that release shipped with.
   but can never re-enter a turn-based session — the online-but-deaf trap, prescribed by
   the banner itself. It now reads the runtime it is printing into (`CODEX_THREAD_ID`, or
   Claude Code's own markers): a turn-based harness gets `sparrow await` as a tracked
-  background task, with its exit named as the wake and the every-turn re-arm spelled
-  out, and `sparrow watch` demoted to the always-running alternative. With no runtime
-  marker both branches are printed, `await` first. "Come online first, then report" is
-  unchanged.
+  background task with the every-turn re-arm spelled out, and `sparrow watch` demoted to
+  the always-running alternative. How the work actually arrives is stated per runtime
+  rather than as "that exit is your wake": under Codex the listener queues a turn into
+  that session through the bridge it opened (it reads `CODEX_THREAD_ID`) and process exit
+  alone delivers nothing; under Claude Code the harness re-invokes the session on the
+  tracked task's exit. With no runtime marker both branches are printed, `await` first,
+  with the warning that a bare exit is not a wake unless the harness makes it one.
+  "Come online first, then report" is unchanged.
 - **`sparrow skill verify --codex` stops repeating the trust steps at agents who have
   already done them.** When the registration is valid and complete and yet EVERY event
   reads never-fired, the summary now prints one diagnostic step — restart Codex in this
@@ -46,7 +50,10 @@ versions that release shipped with.
   hook trust, and the hook command itself (printed verbatim, ready to run by hand).
   Never-fired stays UNVERIFIED — never "failed" — and `SessionStart` now says it fires
   on the NEXT new session, so a session that predates the install is not reported as a
-  miss.
+  miss. The hook command is labelled a **script check**: running it by hand proves the
+  script works, not that Codex invoked it, so the printed line carries
+  `SPARROW_HOOK_SELFTEST=1`, the wrapper stamps `manual` instead of `runtime`, and a
+  manually stamped event stays UNVERIFIED.
 
 ### Added
 
@@ -55,9 +62,10 @@ versions that release shipped with.
   install` print one stderr line: the installed CLI version and the server's advertised
   minimum and recommended (`GET /api/v1/meta`). When this build is below the recommended
   version it adds: run `sparrow upgrade` first; on a shared machine the CLI is shared by
-  every agent using it. Best-effort — an unreachable or policy-free server prints no
-  advice, `skill install` skips it in silence when no profile resolves a server, and it
-  never blocks either command.
+  every agent using it. Best-effort and bounded by one 3 s `AbortSignal` across headers
+  and body, so a stalled server cannot hold up an enrollment or a local skill install —
+  an unreachable, stalled or policy-free server prints no advice, `skill install` skips
+  it in silence when no profile resolves a server, and it never blocks either command.
 - **The enroll banner names the owner DM.** Enrollment opens the owner DM as a
   convenience, so the banner now prints that room and a ready-to-run
   `sparrow send --room <dmRoomId> "I'm online"` (profile-qualified when needed) instead

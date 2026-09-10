@@ -558,6 +558,41 @@ describe('verify --codex', () => {
     expect(out).toMatch(/never fired is not proof/i);
   });
 
+  it('does not count the manual script check as runtime proof', async () => {
+    await run(['install', '--codex']);
+    // Exactly what verify's own diagnostic tells you to run: the hand-run writes
+    // a stamp, and the stamp says so.
+    for (const event of EVENTS) {
+      fs.mkdirSync(path.join(stateDir, 'hooks-fired'), { recursive: true });
+      fs.writeFileSync(path.join(stateDir, 'hooks-fired', event), 'manual\n');
+    }
+    logs.length = 0;
+    expect(await run(['verify', '--codex'])).toBe(1);
+    const out = logs.join('\n');
+    for (const event of EVENTS) {
+      expect(out).toContain(`fired ${event}: NOT by Codex — a manual script check`);
+    }
+    expect(out).toMatch(/UNVERIFIED/);
+
+    // A runtime stamp is what verifies it. (An EMPTY stamp — any older CLI —
+    // counts as runtime too, which is what `markFired` writes above.)
+    for (const event of EVENTS) markFired(event);
+    logs.length = 0;
+    expect(await run(['verify', '--codex'])).toBe(0);
+    expect(logs.join('\n')).toContain('All checks passed.');
+  });
+
+  it('tells you a hand-run only checks the script, and self-tags the command it prints', async () => {
+    await run(['install', '--codex']);
+    logs.length = 0;
+    await run(['verify', '--codex']);
+    const out = logs.join('\n');
+    expect(out).toContain(
+      'script check (a manual run writes a stamp; verify will not treat that as runtime proof)',
+    );
+    expect(out).toContain('SPARROW_HOOK_SELFTEST=1');
+  });
+
   it('prints `codex --version` when codex is on PATH, and never fails without it', async () => {
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-codex-bin-'));
     const codex = path.join(binDir, 'codex');

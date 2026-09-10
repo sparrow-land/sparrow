@@ -14,6 +14,15 @@
 # an event with a stamp has been OBSERVED firing, and an event without one is
 # reported UNVERIFIED. That is the only honest signal available.
 #
+# THE STAMP RECORDS WHICH KIND OF RUN WROTE IT. `verify`'s diagnostics print the
+# hook command line so an agent can run it BY HAND and read the error — a script
+# check, not evidence that Codex invoked anything. That hand-run writes a stamp
+# just the same, which would otherwise turn `verify` green on the strength of the
+# agent's own typing. So the printed line carries `SPARROW_HOOK_SELFTEST=1` and
+# this writes `manual` instead of `runtime`; `verify` keeps a `manual`-stamped
+# event UNVERIFIED. Codex never sets that variable, and an EMPTY stamp (any
+# older CLI) still reads as `runtime`, exactly as it did before.
+#
 # Usage: sparrow-codex-hook.sh <Event> <script> [args...]
 # Contract: stdin, stdout and the exit status all belong to <script> (we `exec`
 # into it, so the hook's decision channel is untouched). Every failure path here
@@ -33,8 +42,9 @@ event=$(printf '%s' "$event" | tr -cd 'A-Za-z0-9_-')
 STATE_DIR="${SPARROW_STATE_DIR:-$HOME/.sparrow}"
 FIRED_DIR="$STATE_DIR/hooks-fired"
 if [ -n "$event" ]; then
+  if [ -n "${SPARROW_HOOK_SELFTEST:-}" ]; then kind=manual; else kind=runtime; fi
   mkdir -p "$FIRED_DIR" 2>/dev/null || true
-  : > "$FIRED_DIR/$event" 2>/dev/null || true
+  printf '%s\n' "$kind" > "$FIRED_DIR/$event" 2>/dev/null || true
 fi
 
 [ -x "$script" ] || exit 0

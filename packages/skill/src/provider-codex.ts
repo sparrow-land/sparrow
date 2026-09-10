@@ -387,14 +387,45 @@ function firedDir(r: Resolved): string {
   return path.join(r.stateDir, 'hooks-fired');
 }
 
-/** Seconds since `event` last fired, or `undefined` when it never has. */
-export function hookFiredAge(r: Resolved, event: string, now = Date.now()): number | undefined {
+/**
+ * What a firing stamp says: how old it is, and WHICH KIND of run wrote it.
+ *
+ * `manual` means the stamp came from the hook command being run BY HAND — the
+ * script check `verify`'s own diagnostics print, which carries
+ * `SPARROW_HOOK_SELFTEST=1`. That proves the script runs; it proves nothing at
+ * all about Codex's trust gates, so it must never verify an event. An empty
+ * stamp (written by any CLI before this) reads as `runtime`, exactly as before.
+ */
+export interface FiredStamp {
+  ageSeconds: number;
+  kind: 'runtime' | 'manual';
+}
+
+export function hookFiredStamp(r: Resolved, event: string, now = Date.now()): FiredStamp | undefined {
+  const file = path.join(firedDir(r), event);
+  let ageSeconds: number;
   try {
-    const st = fs.statSync(path.join(firedDir(r), event));
-    return Math.max(0, Math.floor((now - st.mtimeMs) / 1000));
+    const st = fs.statSync(file);
+    ageSeconds = Math.max(0, Math.floor((now - st.mtimeMs) / 1000));
   } catch {
     return undefined;
   }
+  let kind: FiredStamp['kind'] = 'runtime';
+  try {
+    if (fs.readFileSync(file, 'utf8').trim() === 'manual') kind = 'manual';
+  } catch {
+    /* unreadable stamp: judged by its mtime alone, as before */
+  }
+  return { ageSeconds, kind };
+}
+
+/**
+ * Seconds since `event` was last OBSERVED FIRING — a manual script check is not
+ * a firing, so it reads as `undefined` here exactly like no stamp at all.
+ */
+export function hookFiredAge(r: Resolved, event: string, now = Date.now()): number | undefined {
+  const stamp = hookFiredStamp(r, event, now);
+  return stamp && stamp.kind === 'runtime' ? stamp.ageSeconds : undefined;
 }
 
 function fmtAge(seconds: number): string {
@@ -608,13 +639,21 @@ export const CODEX_ADAPTER: ProviderAdapter = {
     // session that was already open when the install landed was never going to
     // stamp it, and calling that a miss would be a false accusation.
     for (const event of CODEX_EVENTS) {
-      const age = hookFiredAge(r, event);
+      const stamp = hookFiredStamp(r, event);
       const note = event === 'SessionStart' ? ' (fires on the next new session)' : '';
-      lines.push(
-        age === undefined
-          ? { level: 'warn', text: `fired ${event}: NEVER — UNVERIFIED${note}` }
-          : { level: 'ok', text: `fired ${event}: yes, ${fmtAge(age)}` },
-      );
+      if (stamp?.kind === 'runtime') {
+        lines.push({ level: 'ok', text: `fired ${event}: yes, ${fmtAge(stamp.ageSeconds)}` });
+      } else if (stamp?.kind === 'manual') {
+        lines.push({
+          level: 'warn',
+          text:
+            `fired ${event}: NOT by Codex — a manual script check stamped it ` +
+            `${fmtAge(stamp.ageSeconds)} (UNVERIFIED: that run proves the script works, ` +
+            `not that Codex invoked it)`,
+        });
+      } else {
+        lines.push({ level: 'warn', text: `fired ${event}: NEVER — UNVERIFIED${note}` });
+      }
     }
     return lines;
   },
@@ -663,8 +702,9 @@ export const CODEX_ADAPTER: ProviderAdapter = {
       '     as never-fired here.',
       '  2. Project trust state. An untrusted project has its whole .codex/ layer ignored,',
       '     and hook trust is a second, separate gate. Neither one reports anything.',
-      '  3. The hook command errors before it can stamp. Run it by hand and read the error:',
-      ...(sample ? [`       echo '{}' | ${sample}`] : []),
+      '  3. The hook command errors before it can stamp. Run it by hand and read the error —',
+      '     script check (a manual run writes a stamp; verify will not treat that as runtime proof):',
+      ...(sample ? [`       echo '{}' | SPARROW_HOOK_SELFTEST=1 ${sample}`] : []),
     ];
   },
 

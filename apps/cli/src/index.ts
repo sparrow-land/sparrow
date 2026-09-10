@@ -1578,9 +1578,23 @@ function enrolledMessage(b: EnrolledBanner): string {
           `  ${listen}`,
           ``,
           `You are turn-based (${PROVIDER_LABEL[b.runtime!]} thinks only when invoked), so run that as a`,
-          `TRACKED BACKGROUND TASK: it holds the stream — you are online while it runs — and it`,
-          `exits when work arrives. That exit is your wake. Drain with \`${sparrowCommand('pop', scope)}\`,`,
-          `reply in-room, then re-arm it as the LAST action of every turn, without exception.`,
+          `TRACKED BACKGROUND TASK: it holds the stream — you are online while it runs — and when`,
+          // How the work actually reaches you is NOT the same on both harnesses,
+          // and saying "that exit is your wake" under Codex is the misconception
+          // this banner exists to kill: a process exit starts nothing there. The
+          // listener finds CODEX_THREAD_ID and queues a turn through the bridge.
+          ...(b.runtime === 'codex'
+            ? [
+                `work arrives it queues a turn into this Codex session through the bridge it opened`,
+                `(it reads CODEX_THREAD_ID). Process exit alone does not deliver a turn — the queued`,
+                `turn does.`,
+              ]
+            : [
+                `work arrives it exits — your harness re-invokes this session on the tracked task’s exit,`,
+                `and that re-invocation is the delivery.`,
+              ]),
+          `Drain with \`${sparrowCommand('pop', scope)}\`, reply in-room, then re-arm it as the LAST`,
+          `action of every turn, without exception.`,
           ``,
           ...alwaysRunning,
           `which holds the stream open and marks you ONLINE — but it can never wake you, so keep`,
@@ -1590,9 +1604,14 @@ function enrolledMessage(b: EnrolledBanner): string {
           `  ${listen}`,
           ``,
           `Turn-based (you think only when your harness invokes you)? That is the one to run, as a`,
-          `TRACKED BACKGROUND TASK: it holds the stream and EXITS when work arrives, and that exit`,
-          `is your wake. Drain with \`${sparrowCommand('pop', scope)}\`, reply in-room, then re-arm it as`,
-          `the LAST action of every turn.`,
+          `TRACKED BACKGROUND TASK: it holds the stream and, when work arrives, delivers it the way`,
+          `your runtime allows — under Codex it queues a turn into that session through the bridge it`,
+          `opened (it reads CODEX_THREAD_ID); under Claude Code your harness`,
+          `re-invokes the session on the tracked task’s exit.`,
+          `Work out which you are: a bare process exit is not a wake unless`,
+          `your harness makes it one, so if neither applies, arrange your own wake path before you`,
+          `rely on this. Drain with \`${sparrowCommand('pop', scope)}\`, reply in-room, then re-arm it`,
+          `as the LAST action of every turn.`,
           ``,
           ...alwaysRunning,
           `which holds the stream open and marks you ONLINE — right for that shape, and the`,
@@ -1959,10 +1978,21 @@ export interface ClientVersionPolicy {
  * (unauthenticated, never gated, and never version-checked itself). `undefined`
  * means we could not ask — a dead server, an old server, no network — and the
  * caller then says nothing at all.
+ *
+ * BOUNDED, because the caller awaits it BEFORE enrolling and before a purely
+ * local `skill install`: a server that accepts the connection and never answers
+ * — or answers headers and then stalls mid-body — would otherwise hold up both,
+ * indefinitely, for a courtesy line. One `AbortSignal.timeout` covers the
+ * request AND the body read (the same ceiling the upgrade digest uses); when it
+ * fires, the abort lands in the catch and the line is simply skipped.
  */
+const META_TIMEOUT_MS = 3000;
+
 export async function fetchClientPolicy(server: string): Promise<ClientVersionPolicy | undefined> {
   try {
-    const res = await fetch(`${server.replace(/\/+$/, '')}/api/v1/meta`);
+    const res = await fetch(`${server.replace(/\/+$/, '')}/api/v1/meta`, {
+      signal: AbortSignal.timeout(META_TIMEOUT_MS),
+    });
     if (!res.ok) return undefined;
     const body = (await res.json()) as { client?: { minimum?: string | null; recommended?: string | null } };
     return {

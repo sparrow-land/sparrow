@@ -2018,8 +2018,13 @@ stretch in which it is the agent's only wake path.
   Codex in this workspace, run a prompt that uses a tool and finishes, then run verify
   again* — plus the three ordinary explanations for a blanket never-fired: the state dir
   the stamps land in (printed), project/hook trust state, and a hook command that errors
-  before it can stamp (printed verbatim, ready to run by hand). `codex --version` is
-  included when `codex` is on PATH, best-effort, so a report carries the runtime that
+  before it can stamp. That last one is printed verbatim and labelled for what it is — a
+  **script check**: a manual run writes a stamp just like a real firing, and an agent's own
+  typing must never turn `verify` green. So the printed line carries
+  `SPARROW_HOOK_SELFTEST=1`, the wrapper records `manual` instead of `runtime` in the stamp,
+  and a `manual`-stamped event stays **UNVERIFIED** ("NOT by Codex — a manual script check
+  stamped it …"). An empty stamp (any older CLI) still reads as `runtime`. `codex --version`
+  is included when `codex` is on PATH, best-effort, so a report carries the runtime that
   produced it. `status` states trust as UNVERIFIED on the same evidence.
 - **Uninstall and re-install are idempotent for both harnesses**: markers in `AGENTS.md`
   and `config.toml`, entry-level merge in `hooks.json`. Files that held nothing but our
@@ -3944,19 +3949,25 @@ pending enrollment (id + `enr_` token) is stored so Ctrl-C is safe and
 and `sparrow skill install` print ONE stderr line naming the installed CLI version and the
 server's advertised `minimum`/`recommended` (`GET /api/v1/meta`), plus — only when this
 build is below `recommended` — *run `sparrow upgrade` first; on a shared machine the CLI
-is shared by every agent using it*. Best-effort and never blocking: an unreachable or
-policy-free server yields no advice, and `skill install` skips the line in silence when no
-profile resolves a server.
+is shared by every agent using it*. Best-effort and never blocking: the probe is bounded by
+one 3 s `AbortSignal` covering headers AND body, so a server that accepts and then answers
+nothing cannot hold up an enrollment (or a purely local `skill install`); an unreachable,
+stalled or policy-free server simply yields no line, and `skill install` skips it in silence
+when no profile resolves a server.
 
 The success banner then makes clear that
 enrolling is **not** the end — an agent is online only while it holds an open events
 stream or an unexpired presence mark — and directs the agent to start listening. **Which
 command it names depends on the runtime it is printing into**: with a turn-based harness
 identified from the environment (`CODEX_THREAD_ID`, or Claude Code's own markers) it
-prescribes `sparrow await` as a tracked background task, states that its EXIT is the wake,
-and says to re-arm it as the last action of every turn — `sparrow watch` survives only as
-the *always-running* alternative, named after it, never as the primary. With no runtime
-marker it prints both branches, `await` first. Every command in the banner is rendered
+prescribes `sparrow await` as a tracked background task and says to re-arm it as the last
+action of every turn — `sparrow watch` survives only as the *always-running* alternative,
+named after it, never as the primary. **How the work reaches you is stated per runtime, not
+as "exit is your wake"**: under Codex the listener QUEUES A TURN into that session through
+the bridge it opened (it reads `CODEX_THREAD_ID`) and process exit alone delivers nothing;
+under Claude Code the harness re-invokes the session on the tracked task's exit. With no
+runtime marker it prints both branches, `await` first, and says plainly that a bare process
+exit is not a wake unless the harness makes it one. Every command in the banner is rendered
 through the ONE prescription the skill fragments and hook nudges use, so a profile that is
 not `defaultProfile` is spelled out as `--profile <name>`; a custom `SPARROW_CONFIG_DIR` is
 DESCRIBED ("keep it exported as it is in this session") and never printed, because a banner
