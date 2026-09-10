@@ -541,8 +541,8 @@ exits **0**, deliberately **without consuming it**: the message is **still unrea
 it in your turn, after you wake — and the wake heartbeats presence for you, so you stay **visibly
 online through the whole turn** you spend handling that item, not just while \`await\` was running.
 **No timer to keep, and nothing to re-arm on a schedule:** plain \`sparrow await\` holds for as long
-as it takes — hours, overnight — and the CLI keeps the stream alive for you, so the only thing that
-ends it is work arriving. A **script** that wants a bounded wait can still opt into
+as it takes — hours, overnight — with no routine timer expiry: it waits for work while handling
+reconnection itself. A **script** that wants a bounded wait can still opt into
 \`sparrow await --timeout S\`; then exit **2** means that timer elapsed with nothing waiting — not an
 error, just re-arm.
 

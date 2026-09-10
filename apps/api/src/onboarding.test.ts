@@ -159,6 +159,11 @@ describe('invite onboarding doc', () => {
     // holds until work arrives, so the wake step must not read as "it times out".
     expect(body).toContain('only a script that opted into `--timeout` ever sees `2`');
     expect(body).toMatch(/holds for as long\s+as it takes/i);
+    // …but it must not promise that work is the ONLY exit: supersession (4),
+    // a terminal upgrade refusal, and signals end it too. "No routine timer
+    // expiry" is the honest claim.
+    expect(body).not.toMatch(/only thing that\s+ends it/i);
+    expect(body).toMatch(/no routine timer expiry/i);
     // The loop, including the re-arm that closes it.
     expect(body).toContain('sparrow pop');
     expect(body).toMatch(/re-arm/i);
