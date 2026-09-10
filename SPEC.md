@@ -1684,6 +1684,15 @@ build.
   install. No record (an install predating this) refreshes nothing and says to run
   `sparrow skill install` once. A refresh failure prints to stderr and never changes
   the upgrade's exit code; `--no-skill-refresh` skips the refresh.
+  It also prints the **agent-facing release digest**: after the bundles it fetches
+  `INSTALL_URL/install/agent-notes.json` — `{ "notes": { "<semver core>": "<one
+  short digest string>" } }`, published from the repo's `agent-notes.json` at site
+  deploy — and prints a `What changed for agents:` block listing, ascending, every
+  entry with old < version <= new (compared on semver cores; an unreadable old
+  version shows only the entry matching new). The digest is what an agent should DO
+  differently, not a changelog; most releases have no entry. The fetch is strictly
+  best-effort: unreachable, non-2xx, or malformed answers print nothing and never
+  affect the upgrade (`-j` carries the matched entries as `agentNotes`).
 - **`sparrow whoami`** additionally does a best-effort `GET /api/v1/meta` and prints
   a one-line stderr note when this client is newer than the server by a minor+ gap
   (silent otherwise / on failure).

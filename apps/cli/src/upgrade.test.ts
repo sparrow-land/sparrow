@@ -57,9 +57,43 @@ const BUNDLE = [
 let installUrl: string;
 let stub: http.Server;
 
+/**
+ * What the install home serves as `/install/agent-notes.json` for the current
+ * test — `undefined` means the file is not published at all (a 404, which is
+ * the normal state of an install home that has not shipped a digest yet).
+ * Deliberately a raw string so a test can serve malformed JSON.
+ */
+let agentNotesBody: string | undefined;
+/** Every request the digest endpoint saw this test (cache-busting query included). */
+let agentNotesHits: string[] = [];
+/**
+ * Sentinel for `agentNotesBody`: the server ACCEPTS the request and then never
+ * answers — the stalled-install-home case the digest fetch must not inherit as
+ * an indefinite hang. Held responses are destroyed in afterEach so a hung
+ * socket never outlives its test.
+ */
+const HANG = '@@HANG@@';
+const hungResponses: http.ServerResponse[] = [];
+
 beforeAll(async () => {
   stub = http.createServer((req, res) => {
-    if ((req.url ?? '').startsWith('/install/')) {
+    const url = req.url ?? '';
+    if (url.startsWith('/install/agent-notes.json')) {
+      agentNotesHits.push(url);
+      if (agentNotesBody === HANG) {
+        hungResponses.push(res); // accept, say nothing, hold the socket open
+        return;
+      }
+      if (agentNotesBody === undefined) {
+        res.writeHead(404);
+        res.end('nope');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(agentNotesBody);
+      return;
+    }
+    if (url.startsWith('/install/')) {
       res.writeHead(200, { 'content-type': 'text/javascript' });
       res.end(BUNDLE);
       return;
@@ -70,7 +104,10 @@ beforeAll(async () => {
   await new Promise<void>((r) => stub.listen(0, '127.0.0.1', () => r()));
   installUrl = `http://127.0.0.1:${(stub.address() as AddressInfo).port}`;
 });
-afterAll(() => stub.close());
+afterAll(() => {
+  for (const res of hungResponses.splice(0)) res.destroy();
+  stub.close();
+});
 
 /* --------------------------------- harness ---------------------------------- */
 
@@ -100,6 +137,9 @@ describe('sparrow upgrade — skill refresh', () => {
   let previousCwd: string;
 
   beforeEach(() => {
+    agentNotesBody = undefined;
+    agentNotesHits = [];
+    for (const res of hungResponses.splice(0)) res.destroy();
     projectDir = tempDir('sparrow-upgrade-project-');
     home = tempDir('sparrow-upgrade-home-');
     configDir = tempDir('sparrow-upgrade-cfg-');
@@ -404,5 +444,184 @@ describe('sparrow upgrade — skill refresh', () => {
     // …and the hooks are still registered exactly once.
     expect(JSON.stringify(after.hooks)).toContain('sparrow-stop-check.sh');
     expect(after.hooks.Stop).toHaveLength(1);
+  });
+
+  /* --------------------------- the agent digest --------------------------- */
+
+  /**
+   * The agent that RUNS the upgrade is the one whose behaviour has to change,
+   * and it only gets one turn's attention on the subject. So `upgrade` fetches
+   * the install home's release digest and prints, in that same turn, the short
+   * "do this differently now" line for every release it just crossed.
+   *
+   * The stub bundle answers `--version` with `9.9.9+new`; the pre-existing
+   * bundle the harness writes reports `0.0.1+old`. So the crossed window is
+   * (0.0.1, 9.9.9].
+   */
+  describe('what changed for agents', () => {
+    /** The whole published file, as the install home would serve it. */
+    const publish = (notes: Record<string, unknown>): void => {
+      agentNotesBody = JSON.stringify({ notes });
+    };
+
+    it('prints only the releases this upgrade crossed, ascending', async () => {
+      publish({
+        '9.9.9': 'the newest thing',
+        '0.0.1': 'already had this one',
+        '1.2.3': 'the middle thing',
+        '0.0.2': 'the first new thing',
+        '10.0.0': 'not shipped to you yet',
+      });
+
+      const cap = capture();
+      expect(await runCli(['upgrade'], env(), cap.io)).toBe(0);
+
+      const out = cap.out();
+      expect(out).toContain('What changed for agents:');
+      expect(out).toContain('  0.0.2 — the first new thing');
+      expect(out).toContain('  1.2.3 — the middle thing');
+      expect(out).toContain('  9.9.9 — the newest thing');
+      // The boundary: the version you were ALREADY on is not news…
+      expect(out).not.toContain('already had this one');
+      // …and neither is one the install home has not shipped you.
+      expect(out).not.toContain('not shipped to you yet');
+      // Ascending, and below the upgrade line the user actually asked for.
+      const lines = out.split('\n');
+      expect(lines.indexOf('  0.0.2 — the first new thing')).toBeLessThan(
+        lines.indexOf('  1.2.3 — the middle thing'),
+      );
+      expect(lines.indexOf('  1.2.3 — the middle thing')).toBeLessThan(
+        lines.indexOf('  9.9.9 — the newest thing'),
+      );
+      expect(lines.findIndex((l) => l.startsWith('Upgraded sparrow'))).toBeLessThan(
+        lines.indexOf('What changed for agents:'),
+      );
+    });
+
+    /** Build metadata is invisible to the window: `0.0.1+old` IS `0.0.1`. */
+    it('compares on the semver core, so a build-stamped old version still excludes its own entry', async () => {
+      publish({ '0.0.1': 'you are on this already', '9.9.9': 'you are moving to this' });
+
+      const cap = capture();
+      expect(await runCli(['upgrade'], env(), cap.io)).toBe(0);
+      expect(cap.out()).toContain('  9.9.9 — you are moving to this');
+      expect(cap.out()).not.toContain('you are on this already');
+    });
+
+    /**
+     * An install home that has not published the file yet is the COMMON case,
+     * not an error: the upgrade the user asked for succeeded either way.
+     */
+    it('a missing digest file leaves the upgrade output untouched', async () => {
+      agentNotesBody = undefined; // 404
+
+      const cap = capture();
+      expect(await runCli(['upgrade'], env(), cap.io)).toBe(0);
+      expect(cap.out()).toContain('Upgraded sparrow: 0.0.1+old → 9.9.9+new');
+      expect(cap.out()).not.toContain('What changed for agents');
+      expect(cap.err()).toBe('');
+    });
+
+    /**
+     * The nastier unavailability: the install home ACCEPTS the request and then
+     * says nothing (a wedged edge, a half-dead origin). "Best-effort" must mean
+     * bounded — the digest fetch carries its own timeout, so the upgrade the
+     * user asked for still completes promptly instead of hanging on a nicety.
+     */
+    it(
+      'a digest endpoint that never answers cannot hang the upgrade',
+      { timeout: 15_000 },
+      async () => {
+        agentNotesBody = HANG;
+
+        const started = Date.now();
+        const cap = capture();
+        expect(await runCli(['upgrade'], env(), cap.io)).toBe(0);
+        // Well past the digest's own 3s bound would mean we waited on the
+        // socket, not the abort. (Generous ceiling: CI boxes are slow.)
+        expect(Date.now() - started).toBeLessThan(10_000);
+        expect(cap.out()).toContain('Upgraded sparrow: 0.0.1+old → 9.9.9+new');
+        expect(cap.out()).not.toContain('What changed for agents');
+        expect(cap.err()).toBe('');
+      },
+    );
+
+    it('malformed JSON is skipped silently', async () => {
+      agentNotesBody = '{"notes": {';
+
+      const cap = capture();
+      expect(await runCli(['upgrade'], env(), cap.io)).toBe(0);
+      expect(cap.out()).toContain('Upgraded sparrow');
+      expect(cap.out()).not.toContain('What changed for agents');
+      expect(cap.err()).toBe('');
+    });
+
+    /**
+     * One bad entry must not cost the agent the rest of the digest: a
+     * non-string value is dropped, its siblings still print.
+     */
+    it('a wrong-shaped entry is dropped without poisoning its siblings', async () => {
+      publish({ '1.2.3': 42, '9.9.9': 'still worth saying' });
+
+      const cap = capture();
+      expect(await runCli(['upgrade'], env(), cap.io)).toBe(0);
+      expect(cap.out()).toContain('  9.9.9 — still worth saying');
+      expect(cap.out()).not.toContain('1.2.3');
+    });
+
+    it('a wrong-shaped file (notes is not an object) is skipped entirely', async () => {
+      agentNotesBody = JSON.stringify({ notes: ['0.0.2', 'nope'] });
+
+      const cap = capture();
+      expect(await runCli(['upgrade'], env(), cap.io)).toBe(0);
+      expect(cap.out()).not.toContain('What changed for agents');
+      expect(cap.err()).toBe('');
+    });
+
+    /**
+     * When the old bundle cannot report its own version there is no window to
+     * bound, so the only honest digest is the release being installed.
+     */
+    it('an unreadable old version narrows the digest to the new release alone', async () => {
+      fs.writeFileSync(path.join(home, '.local', 'bin', 'sparrow.mjs'), 'process.exit(3);\n');
+      publish({ '0.0.2': 'not provably news', '9.9.9': 'this is where you are' });
+
+      const cap = capture();
+      expect(await runCli(['upgrade'], env(), cap.io)).toBe(0);
+      expect(cap.out()).toContain('  9.9.9 — this is where you are');
+      expect(cap.out()).not.toContain('not provably news');
+    });
+
+    it('-j carries the matched entries as agentNotes', async () => {
+      publish({ '9.9.9': 'the newest thing', '0.0.1': 'old news', '1.2.3': 'the middle thing' });
+
+      const cap = capture();
+      expect(await runCli(['upgrade', '-j'], env(), cap.io)).toBe(0);
+      const payload = JSON.parse(cap.out());
+      expect(payload.agentNotes).toEqual([
+        { version: '1.2.3', note: 'the middle thing' },
+        { version: '9.9.9', note: 'the newest thing' },
+      ]);
+    });
+
+    it('-j carries an empty agentNotes when there is no digest to report', async () => {
+      agentNotesBody = undefined; // 404
+
+      const cap = capture();
+      expect(await runCli(['upgrade', '-j'], env(), cap.io)).toBe(0);
+      expect(JSON.parse(cap.out()).agentNotes).toEqual([]);
+    });
+
+    /**
+     * The digest is cache-busted for the same reason the bundles are: an edge
+     * cache holding yesterday's file would tell the agent nothing changed.
+     */
+    it('the digest URL is cache-busted like the bundles', async () => {
+      publish({ '9.9.9': 'fresh' });
+
+      expect(await runCli(['upgrade'], env(), capture().io)).toBe(0);
+      expect(agentNotesHits).toHaveLength(1);
+      expect(agentNotesHits[0]).toMatch(/^\/install\/agent-notes\.json\?v=\d+$/);
+    });
   });
 });

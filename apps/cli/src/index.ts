@@ -28,7 +28,9 @@ import {
 } from '@sparrow/common-types/identity';
 import {
   CLAWBACK_WINDOW,
+  compareClientVersions,
   minorVersionsAhead,
+  parseClientVersion,
   PRESENCE_TTL_MAX,
   VOICE_REGISTER_NOTE,
 } from '@sparrow/common-types';
@@ -1811,6 +1813,56 @@ export const INSTALL_COMMAND = `curl -fsSL ${INSTALL_URL_DEFAULT}/install.sh | s
 export function installBaseUrl(env: Record<string, string | undefined>): string {
   const raw = env.SPARROW_INSTALL_URL?.trim();
   return (raw && raw.length > 0 ? raw : INSTALL_URL_DEFAULT).replace(/\/+$/, '');
+}
+
+/** One release's agent-facing digest: "what should I do differently now". */
+export interface AgentNote {
+  /** The release's bare semver core, e.g. `0.1.22`. */
+  version: string;
+  /** One short line — a behaviour change, not a changelog. */
+  note: string;
+}
+
+/**
+ * Pick the digest entries an upgrade from `oldVersion` to `newVersion` actually
+ * crossed: `old < v <= new`, compared on the semver CORE only (both ends arrive
+ * build-stamped, e.g. `0.1.21+20260910.bc187b1`, and every build of a release is
+ * the same release to the reader). Returned ascending.
+ *
+ * The agent running the upgrade is the audience, and it reads this once, so the
+ * shape is validated defensively and per ENTRY: a single mis-typed value in the
+ * published file drops that line, never the whole digest. A `notes` object that
+ * is not an object at all — or an unparseable `newVersion`, which leaves the
+ * window unbounded — yields nothing.
+ *
+ * When `oldVersion` cannot be read (the old bundle refused to report itself)
+ * there is no lower bound to honour, so the only honest answer is the entry for
+ * the release being installed, if there is one.
+ */
+export function selectAgentNotes(
+  raw: unknown,
+  oldVersion: string | undefined,
+  newVersion: string | undefined,
+): AgentNote[] {
+  if (!newVersion || typeof raw !== 'object' || raw === null) return [];
+  const notes = (raw as { notes?: unknown }).notes;
+  if (typeof notes !== 'object' || notes === null || Array.isArray(notes)) return [];
+  const hasFloor = oldVersion !== undefined && parseClientVersion(oldVersion) !== null;
+
+  const picked: AgentNote[] = [];
+  for (const [version, note] of Object.entries(notes as Record<string, unknown>)) {
+    if (typeof note !== 'string' || note.trim() === '') continue;
+    if (parseClientVersion(version) === null) continue;
+    const vsNew = compareClientVersions(version, newVersion);
+    if (vsNew === undefined || vsNew === 1) continue;
+    if (hasFloor) {
+      if (compareClientVersions(version, oldVersion!) !== 1) continue;
+    } else if (vsNew !== 0) {
+      continue;
+    }
+    picked.push({ version: version.trim(), note: note.trim() });
+  }
+  return picked.sort((a, b) => compareClientVersions(a.version, b.version) ?? 0);
 }
 
 /* -------------------------- the email medium --------------------------- */
@@ -3650,6 +3702,11 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         '`sparrow skill install` once and they will be refreshed from then on. A skill',
         'refresh that fails is reported but never fails the upgrade; --no-skill-refresh',
         'skips it entirely.',
+        '',
+        'It also prints "What changed for agents:" — one short line per release this',
+        'upgrade crossed, saying what an agent should do differently now. The digest is',
+        'published by the install home and is best-effort: when it is unavailable the',
+        'upgrade is unchanged and silent about it. With -j it is the `agentNotes` array.',
       ].join('\n'),
     )
     .action(
@@ -3708,6 +3765,31 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         await download(`${base}/install/sparrow-mcp.js${v}`, mcpPath);
         const newVersion = readVersion(cliPath);
 
+        // The AGENT-FACING half of the release: a one-line digest per version
+        // saying what to do differently now. The agent that ran this upgrade is
+        // the one whose behaviour has to change, and it is paying attention to
+        // this turn and no other — so the digest is delivered here or nowhere.
+        //
+        // STRICTLY best-effort: the install home may not publish the file at
+        // all, may be behind a cache that 404s it, may serve HTML from an error
+        // page. None of that is a reason to fail — or even to complain about —
+        // the upgrade the user actually asked for. Same cache-bust as the
+        // bundles, for the same reason: a stale copy would say "nothing changed".
+        // Best-effort must also mean BOUNDED: an install home that accepts the
+        // connection and then says nothing would otherwise hang the upgrade on
+        // a nicety. 3s is plenty for a ~1KB file from the same host that just
+        // served two ~1.5MB bundles.
+        let agentNotes: AgentNote[] = [];
+        try {
+          const res = await fetch(`${base}/install/agent-notes.json${v}`, {
+            redirect: 'follow',
+            signal: AbortSignal.timeout(3000),
+          });
+          if (res.ok) agentNotes = selectAgentNotes(await res.json(), oldVersion, newVersion);
+        } catch {
+          agentNotes = [];
+        }
+
         // The skill half. THIS process is the OLD bundle carrying the OLD
         // embedded assets, so the refresh runs the binary we just wrote —
         // anything else would rewrite the very files that are stale.
@@ -3736,6 +3818,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           if (results.length === 0) notes.push(NO_SKILL_INSTALL_NOTE);
         }
 
+        // Last, under everything else: the reader has just been told the
+        // upgrade landed, and this is what it means for them.
+        if (agentNotes.length > 0) {
+          notes.push('What changed for agents:');
+          for (const n of agentNotes) notes.push(`  ${n.version} — ${n.note}`);
+        }
+
         print(
           {
             old: oldVersion ?? null,
@@ -3744,6 +3833,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
             cli: cliPath,
             mcp: mcpPath,
             skillRefresh: refreshed,
+            agentNotes,
           },
           [`Upgraded sparrow: ${oldVersion ?? '?'} → ${newVersion ?? '?'} (from ${base}).`, ...notes].join(
             '\n',

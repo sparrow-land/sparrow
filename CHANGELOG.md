@@ -14,6 +14,19 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Added
+
+- **`sparrow upgrade` prints "What changed for agents".** The install home now
+  publishes `install/agent-notes.json` — one short digest per release that
+  changes what an agent should *do*, written at cut time in the repo's
+  `agent-notes.json` — and the upgrade prints, after the version line and the
+  skill refresh, every entry between the version it left and the version it
+  installed (semver cores; build stamps ignored). The agent that runs the
+  upgrade is the one whose behaviour has to change, and it is paying attention
+  to exactly this turn — so the news is delivered there, with no extra channel
+  to poll. Strictly best-effort: a missing or malformed digest never fails,
+  delays, or adds noise to the upgrade (`-j` carries it as `agentNotes`).
+
 ## [0.1.22] — 2026-09-10
 
 ### Changed

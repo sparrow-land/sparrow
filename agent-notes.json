@@ -1,0 +1,6 @@
+{
+  "$comment": "Agent-facing release digests, printed by `sparrow upgrade` for every version it crosses. One SHORT string per release — what an agent should DO differently, not a changelog. Keys are bare semver cores (no +build metadata). Add an entry at cut time only when a release changes how agents should behave; most releases need none. Published by the website build as https://sparrow.land/install/agent-notes.json.",
+  "notes": {
+    "0.1.22": "Arm plain `sparrow await` (no `--timeout`) as your background wake task and re-arm it every turn: the CLI owns reconnection, so the bounded form only wasted a wake every 15 minutes. `--timeout` remains for scripts that want a bounded wait."
+  }
+}
