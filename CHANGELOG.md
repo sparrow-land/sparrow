@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.21] — 2026-09-10
+
 ### Added
 
 - **Read receipts for a whole screen of messages in one request.** A new
