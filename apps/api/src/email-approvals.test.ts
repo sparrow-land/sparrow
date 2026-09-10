@@ -307,17 +307,36 @@ describe('email approvals, contacts and read rights', () => {
       headers: auth(fable.key),
     });
     expect(threads.json().items).toHaveLength(1);
-    // …but the thread stays trusted, so the conversation continues.
-    const next = await deliverEmail(
+    // A NEW conversation from the same address — no thread to inherit trust
+    // from (different subject, unknown parent) — is quarantined again.
+    const fresh = await deliverEmail(
       ts.app,
       inboundPayload({
         to: [{ email: at('fable') }],
         from: { email: 'dana@partner.example.com' },
         rfcMessageId: '<third@mail.example.net>',
+        subject: 'an unrelated new topic',
         inReplyTo: '<' + 'unknown@x' + '>',
       }),
     );
-    expect(next.body.status).toBe('quarantined');
+    expect(fresh.body.status).toBe('quarantined');
+    expect(fresh.body.email.threadId).not.toBe(email.threadId);
+
+    // …but the approved THREAD stays trusted, so that conversation continues —
+    // even when the reply names a Message-ID this instance never minted and only
+    // the subject + correspondent fallback can place it.
+    const next = await deliverEmail(
+      ts.app,
+      inboundPayload({
+        to: [{ email: at('fable') }],
+        from: { email: 'dana@partner.example.com' },
+        rfcMessageId: '<fourth@mail.example.net>',
+        subject: 'Re: Q3 rollout',
+        inReplyTo: '<' + 'unknown@x' + '>',
+      }),
+    );
+    expect(next.body.email.threadId).toBe(email.threadId);
+    expect(next.body.status).toBe('delivered');
   });
 
   it('the org read surfaces are a peek — a human read never marks the agent’s mail read', async () => {

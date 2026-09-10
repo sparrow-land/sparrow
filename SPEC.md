@@ -2372,16 +2372,29 @@ to disambiguate a static segment from an email id. Non-members of the org get
 | Route | Auth | Behavior |
 |---|---|---|
 | `POST /email/inbound` | `Authorization: Bearer <EMAIL_INBOUND_TOKEN>` | the normalized parsed email — see below |
+| `POST /email/wire-message-id` | `Authorization: Bearer <EMAIL_INBOUND_TOKEN>` | `{ emailId, rfcMessageId }` → `200 { corrected: boolean }`. The relay reporting the `Message-ID` a provider actually stamped, once its activity webhook reveals it — see *Threading → The wire Message-ID* |
+
+Both carry the SAME credential, the instance's own `EMAIL_INBOUND_TOKEN`: it
+authenticates the mail edge, never a sender, and it scopes a correction to the
+instance that issued it — an `emailId` minted anywhere else simply does not
+resolve. `POST /email/wire-message-id` answers `404` unless `emailId` names an
+**outbound** email of this instance (inbound ids were minted by the world and
+never move), `400` on an `rfcMessageId` that is not an angle-bracketed id
+containing `@`, and `409` when another of that agent's emails already holds the
+value — `(agent, Message-ID)` is the medium's idempotency key, so ours stands.
+It is idempotent: `corrected: false` when the row already carries the value, and
+also when the send never reached `sent` (only an accepted send ever had a wire
+id).
 
 #### Error codes
 
 | Code | When |
 |---|---|
-| `bad_request` | malformed payload, bad address syntax, > 8 attachments, reply on a thread with no inbound email, unknown `cursor` |
-| `unauthorized` | `/email/inbound` with a missing/wrong bearer token |
+| `bad_request` | malformed payload, bad address syntax, > 8 attachments, reply on a thread with no inbound email, unknown `cursor`, malformed `rfcMessageId` on a wire correction |
+| `unauthorized` | `/email/inbound` or `/email/wire-message-id` with a missing/wrong bearer token |
 | `forbidden` | human session on `/me/email/*`; outbound refused by `reject` policy; a blocked recipient |
 | `not_found` | medium off; unknown or foreign thread/email/attachment/contact; a caller without read rights (never `403` — existence is not leaked) |
-| `conflict` | approve/deny on a non-pending email; retry on a non-`send-failed` email |
+| `conflict` | approve/deny on a non-pending email; retry on a non-`send-failed` email; a wire `Message-ID` correction naming an id another of that agent's emails already holds |
 | `payload_too_large` | over any size cap below |
 | `rate_limited` | inbound over `EMAIL_INBOUND_RATE_PER_MIN` for one org |
 | `internal` | store failure (the relay's own failure is `send-failed`, not a 5xx) |
@@ -2584,8 +2597,12 @@ sanitized form is stored; the original is discarded. The rule:
 
 ### Threading
 
-Threads come from headers, never from subject text — subject matching merges
-unrelated conversations and is how mailboxes get confusing. Thread joining is
+Threads come from headers first: subject text on its own merges unrelated
+conversations and is how mailboxes get confusing. But not every relay puts the
+`Message-ID` we minted on the wire, and the id it substituted may not be
+knowable until that provider's activity webhook reports it — so a human's reply
+can legitimately name an id this instance has never seen. One narrow,
+provider-independent fallback catches exactly that case. Thread joining is
 evaluated **within the anchor agent's own mail**.
 
 **Joining, in order:**
@@ -2594,7 +2611,29 @@ evaluated **within the anchor agent's own mail**.
    agent** → that email's thread.
 2. Otherwise scan `references` **right to left** (nearest ancestor first); the
    first match within the anchor agent's mail wins.
-3. Otherwise → a **new thread**, anchored to that agent, `subject` = the inbound
+3. Otherwise the **subject + correspondent fallback** — evaluated ONLY when
+   every `Message-ID` candidate above missed. A thread of this anchor agent
+   qualifies when all three hold:
+   - its stored `subject` **normalizes** to the same value as the inbound
+     subject. Normalizing strips any number of leading reply/forward prefixes
+     (`Re:`, `Fw:`, `Fwd:`, `Aw:`, `Sv:`, `Vs:`, case-insensitive, with the
+     optional bracketed counter some mailers add — `Re[2]:`, `Re(2):`),
+     collapses whitespace, trims, and case-folds. It is a comparison key only:
+     stored subjects are never rewritten.
+   - the inbound **sender is already a correspondent** on it — their address
+     appears in the `from`/`to`/`cc` of one of the thread's emails, on either
+     side of the trust boundary (as in step 1, a quarantined message still
+     counts as part of the conversation's history). The recipient of one of the
+     agent's own outbound emails therefore counts.
+   - the thread's `last_email_at` is **within the last 30 days**. A thread that
+     has never carried a delivered email has no `last_email_at` and never
+     qualifies.
+
+   **Ambiguity never joins.** Exactly one qualifying thread joins it; two or
+   more mean we cannot know which, and a new thread opens. The correspondent
+   test, the 30-day window, and this uniqueness rule are together what make
+   subject matching safe here — none of them is optional.
+4. Otherwise → a **new thread**, anchored to that agent, `subject` = the inbound
    subject (`""` → stored as `(no subject)`).
 
 Because matching is scoped to the anchor, threads never span agents by
@@ -2641,6 +2680,14 @@ threads and the agent's next reply cites the id the world saw. The rules:
 - The envelope the relay received still carried the locally minted id; only the
   stored row moves. Read views (`Email.rfcMessageId`) show the corrected value.
 
+A relay that learns the wire id only **later** — many providers reveal it
+through an activity webhook, minutes or hours after our `2xx` — pushes it back
+with `POST /email/wire-message-id` (see *The inbound seam*). Identical rules,
+identical result, so the send-time path and the late path can never disagree;
+the call is idempotent and has no ordering dependency on delivery or bounce
+events. A reply that already joined its thread through the subject fallback
+stays exactly where it is — a correction moves a row's id, never a conversation.
+
 **Intra-instance mail is not short-circuited.** An agent emailing a sibling
 agent's address goes out through the relay and comes back through the inbound
 seam like any other mail — one code path, one trust evaluation. (Agent-to-agent
@@ -2653,9 +2700,9 @@ the inbound leg itself.
 The medium is on iff `EMAIL_ORG_SUFFIX` is set **and** an email provider
 registers — `EMAIL_PROVIDER=fake`, or `EMAIL_PROVIDER=webhook` **with
 `email.webhookUrl` resolved** (naming `webhook` without a URL registers nothing,
-so the medium stays off). `/email/inbound` additionally requires
-`EMAIL_INBOUND_TOKEN`: without it the inbound route alone `404`s while outbound
-still works (a send-only deployment is legitimate). The full env table is in
+so the medium stays off). `/email/inbound` and `/email/wire-message-id`
+additionally require `EMAIL_INBOUND_TOKEN`: without it those two routes alone
+`404` while outbound still works (a send-only deployment is legitimate). The full env table is in
 *Server configuration (env)*.
 
 #### `EMAIL_PROVIDER=fake`

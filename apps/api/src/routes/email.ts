@@ -79,7 +79,7 @@ import {
 } from '../email/addresses.js';
 import { deliverInbound, orgEmailSettings } from '../email/inbound.js';
 import { announceEmail } from '../email/notify.js';
-import { relayAndFinish, sendOutbound } from '../email/outbound.js';
+import { applyWireMessageId, relayAndFinish, sendOutbound } from '../email/outbound.js';
 import {
   contactById,
   contactByEmail,
@@ -382,20 +382,33 @@ function requireOrgEmail(
   return { email: row, thread, agent, quarantined: found.quarantined };
 }
 
+/**
+ * The mail edge's own credential, shared by every route the relay calls
+ * (`/email/inbound`, `/email/wire-message-id`). Bearer `EMAIL_INBOUND_TOKEN`,
+ * constant-time compare, else `401`. Without the token configured these routes
+ * `404` even while the medium is on — a relay seam with no credential is not a
+ * seam. It authenticates the EDGE, never a sender.
+ */
+function requireEdgeBearer(ctx: AppContext, request: FastifyRequest): void {
+  const expected = ctx.email.inboundToken;
+  if (!expected) throw notFound('Not found');
+  const header = request.headers.authorization ?? '';
+  const presented = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
+  if (!constantTimeEquals(presented, expected)) throw unauthorized('Invalid inbound token');
+}
+
+/** `POST /email/wire-message-id` — did the stored `Message-ID` move? */
+interface WireMessageIdResponse {
+  corrected: boolean;
+}
+
 export function registerEmailRoutes(app: FastifyInstance, ctx: AppContext): void {
   /* ================================================================== *
    * The inbound seam
    * ================================================================== */
-  // Bearer `EMAIL_INBOUND_TOKEN` (constant-time compare) else 401. Without the
-  // token configured this ONE route 404s even while the medium is on — an
-  // inbound seam with no credential is not a seam.
   app.post('/api/v1/email/inbound', async (request, reply) => {
     requireMedium(ctx);
-    const expected = ctx.email.inboundToken;
-    if (!expected) throw notFound('Not found');
-    const header = request.headers.authorization ?? '';
-    const presented = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
-    if (!constantTimeEquals(presented, expected)) throw unauthorized('Invalid inbound token');
+    requireEdgeBearer(ctx, request);
     const declared = Number(request.headers['content-length'] ?? 0);
     if (Number.isFinite(declared) && declared > EMAIL_INBOUND_MAX_BYTES) {
       throw payloadTooLarge('Inbound email is too large');
@@ -404,6 +417,38 @@ export function registerEmailRoutes(app: FastifyInstance, ctx: AppContext): void
     reapRejectedEmails(ctx);
     const response: InboundEmailResponse = await deliverInbound(ctx, request.body);
     return reply.code(202).send(response);
+  });
+
+  /**
+   * The WIRE `Message-ID` correction seam (SPEC "Threading → The wire
+   * Message-ID"). Some providers mint their own `Message-ID` and only reveal it
+   * later, through an activity webhook — after our `2xx` from the send. The
+   * RELAY is the intended caller: when it learns the id, it pushes it here and
+   * the outbound row moves to it, so the reply that names it threads.
+   *
+   * Same bearer as `/email/inbound` — the instance's own `EMAIL_INBOUND_TOKEN`,
+   * so a correction can only name emails of the instance that issued it; ids
+   * from anywhere else simply do not resolve here.
+   */
+  app.post('/api/v1/email/wire-message-id', (request, reply) => {
+    requireMedium(ctx);
+    requireEdgeBearer(ctx, request);
+    const body = (request.body ?? {}) as { emailId?: unknown; rfcMessageId?: unknown };
+    const emailId = typeof body.emailId === 'string' ? body.emailId.trim() : '';
+    if (emailId === '') throw badRequest('emailId is required');
+    // Outbound rows only ever live in `emails` — a correction can never touch
+    // inbound mail, whose ids the world minted.
+    const row = emailById(ctx, emailId);
+    if (!row || row.direction !== 'out') throw notFound('No such email');
+    const outcome = applyWireMessageId(ctx, row, body.rfcMessageId);
+    if (outcome === 'invalid') {
+      throw badRequest('rfcMessageId must be an angle-bracketed Message-ID');
+    }
+    if (outcome === 'conflict') {
+      throw conflict('That Message-ID already belongs to another email');
+    }
+    const response: WireMessageIdResponse = { corrected: outcome === 'corrected' };
+    return reply.send(response);
   });
 
   /* ================================================================== *

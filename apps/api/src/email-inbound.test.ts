@@ -21,6 +21,7 @@ import {
   type TestServer,
   type SignedUpHuman,
 } from './test-helpers.js';
+import { openDb } from './db/index.js';
 
 describe('POST /email/inbound', () => {
   let ts: TestServer;
@@ -454,5 +455,169 @@ describe('POST /email/inbound', () => {
     );
     expect(result.status).toBe('delivered');
     expect(TEST_INBOUND_TOKEN).toBeTruthy();
+  });
+
+  /* ================================================================== *
+   * Threading: the provider-independent subject + correspondent fallback
+   * ================================================================== */
+  describe('the subject + correspondent fallback', () => {
+    // Everyone at partner.example.com is a recognized correspondent here, so
+    // every leg below lands `delivered` and bumps `last_email_at`.
+    beforeEach(async () => {
+      await setPolicy({ trustedPatterns: ['*@partner.example.com'] });
+    });
+
+    /** Rewrite a thread's `last_email_at` — the only way to age a thread out. */
+    function backdateThread(threadId: string, daysAgo: number): void {
+      const handle = openDb(ts.dataDir);
+      handle.sqlite
+        .prepare('UPDATE email_threads SET last_email_at = ? WHERE id = ?')
+        .run(new Date(Date.now() - daysAgo * 86_400_000).toISOString(), threadId);
+      handle.close();
+    }
+
+    async function threadEmails(threadId: string): Promise<any[]> {
+      const res = await ts.app.inject({
+        method: 'GET',
+        url: `/api/v1/me/email/threads/${threadId}`,
+        headers: auth(fable.key),
+      });
+      return res.json().items as any[];
+    }
+
+    /** Open a thread with one delivered inbound message; returns its id. */
+    async function opened(subject: string, overrides: Record<string, unknown> = {}) {
+      const res = await send({ subject, ...overrides });
+      expect(res.statusCode).toBe(202);
+      expect(res.body.status).toBe('delivered');
+      return res.body.email.threadId as string;
+    }
+
+    it('joins by subject when In-Reply-To names an id we never knew and the sender already writes on that thread', async () => {
+      const threadId = await opened('Sparrow mail is on MailerSend');
+      const reply = await send({
+        subject: 'Re: Sparrow mail is on MailerSend',
+        inReplyTo: '<provider-stamped-9f2@relay.example>',
+      });
+      expect(reply.statusCode).toBe(202);
+      expect(reply.body.email.threadId).toBe(threadId);
+      const list = await threads();
+      expect(list).toHaveLength(1);
+      // The thread still keeps its FIRST subject.
+      expect(list[0].subject).toBe('Sparrow mail is on MailerSend');
+      expect(await threadEmails(threadId)).toHaveLength(2);
+    });
+
+    it('the field regression: an outbound whose wire Message-ID we never knew still catches its reply', async () => {
+      const out = await ts.app.inject({
+        method: 'POST',
+        url: '/api/v1/me/email/send',
+        headers: auth(fable.key),
+        payload: {
+          to: ['dana@partner.example.com'],
+          subject: 'Sparrow mail is on MailerSend',
+          text: 'we moved the relay',
+        },
+      });
+      expect(out.statusCode).toBe(201);
+      const threadId = out.json().thread.id as string;
+      // The recipient of our outbound counts as a participant of the thread.
+      const reply = await send({
+        subject: 'Re: Sparrow mail is on MailerSend',
+        inReplyTo: '<0102019a7e-unknown@relay.example>',
+      });
+      expect(reply.body.email.threadId).toBe(threadId);
+      expect(await threadEmails(threadId)).toHaveLength(2);
+      expect(await threads()).toHaveLength(1);
+    });
+
+    it('the same subject from a NEW correspondent opens an independent thread', async () => {
+      const threadId = await opened('Sparrow mail is on MailerSend');
+      const stranger = await send({
+        from: { email: 'mallory@partner.example.com', name: 'Mallory' },
+        subject: 'Re: Sparrow mail is on MailerSend',
+        inReplyTo: '<provider-stamped-9f2@relay.example>',
+      });
+      expect(stranger.body.email.threadId).not.toBe(threadId);
+      expect(await threadEmails(threadId)).toHaveLength(1);
+      expect(await threads()).toHaveLength(2);
+    });
+
+    it('normalizes every reply/forward prefix (RE:, Re[2]:, Fwd:, and stacked ones)', async () => {
+      const threadId = await opened('Q3 rollout');
+      for (const subject of [
+        'RE: Q3 rollout',
+        'Re[2]: Q3 rollout',
+        'Fwd: Q3 rollout',
+        'Re: Fwd:   Q3 rollout',
+        'AW: SV: Q3 rollout',
+      ]) {
+        const reply = await send({ subject, inReplyTo: '<nobody-knows-this@relay.example>' });
+        expect(reply.body.email.threadId).toBe(threadId);
+      }
+      expect(await threads()).toHaveLength(1);
+      expect(await threadEmails(threadId)).toHaveLength(6);
+    });
+
+    it('stops looking after 30 days of silence on the thread', async () => {
+      const threadId = await opened('Q3 rollout');
+      backdateThread(threadId, 29);
+      const inWindow = await send({
+        subject: 'Re: Q3 rollout',
+        inReplyTo: '<nobody-knows-this@relay.example>',
+      });
+      expect(inWindow.body.email.threadId).toBe(threadId);
+
+      backdateThread(threadId, 31);
+      const stale = await send({
+        subject: 'Re: Q3 rollout',
+        inReplyTo: '<nobody-knows-this-either@relay.example>',
+      });
+      expect(stale.body.email.threadId).not.toBe(threadId);
+      expect(await threads()).toHaveLength(2);
+    });
+
+    it('a Message-ID match still wins over the subject fallback', async () => {
+      const rollout = await opened('Q3 rollout', { rfcMessageId: '<a1@x.test>' });
+      const budget = await opened('Budget', { rfcMessageId: '<b1@x.test>' });
+      expect(budget).not.toBe(rollout);
+      // Subject says "Q3 rollout"; In-Reply-To names the BUDGET thread. Headers win.
+      const reply = await send({ subject: 'Re: Q3 rollout', inReplyTo: '<b1@x.test>' });
+      expect(reply.body.email.threadId).toBe(budget);
+      expect(await threadEmails(rollout)).toHaveLength(1);
+    });
+
+    it('ambiguity never joins: two qualifying threads leave both untouched and open a third', async () => {
+      const first = await opened('Q3 rollout');
+      // A second thread on the same subject, opened by someone else, cc'ing dana
+      // — so dana is a correspondent on BOTH.
+      const second = await opened('Q3 rollout', {
+        from: { email: 'erin@partner.example.com', name: 'Erin' },
+        cc: [{ email: 'dana@partner.example.com' }],
+      });
+      expect(second).not.toBe(first);
+
+      const reply = await send({
+        subject: 'Re: Q3 rollout',
+        inReplyTo: '<nobody-knows-this@relay.example>',
+      });
+      expect(reply.body.email.threadId).not.toBe(first);
+      expect(reply.body.email.threadId).not.toBe(second);
+      expect(await threadEmails(first)).toHaveLength(1);
+      expect(await threadEmails(second)).toHaveLength(1);
+      expect(await threads()).toHaveLength(3);
+    });
+
+    it('never joins across agents, and never on subject alone with no shared correspondent', async () => {
+      const scribe = await makeAgent(ts.app, owner.token, orgId, 'scribe');
+      const forFable = await opened('Q3 rollout');
+      const forScribe = await send({
+        to: [{ email: at('scribe') }],
+        subject: 'Re: Q3 rollout',
+        inReplyTo: '<nobody-knows-this@relay.example>',
+      });
+      expect(forScribe.body.email.threadId).not.toBe(forFable);
+      expect(forScribe.body.deliveries[0].agentId).toBe(scribe.id);
+    });
   });
 });

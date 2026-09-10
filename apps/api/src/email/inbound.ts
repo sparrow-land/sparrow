@@ -28,7 +28,7 @@ import {
   type InboundStatus,
   type OrgEmailSettings,
 } from '@sparrow/common-types';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, gte } from 'drizzle-orm';
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';
 import { emailQuarantine, emails, emailThreads } from '../db/schema.js';
@@ -43,6 +43,7 @@ import { sanitizeEmailHtml } from './sanitize-html.js';
 import {
   decodeAttachments,
   bumpThread,
+  parseParticipants,
   resolveTrustSet,
   toParty,
   writeAttachments,
@@ -108,15 +109,118 @@ function assertWithinCaps(payload: InboundEmailPayload): void {
 }
 
 /**
+ * How far back the subject fallback will look for a live conversation. Past it
+ * a repeated subject line is a new conversation, not a late reply.
+ */
+const SUBJECT_FALLBACK_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * One leading reply/forward prefix, with the bracketed counter some mailers add
+ * (`Re[2]:`, `Re(2):`). Applied repeatedly — chains like `Re: Fwd: Re:` are
+ * ordinary.
+ */
+const REPLY_PREFIX = /^(?:re|fw|fwd|aw|sv|vs)\s*(?:[[(]\s*\d+\s*[\])])?\s*:\s*/i;
+
+/**
+ * A subject reduced to the thing two messages of one conversation share: no
+ * reply/forward prefixes, whitespace collapsed, case-folded. Comparison key
+ * only — the stored subjects are never rewritten.
+ */
+export function normalizeSubject(raw: string): string {
+  let subject = raw.replace(/\s+/g, ' ').trim();
+  for (;;) {
+    const stripped = subject.replace(REPLY_PREFIX, '');
+    if (stripped === subject) break;
+    subject = stripped.trim();
+  }
+  return subject.toLowerCase();
+}
+
+/**
+ * Every address that has appeared on a thread — `from`/`to`/`cc` of its emails,
+ * on BOTH sides of the trust boundary (mirroring {@link anchorRowByRfc}: a
+ * quarantined message is still part of the conversation's history).
+ */
+function threadCorrespondents(ctx: AppContext, threadId: string): Set<string> {
+  const found = new Set<string>();
+  const absorb = (rows: { participants: string }[]): void => {
+    for (const row of rows) {
+      const parties = parseParticipants(row.participants);
+      for (const party of [parties.from, ...parties.to, ...parties.cc]) {
+        if (party.email) found.add(canonicalAddress(party.email));
+      }
+    }
+  };
+  absorb(
+    ctx.db
+      .select({ participants: emails.participants })
+      .from(emails)
+      .where(eq(emails.threadId, threadId))
+      .all(),
+  );
+  absorb(
+    ctx.db
+      .select({ participants: emailQuarantine.participants })
+      .from(emailQuarantine)
+      .where(eq(emailQuarantine.threadId, threadId))
+      .all(),
+  );
+  return found;
+}
+
+/**
+ * The PROVIDER-INDEPENDENT fallback (SPEC "Threading"), evaluated only after
+ * every `Message-ID` candidate missed. Not every relay puts the `Message-ID` we
+ * minted on the wire, and the id it substituted may not be knowable until its
+ * activity webhook reports it — so a human's reply can name an id this instance
+ * has never seen. Rather than opening a stray thread, look for the ONE live
+ * conversation the reply can only have come from:
+ *
+ * - same normalized subject as the thread's stored subject,
+ * - the sender is already a correspondent on it, and
+ * - it has been active within {@link SUBJECT_FALLBACK_WINDOW_MS}.
+ *
+ * **Ambiguity never joins**: two or more qualifying threads mean we cannot know
+ * which, so a new thread opens. Subject matching alone merges unrelated
+ * conversations — the correspondent, the window, and the uniqueness rule are
+ * what make it safe.
+ */
+function subjectFallbackThread(
+  ctx: AppContext,
+  agent: AgentRow,
+  subject: string,
+  from: string,
+  at: string,
+): EmailThreadRow | undefined {
+  const key = normalizeSubject(subject);
+  const sender = canonicalAddress(from);
+  if (key === '' || sender === '') return undefined;
+  const since = new Date(Date.parse(at) - SUBJECT_FALLBACK_WINDOW_MS).toISOString();
+  // A thread with `last_email_at` NULL has never carried a delivered message;
+  // `>= since` drops it with the stale ones.
+  const live = ctx.db
+    .select()
+    .from(emailThreads)
+    .where(and(eq(emailThreads.agentId, agent.id), gte(emailThreads.lastEmailAt, since)))
+    .all();
+  const qualifying = live.filter(
+    (thread) =>
+      normalizeSubject(thread.subject) === key &&
+      threadCorrespondents(ctx, thread.id).has(sender),
+  );
+  return qualifying.length === 1 ? qualifying[0] : undefined;
+}
+
+/**
  * Thread joining, evaluated within the ANCHOR AGENT's own mail (SPEC
  * "Threading"): `inReplyTo` first, then `references` right to left (nearest
- * ancestor first), else a new thread. Threads therefore never span agents by
- * construction.
+ * ancestor first), then the subject + correspondent fallback, else a new
+ * thread. Threads therefore never span agents by construction.
  */
 export function joinThread(
   ctx: AppContext,
   agent: AgentRow,
-  payload: { inReplyTo: string | null; references: string[]; subject: string },
+  payload: { inReplyTo: string | null; references: string[]; subject: string; from: string },
   at: string,
 ): EmailThreadRow {
   const candidates = [
@@ -133,6 +237,9 @@ export function joinThread(
       if (thread) return thread;
     }
   }
+  // Headers first, ALWAYS: the fallback only runs when none of them resolved.
+  const bySubject = subjectFallbackThread(ctx, agent, payload.subject, payload.from, at);
+  if (bySubject) return bySubject;
   const row: EmailThreadRow = {
     id: newEmailThreadId(),
     orgId: agent.orgId,
@@ -255,7 +362,12 @@ async function deliverToAnchor(
   const thread = joinThread(
     ctx,
     agent,
-    { inReplyTo: payload.inReplyTo, references: payload.references, subject: payload.subject },
+    {
+      inReplyTo: payload.inReplyTo,
+      references: payload.references,
+      subject: payload.subject,
+      from: payload.from.email,
+    },
     at,
   );
   const policy = orgEmailSettings(org);

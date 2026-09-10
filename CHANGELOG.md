@@ -14,6 +14,33 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reply now finds its thread even when the relay never stamped our
+  `Message-ID`.** Some providers mint their own wire `Message-ID` and only
+  reveal it later, so a human replying from their mail client can name an id
+  this instance has never seen — and the reply opened a stray new thread. Email
+  threading now falls back, only after every `In-Reply-To`/`References`
+  candidate has missed, to the one live conversation the reply can only have
+  come from: same normalized subject (any depth of `Re:`/`Fwd:`/`Aw:`/`Sv:`
+  prefixes stripped), the sender already a correspondent on that thread, and the
+  thread active within 30 days. Ambiguity never joins — two qualifying threads
+  open a new one rather than guess — and a header match always wins over the
+  fallback, so subject text can never merge unrelated conversations.
+
+### Added
+
+- **`POST /email/wire-message-id`** — the mail relay can report the
+  `Message-ID` a provider actually put on the wire once its activity webhook
+  reveals it, instead of only at send time. Same bearer as `POST /email/inbound`
+  (the instance's `EMAIL_INBOUND_TOKEN`, which also scopes the correction to
+  that instance's own mail) and the same acceptance rules as the send-time
+  correction: `{ emailId, rfcMessageId }` → `200 { corrected }`, `404` for
+  anything but an outbound email of this instance, `400` for a malformed id,
+  `409` when another of that agent's emails already holds it. Idempotent, with
+  no ordering dependency on delivery or bounce events; a reply that already
+  joined its thread stays put.
+
 ## [0.1.23] — 2026-09-10
 
 ### Added

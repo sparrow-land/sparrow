@@ -385,6 +385,47 @@ function rfcTakenByOther(ctx: AppContext, row: EmailRow, rfc: string): boolean {
 }
 
 /**
+ * The outcome of one wire-`Message-ID` correction.
+ *
+ * - `corrected` — the row now carries the wire id.
+ * - `unchanged` — already that value, or the send never reached acceptance.
+ * - `conflict`  — another of this agent's emails already holds that id.
+ * - `invalid`   — not a well-formed `Message-ID`.
+ */
+export type WireIdCorrection = 'corrected' | 'unchanged' | 'conflict' | 'invalid';
+
+/**
+ * Correct one OUTBOUND row's `rfc_message_id` to the id the provider actually
+ * put on the wire, learned after the fact (the relay's activity webhook, pushed
+ * back through `POST /email/wire-message-id`). The acceptance rules are exactly
+ * the send-time ones in {@link correctionFor} — well-formed, different, free for
+ * this agent, and only on an ACCEPTED (`sent`) send — so late knowledge and
+ * send-time knowledge can never disagree. Idempotent: replaying the same value
+ * answers `unchanged`.
+ */
+export function applyWireMessageId(
+  ctx: AppContext,
+  row: EmailRow,
+  reported: unknown,
+): WireIdCorrection {
+  const wire = wireMessageId(reported);
+  if (wire === null) return 'invalid';
+  if (wire === row.rfcMessageId) return 'unchanged';
+  // A held, rejected, or failed send never got an acceptance and never had a
+  // wire id: the locally minted one stands.
+  if (row.disposition !== 'sent') return 'unchanged';
+  if (rfcTakenByOther(ctx, row, wire)) return 'conflict';
+  try {
+    ctx.db.update(emails).set({ rfcMessageId: wire }).where(eq(emails.id, row.id)).run();
+  } catch {
+    // Lost a race for the id: ours stands.
+    return 'conflict';
+  }
+  row.rfcMessageId = wire;
+  return 'corrected';
+}
+
+/**
  * The WIRE `Message-ID` to correct `row` to, or `null` to keep the local one.
  *
  * Only an ACCEPTED send corrects anything (a failed, held, rejected, or
