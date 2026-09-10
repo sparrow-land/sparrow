@@ -31,7 +31,7 @@ import {
 import { and, eq, gte } from 'drizzle-orm';
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';
-import { emailQuarantine, emails, emailThreads } from '../db/schema.js';
+import { emailQuarantine, emailWireIds, emails, emailThreads } from '../db/schema.js';
 import type { AgentRow, EmailRow, EmailThreadRow, OrgRow } from '../db/schema.js';
 import { badRequest, payloadTooLarge, rateLimited } from '../errors.js';
 import { parse } from '../validate.js';
@@ -117,9 +117,10 @@ const SUBJECT_FALLBACK_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 /**
  * One leading reply/forward prefix, with the bracketed counter some mailers add
  * (`Re[2]:`, `Re(2):`). Applied repeatedly — chains like `Re: Fwd: Re:` are
- * ordinary.
+ * ordinary. The list is the localized forms in the wild: English `Re`/`Fw`/`Fwd`,
+ * German `Aw`, Swedish `Sv`, Dutch `Vs`, Italian Outlook's bare `R`.
  */
-const REPLY_PREFIX = /^(?:re|fw|fwd|aw|sv|vs)\s*(?:[[(]\s*\d+\s*[\])])?\s*:\s*/i;
+const REPLY_PREFIX = /^(?:re|fwd|fw|aw|sv|vs|r)\s*(?:[[(]\s*\d+\s*[\])])?\s*:\s*/i;
 
 /**
  * A subject reduced to the thing two messages of one conversation share: no
@@ -169,12 +170,13 @@ function threadCorrespondents(ctx: AppContext, threadId: string): Set<string> {
 }
 
 /**
- * The PROVIDER-INDEPENDENT fallback (SPEC "Threading"), evaluated only after
- * every `Message-ID` candidate missed. Not every relay puts the `Message-ID` we
- * minted on the wire, and the id it substituted may not be knowable until its
- * activity webhook reports it — so a human's reply can name an id this instance
- * has never seen. Rather than opening a stray thread, look for the ONE live
- * conversation the reply can only have come from:
+ * The PROVIDER-INDEPENDENT fallback (SPEC "Threading"), evaluated only for a
+ * message that CLAIMS to be a reply — a non-empty `In-Reply-To` or `References`
+ * — whose every `Message-ID` candidate missed. Not every relay puts the
+ * `Message-ID` we minted on the wire, and the id it substituted may not be
+ * knowable until its activity webhook reports it, so a human's reply can name an
+ * id this instance has never seen. Rather than opening a stray thread, look for
+ * the ONE live conversation the reply can only have come from:
  *
  * - same normalized subject as the thread's stored subject,
  * - the sender is already a correspondent on it, and
@@ -182,8 +184,12 @@ function threadCorrespondents(ctx: AppContext, threadId: string): Set<string> {
  *
  * **Ambiguity never joins**: two or more qualifying threads mean we cannot know
  * which, so a new thread opens. Subject matching alone merges unrelated
- * conversations — the correspondent, the window, and the uniqueness rule are
- * what make it safe.
+ * conversations — the reply evidence, the correspondent, the window, and the
+ * uniqueness rule are together what make it safe. In particular, uniqueness
+ * among existing threads is NOT evidence that a new message is a reply: without
+ * threading headers a recurring subject ("Weekly status") is fresh mail, and
+ * merging it would both fuse independent conversations and let a stranger
+ * inherit a thread's human-granted trust.
  */
 function subjectFallbackThread(
   ctx: AppContext,
@@ -237,9 +243,14 @@ export function joinThread(
       if (thread) return thread;
     }
   }
-  // Headers first, ALWAYS: the fallback only runs when none of them resolved.
-  const bySubject = subjectFallbackThread(ctx, agent, payload.subject, payload.from, at);
-  if (bySubject) return bySubject;
+  // Headers first, ALWAYS — and the fallback is for a reply whose headers we
+  // could not resolve, never for mail that never claimed to be one.
+  const claimsReply =
+    (payload.inReplyTo ?? '').trim() !== '' || payload.references.some((r) => r.trim() !== '');
+  if (claimsReply) {
+    const bySubject = subjectFallbackThread(ctx, agent, payload.subject, payload.from, at);
+    if (bySubject) return bySubject;
+  }
   const row: EmailThreadRow = {
     id: newEmailThreadId(),
     orgId: agent.orgId,
@@ -256,13 +267,15 @@ export function joinThread(
 
 /**
  * One anchor agent's row for an rfc message id, across BOTH storage sides —
- * `emails` (delivered inbound + outbound) first, then `email_quarantine`. The
- * pair `(agent_id, rfc_message_id)` is the idempotency key, and the split must
- * not weaken it: a message that was quarantined yesterday is still a duplicate
- * today.
+ * `emails` (delivered inbound + outbound) first, then `email_quarantine`, then
+ * the outbound ALIAS set (`email_wire_ids`: the extra per-recipient wire ids a
+ * provider stamped on one of our sends). The pair `(agent_id, rfc_message_id)`
+ * is the idempotency key, and neither the storage split nor the alias set may
+ * weaken it: a message that was quarantined yesterday is still a duplicate
+ * today, and an id we are known by is an id we hold.
  */
 function anchorRowByRfc(ctx: AppContext, agentId: string, rfc: string): EmailRow | undefined {
-  return (
+  const direct =
     ctx.db
       .select()
       .from(emails)
@@ -272,8 +285,21 @@ function anchorRowByRfc(ctx: AppContext, agentId: string, rfc: string): EmailRow
       .select()
       .from(emailQuarantine)
       .where(and(eq(emailQuarantine.agentId, agentId), eq(emailQuarantine.rfcMessageId, rfc)))
-      .get()
-  );
+      .get();
+  if (direct) return direct;
+  const alias = ctx.db
+    .select()
+    .from(emailWireIds)
+    .where(eq(emailWireIds.rfcMessageId, rfc))
+    .get();
+  if (!alias) return undefined;
+  // Aliases name outbound rows, which only ever live in `emails`; the anchor
+  // filter still applies, so an alias never pulls another agent's mail in.
+  return ctx.db
+    .select()
+    .from(emails)
+    .where(and(eq(emails.agentId, agentId), eq(emails.id, alias.emailId)))
+    .get();
 }
 
 /** The org's email policy, defaults merged. */

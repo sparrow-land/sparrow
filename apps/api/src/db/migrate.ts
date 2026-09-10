@@ -321,6 +321,17 @@ export function migrate(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS email_quarantine_org_disposition
       ON email_quarantine(org_id, disposition, created_at);
 
+    -- The extra wire Message-IDs one outbound email is known by (per-recipient
+    -- ids a provider stamped, learned later from its activity webhook). Purely
+    -- additive: CREATE TABLE IF NOT EXISTS gives a live instance the table on
+    -- its next boot, with nothing to backfill.
+    CREATE TABLE IF NOT EXISTS email_wire_ids (
+      rfc_message_id TEXT PRIMARY KEY,
+      email_id       TEXT NOT NULL,
+      created_at     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS email_wire_ids_email ON email_wire_ids(email_id);
+
     CREATE TABLE IF NOT EXISTS email_attachments (
       id           TEXT PRIMARY KEY,
       email_id     TEXT NOT NULL,

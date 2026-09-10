@@ -217,6 +217,78 @@ describe('POST /email/wire-message-id', () => {
     expect((await readEmail(held.body.email.id)).rfcMessageId).toBe(held.body.email.rfcMessageId);
   });
 
+  it('the FIRST id becomes the row’s own; a second is kept as an alias and leaves it alone', async () => {
+    const sent = await send({ to: ['dana@partner.example.com'], subject: 'Hi', text: 'body' });
+    const emailId = sent.body.email.id as string;
+    const first = await correct({ emailId, rfcMessageId: '<per-recipient-a@relay.example>' });
+    expect(first.json()).toEqual({ corrected: true });
+    expect((await readEmail(emailId)).rfcMessageId).toBe('<per-recipient-a@relay.example>');
+
+    // A provider that stamps a DIFFERENT Message-ID per recipient reports again.
+    // Additive: the id is recorded, but the header id the agent's own replies
+    // will cite does not move once it names something the world has seen.
+    const second = await correct({ emailId, rfcMessageId: '<per-recipient-b@relay.example>' });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual({ corrected: true });
+    expect((await readEmail(emailId)).rfcMessageId).toBe('<per-recipient-a@relay.example>');
+  });
+
+  it('two recipients, two wire ids: EITHER reply threads by Message-ID, not by subject', async () => {
+    const sent = await send({
+      to: ['dana@partner.example.com', 'erin@partner.example.com'],
+      subject: 'Ledger sync',
+      text: 'body',
+    });
+    expect(sent.statusCode).toBe(201);
+    const threadId = sent.body.thread.id as string;
+    // One callback per recipient, in whatever order they arrive.
+    for (const rfcMessageId of ['<to-dana@relay.example>', '<to-erin@relay.example>']) {
+      const res = await correct({ emailId: sent.body.email.id, rfcMessageId });
+      expect(res.json()).toEqual({ corrected: true });
+    }
+
+    // Subjects that the fallback could never match — these joins are the ids.
+    const fromDana = await deliverEmail(
+      ts.app,
+      inboundPayload({
+        to: [{ email: at('fable') }],
+        from: { email: 'dana@partner.example.com', name: 'Dana' },
+        subject: 'unrelated one',
+        inReplyTo: '<to-dana@relay.example>',
+      }),
+    );
+    const fromErin = await deliverEmail(
+      ts.app,
+      inboundPayload({
+        to: [{ email: at('fable') }],
+        from: { email: 'erin@partner.example.com', name: 'Erin' },
+        subject: 'unrelated two',
+        inReplyTo: '<to-erin@relay.example>',
+      }),
+    );
+    expect(fromDana.body.email.threadId).toBe(threadId);
+    expect(fromErin.body.email.threadId).toBe(threadId);
+    expect(await threads()).toHaveLength(1);
+    expect(await threadEmails(threadId)).toHaveLength(3);
+  });
+
+  it('409s when the id is already an ALIAS of another email', async () => {
+    const first = await send({ to: ['dana@partner.example.com'], subject: 'One', text: 'a' });
+    const second = await send({ to: ['dana@partner.example.com'], subject: 'Two', text: 'b' });
+    // Two ids on `first`: the second is an alias only.
+    for (const rfcMessageId of ['<alias-one@relay.example>', '<alias-two@relay.example>']) {
+      expect(
+        (await correct({ emailId: first.body.email.id, rfcMessageId })).statusCode,
+      ).toBe(200);
+    }
+    const clash = await correct({
+      emailId: second.body.email.id,
+      rfcMessageId: '<alias-two@relay.example>',
+    });
+    expect(clash.statusCode).toBe(409);
+    expect(clash.json().error.code).toBe('conflict');
+  });
+
   it('the corrected id threads the reply that names it — even with an unrelated subject', async () => {
     const sent = await send({
       to: ['dana@partner.example.com'],
@@ -298,5 +370,16 @@ describe('POST /email/wire-message-id', () => {
     handle.close();
     expect((await readEmail(emailId)).rfcMessageId).toBe(wire);
     expect((await readEmail(emailId)).disposition).toBe('send-failed');
+    // …and the id still threads: an alias is a fact about what went out, not a
+    // fact about how the send ended.
+    const reply = await deliverEmail(
+      ts.app,
+      inboundPayload({
+        to: [{ email: at('fable') }],
+        subject: 'unrelated entirely',
+        inReplyTo: wire,
+      }),
+    );
+    expect(reply.body.email.threadId).toBe(sent.body.thread.id);
   });
 });

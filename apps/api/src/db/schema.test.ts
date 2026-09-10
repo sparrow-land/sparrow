@@ -50,6 +50,8 @@ describe('fresh v3 schema', () => {
       // mail — its own table, so out-of-band SQL can never confuse the two.
       'email_quarantine',
       'email_attachments',
+      // The extra per-recipient wire Message-IDs one outbound email is known by.
+      'email_wire_ids',
     ]) {
       expect(names.has(t)).toBe(true);
     }

@@ -29,7 +29,7 @@ import {
 } from '@sparrow/common-types';
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';
-import { emailQuarantine, emails, emailThreads } from '../db/schema.js';
+import { emailQuarantine, emailWireIds, emails, emailThreads } from '../db/schema.js';
 import type { AgentRow, EmailRow, EmailThreadRow, OrgRow } from '../db/schema.js';
 import { badRequest, forbidden, payloadTooLarge } from '../errors.js';
 import { canonicalAddress } from './addresses.js';
@@ -385,23 +385,44 @@ function rfcTakenByOther(ctx: AppContext, row: EmailRow, rfc: string): boolean {
 }
 
 /**
- * The outcome of one wire-`Message-ID` correction.
+ * The outcome of one wire-`Message-ID` report.
  *
- * - `corrected` — the row now carries the wire id.
- * - `unchanged` — already that value, or the send never reached acceptance.
- * - `conflict`  — another of this agent's emails already holds that id.
- * - `invalid`   — not a well-formed `Message-ID`.
+ * - `recorded` — the id is now one of this email's; the row's own
+ *   `rfc_message_id` moved too if it was still the locally minted one.
+ * - `known`    — this email already answers to that id (idempotent replay).
+ * - `conflict` — the id belongs to a DIFFERENT email.
+ * - `invalid`  — not a well-formed `Message-ID`.
  */
-export type WireIdCorrection = 'corrected' | 'unchanged' | 'conflict' | 'invalid';
+export type WireIdCorrection = 'recorded' | 'known' | 'conflict' | 'invalid';
+
+/** Is `row` still carrying the `Message-ID` this instance minted for it? */
+function locallyMinted(row: EmailRow): boolean {
+  return row.rfcMessageId.startsWith(`<${row.id}@`);
+}
+
+/** The email a wire id already names, if any (globally — an id names one email). */
+function wireIdOwner(ctx: AppContext, rfc: string): string | undefined {
+  return ctx.db.select().from(emailWireIds).where(eq(emailWireIds.rfcMessageId, rfc)).get()
+    ?.emailId;
+}
 
 /**
- * Correct one OUTBOUND row's `rfc_message_id` to the id the provider actually
- * put on the wire, learned after the fact (the relay's activity webhook, pushed
- * back through `POST /email/wire-message-id`). The acceptance rules are exactly
- * the send-time ones in {@link correctionFor} — well-formed, different, free for
- * this agent, and only on an ACCEPTED (`sent`) send — so late knowledge and
- * send-time knowledge can never disagree. Idempotent: replaying the same value
- * answers `unchanged`.
+ * Record a wire `Message-ID` an OUTBOUND email actually went out under, learned
+ * after the fact (the relay's activity webhook, pushed back through
+ * `POST /email/wire-message-id`).
+ *
+ * **Additive.** One send can have many recipients and a provider may stamp a
+ * different id per recipient, each revealed by its own callback: every id is
+ * kept in `email_wire_ids`, so a reply from ANY recipient resolves by
+ * `Message-ID` rather than falling back to subject matching. The FIRST id
+ * reported additionally becomes the row's own `rfc_message_id` — that is the one
+ * the agent's later replies cite in `In-Reply-To`/`References`, and it must be
+ * an id the world has actually seen. A second, different id is stored as an
+ * alias and leaves the row alone, so callbacks have no ordering dependency.
+ *
+ * The acceptance rules are the send-time ones of {@link correctionFor} —
+ * well-formed, free, and only on an ACCEPTED (`sent`) send — so late knowledge
+ * and send-time knowledge can never disagree.
  */
 export function applyWireMessageId(
   ctx: AppContext,
@@ -410,19 +431,29 @@ export function applyWireMessageId(
 ): WireIdCorrection {
   const wire = wireMessageId(reported);
   if (wire === null) return 'invalid';
-  if (wire === row.rfcMessageId) return 'unchanged';
   // A held, rejected, or failed send never got an acceptance and never had a
-  // wire id: the locally minted one stands.
-  if (row.disposition !== 'sent') return 'unchanged';
+  // wire id: the locally minted one stands, and nothing is recorded.
+  if (row.disposition !== 'sent') return 'known';
+  const owner = wireIdOwner(ctx, wire);
+  if (owner === row.id || wire === row.rfcMessageId) return 'known';
+  if (owner !== undefined) return 'conflict';
   if (rfcTakenByOther(ctx, row, wire)) return 'conflict';
+  const at = nowIso();
   try {
-    ctx.db.update(emails).set({ rfcMessageId: wire }).where(eq(emails.id, row.id)).run();
+    ctx.db.insert(emailWireIds).values({ rfcMessageId: wire, emailId: row.id, createdAt: at }).run();
   } catch {
-    // Lost a race for the id: ours stands.
+    // Lost a race for the id: it names someone else's email now.
     return 'conflict';
   }
-  row.rfcMessageId = wire;
-  return 'corrected';
+  if (locallyMinted(row)) {
+    try {
+      ctx.db.update(emails).set({ rfcMessageId: wire }).where(eq(emails.id, row.id)).run();
+      row.rfcMessageId = wire;
+    } catch {
+      // The row keeps the local id; the alias still threads every reply.
+    }
+  }
+  return 'recorded';
 }
 
 /**

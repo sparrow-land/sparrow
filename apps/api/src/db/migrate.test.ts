@@ -258,6 +258,41 @@ describe('migrate: idempotent column adds', () => {
     sqlite.close();
   });
 
+  it('creates email_wire_ids on an existing database, with nothing to backfill', () => {
+    const sqlite = new Database(path.join(dir, 'pre-wire-ids.db'));
+    // A live instance from before the alias set existed: today's schema with the
+    // table dropped, plus a sent email already carrying its locally minted id.
+    migrate(sqlite);
+    sqlite.exec(`
+      DROP TABLE email_wire_ids;
+      INSERT INTO emails (id, thread_id, org_id, agent_id, direction, rfc_message_id,
+                          participants, subject, disposition, created_at)
+      VALUES ('eml_1', 'eth_1', 'org_1', 'agt_1', 'out', '<eml_1@acme.example.com>',
+              '{}', 'Hi', 'sent', '2026-09-01T00:00:00.000Z');
+    `);
+    const tables = (): Set<string> =>
+      new Set(
+        (
+          sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
+            name: string;
+          }[]
+        ).map((r) => r.name),
+      );
+    expect(tables().has('email_wire_ids')).toBe(false);
+
+    migrate(sqlite);
+
+    expect(tables().has('email_wire_ids')).toBe(true);
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM email_wire_ids').get()).toEqual({ n: 0 });
+    // The pre-existing row is untouched — an alias set is additive.
+    expect(sqlite.prepare('SELECT rfc_message_id AS r FROM emails').get()).toEqual({
+      r: '<eml_1@acme.example.com>',
+    });
+    migrate(sqlite); // idempotent
+    expect(tables().has('email_wire_ids')).toBe(true);
+    sqlite.close();
+  });
+
   it('is idempotent — a second migrate does not error or duplicate the column', () => {
     const sqlite = new Database(path.join(dir, 'fresh.db'));
     migrate(sqlite);

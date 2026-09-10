@@ -561,6 +561,33 @@ export const emailQuarantine = sqliteTable(
   }),
 );
 
+/**
+ * The wire `Message-ID`s an outbound email is known by, BESIDES the one on its
+ * `emails` row (SPEC v4 "The email medium → Threading → The wire Message-ID").
+ *
+ * One send can go to many recipients, and a provider may stamp a DIFFERENT
+ * `Message-ID` per recipient — each learned separately, later, from its activity
+ * webhook. The row can only hold one, so the rest live here: threading resolves
+ * an `In-Reply-To` through this table exactly as through `emails.rfc_message_id`,
+ * and every recipient's reply lands on the conversation it belongs to.
+ *
+ * `rfc_message_id` is UNIQUE across the table (an id names one email, globally),
+ * and rows are additive — a correction never replaces an alias.
+ */
+export const emailWireIds = sqliteTable(
+  'email_wire_ids',
+  {
+    /** The wire id itself, normalized — the primary key: one id, one email. */
+    rfcMessageId: text('rfc_message_id').primaryKey(),
+    /** The OUTBOUND `emails.id` this wire id names. */
+    emailId: text('email_id').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    emailIdx: index('email_wire_ids_email').on(t.emailId),
+  }),
+);
+
 /** Email attachment metadata; bytes share chat's store (`$DATA_DIR/attachments/{id}`). */
 export const emailAttachments = sqliteTable(
   'email_attachments',
@@ -743,6 +770,7 @@ export type EmailRow = typeof emails.$inferSelect;
 /** Structurally identical to {@link EmailRow} — the same shape on either side. */
 export type EmailQuarantineRow = typeof emailQuarantine.$inferSelect;
 export type EmailAttachmentRow = typeof emailAttachments.$inferSelect;
+export type EmailWireIdRow = typeof emailWireIds.$inferSelect;
 export type ActivityEntryRow = typeof activityEntries.$inferSelect;
 export type MeEventJournalRow = typeof meEventJournal.$inferSelect;
 export type MeEventJournalMarkRow = typeof meEventJournalMarks.$inferSelect;

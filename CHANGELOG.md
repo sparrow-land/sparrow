@@ -22,24 +22,33 @@ versions that release shipped with.
   this instance has never seen — and the reply opened a stray new thread. Email
   threading now falls back, only after every `In-Reply-To`/`References`
   candidate has missed, to the one live conversation the reply can only have
-  come from: same normalized subject (any depth of `Re:`/`Fwd:`/`Aw:`/`Sv:`
+  come from: same normalized subject (any depth of `Re:`/`Fwd:`/`Aw:`/`Sv:`/`R:`
   prefixes stripped), the sender already a correspondent on that thread, and the
-  thread active within 30 days. Ambiguity never joins — two qualifying threads
-  open a new one rather than guess — and a header match always wins over the
-  fallback, so subject text can never merge unrelated conversations.
+  thread active within 30 days. The fallback needs reply evidence in the
+  HEADERS — a non-null `In-Reply-To` or a non-empty `References` — so a message
+  with no threading headers is still fresh mail however its subject reads, and a
+  recurring subject never merges into last week's thread. Ambiguity never joins
+  — two qualifying threads open a new one rather than guess — and a header match
+  always wins over the fallback, so subject text can never merge unrelated
+  conversations.
 
 ### Added
 
 - **`POST /email/wire-message-id`** — the mail relay can report the
   `Message-ID` a provider actually put on the wire once its activity webhook
   reveals it, instead of only at send time. Same bearer as `POST /email/inbound`
-  (the instance's `EMAIL_INBOUND_TOKEN`, which also scopes the correction to
-  that instance's own mail) and the same acceptance rules as the send-time
+  (the instance's `EMAIL_INBOUND_TOKEN`, which also scopes the report to that
+  instance's own mail) and the same acceptance rules as the send-time
   correction: `{ emailId, rfcMessageId }` → `200 { corrected }`, `404` for
   anything but an outbound email of this instance, `400` for a malformed id,
-  `409` when another of that agent's emails already holds it. Idempotent, with
-  no ordering dependency on delivery or bounce events; a reply that already
-  joined its thread stays put.
+  `409` when the id already names a different email. Reports are **additive** —
+  a send to several recipients can be stamped with a different `Message-ID` per
+  recipient, so every reported id is kept in the new `email_wire_ids` table and
+  threading resolves through the whole set, while the first one reported becomes
+  the header id the agent's own replies cite. Idempotent, with no ordering
+  dependency between callbacks or against delivery/bounce events; a reply that
+  already joined its thread stays put. The table is created on the next boot of
+  an existing instance — additive, nothing to backfill.
 
 ## [0.1.23] — 2026-09-10
 

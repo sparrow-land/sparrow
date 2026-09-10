@@ -280,6 +280,13 @@ emails            id, thread_id (FK email_threads), org_id (denormalized),
 email_attachments id (att_), email_id (FK emails), filename, content_type,
                   size_bytes, created_at
                   INDEX(email_id)
+email_wire_ids    rfc_message_id (PK — one wire id names one email),
+                  email_id (FK emails — always an OUTBOUND row), created_at
+                  INDEX(email_id)
+                  -- the ADDITIONAL wire Message-IDs one outbound email is known
+                  -- by: providers that stamp a different id per recipient report
+                  -- each later, and threading resolves through this set exactly
+                  -- as through emails.rfc_message_id (see Threading)
 
 -- unified attention (layer 3)
 activity_entries  id, org_id, agent_id (nullable FK agents — the agent this
@@ -2382,9 +2389,11 @@ resolve. `POST /email/wire-message-id` answers `404` unless `emailId` names an
 never move), `400` on an `rfcMessageId` that is not an angle-bracketed id
 containing `@`, and `409` when another of that agent's emails already holds the
 value — `(agent, Message-ID)` is the medium's idempotency key, so ours stands.
-It is idempotent: `corrected: false` when the row already carries the value, and
-also when the send never reached `sent` (only an accepted send ever had a wire
-id).
+It is idempotent: `corrected: false` when the email already answers to that id,
+and also when the send never reached `sent` (only an accepted send ever had a
+wire id). Reports are additive — see *Threading → The wire Message-ID → The
+alias set* — so a second, different id from the same send is recorded too and
+answers `corrected: true`.
 
 #### Error codes
 
@@ -2611,15 +2620,21 @@ evaluated **within the anchor agent's own mail**.
    agent** → that email's thread.
 2. Otherwise scan `references` **right to left** (nearest ancestor first); the
    first match within the anchor agent's mail wins.
-3. Otherwise the **subject + correspondent fallback** — evaluated ONLY when
-   every `Message-ID` candidate above missed. A thread of this anchor agent
-   qualifies when all three hold:
+3. Otherwise the **subject + correspondent fallback** — evaluated ONLY for a
+   message that carries **reply evidence in its HEADERS** (a non-null
+   `In-Reply-To`, or a non-empty `References`) whose every `Message-ID`
+   candidate above missed. A bare `Re:` in the subject line is not evidence: a
+   message with no threading headers is fresh mail and opens a new thread, so a
+   recurring subject ("Weekly status") never merges into last week's. A thread
+   of this anchor agent qualifies when all three hold:
    - its stored `subject` **normalizes** to the same value as the inbound
      subject. Normalizing strips any number of leading reply/forward prefixes
      (`Re:`, `Fw:`, `Fwd:`, `Aw:`, `Sv:`, `Vs:`, case-insensitive, with the
-     optional bracketed counter some mailers add — `Re[2]:`, `Re(2):`),
-     collapses whitespace, trims, and case-folds. It is a comparison key only:
-     stored subjects are never rewritten.
+     optional bracketed counter some mailers add — `Re[2]:`, `Re(2):`), across
+     the localized forms in the wild (`Re`, `Fw`, `Fwd`, `Aw`, `Sv`, `Vs`, and
+     Italian Outlook's bare `R:`), then collapses whitespace, trims, and
+     case-folds. It is a comparison key only: stored subjects are never
+     rewritten.
    - the inbound **sender is already a correspondent** on it — their address
      appears in the `from`/`to`/`cc` of one of the thread's emails, on either
      side of the trust boundary (as in step 1, a quarantined message still
@@ -2630,9 +2645,19 @@ evaluated **within the anchor agent's own mail**.
      qualifies.
 
    **Ambiguity never joins.** Exactly one qualifying thread joins it; two or
-   more mean we cannot know which, and a new thread opens. The correspondent
-   test, the 30-day window, and this uniqueness rule are together what make
-   subject matching safe here — none of them is optional.
+   more mean we cannot know which, and a new thread opens. The reply evidence,
+   the correspondent test, the 30-day window, and this uniqueness rule are
+   together what make subject matching safe here — none of them is optional. In
+   particular, uniqueness among existing threads is not evidence that a new
+   message is a reply: without that gate, fresh mail could inherit a thread's
+   human-granted trust.
+
+   The fallback trusts the sender address, and so assumes the edge authenticated
+   it before the inbound seam — which it did: the `verification` verdicts ride in
+   on the payload and the trust engine enforces them, with a DMARC failure a hard
+   reject whatever the org's policy says (see *The trust engine → Inbound
+   pipeline*). Nothing here relaxes that; the fallback only ever runs against a
+   message that already survived it.
 4. Otherwise → a **new thread**, anchored to that agent, `subject` = the inbound
    subject (`""` → stored as `(no subject)`).
 
@@ -2682,11 +2707,36 @@ threads and the agent's next reply cites the id the world saw. The rules:
 
 A relay that learns the wire id only **later** — many providers reveal it
 through an activity webhook, minutes or hours after our `2xx` — pushes it back
-with `POST /email/wire-message-id` (see *The inbound seam*). Identical rules,
-identical result, so the send-time path and the late path can never disagree;
-the call is idempotent and has no ordering dependency on delivery or bounce
-events. A reply that already joined its thread through the subject fallback
-stays exactly where it is — a correction moves a row's id, never a conversation.
+with `POST /email/wire-message-id` (see *The inbound seam*). Same rules, so the
+send-time path and the late path can never disagree; the call is idempotent and
+has no ordering dependency on delivery or bounce events. A reply that already
+joined its thread through the subject fallback stays exactly where it is — a
+report moves an id, never a conversation.
+
+**The alias set.** One send can have many recipients, and some providers stamp a
+DIFFERENT `Message-ID` per recipient, each revealed by its own callback. An
+`emails` row can only carry one, so the rest are kept in `email_wire_ids` — the
+set of wire ids an outbound email is known by. The rules:
+
+- Reports are **additive**: every well-formed, unclaimed id is recorded against
+  the email. `rfc_message_id` is unique across the table (an id names exactly one
+  email); an id already claimed by a different email — on its row, in quarantine,
+  or as another email's alias — is `409`, and re-reporting an id this email
+  already answers to is a no-op.
+- The **first** id reported also becomes the row's own `rfc_message_id`, but only
+  while that is still the locally minted `<{emailId}@{domain}>` value. It is the
+  id the agent's own later replies cite in `In-Reply-To`/`References`, so it must
+  name something the world has actually seen; once it does, later ids are stored
+  as aliases and leave it alone. Callbacks therefore have no ordering dependency.
+- **Threading resolves through the alias set** exactly as through
+  `rfc_message_id`, on both sides of the trust boundary and still scoped to the
+  anchor agent — so each recipient's reply lands on the conversation by header,
+  never needing the subject fallback.
+
+*Limitation:* a `References` chain the core builds still cites one id per
+ancestor, so a recipient whose client is strict about which id it sees quoted may
+still see a slightly different chain than the one it sent. Carrying the full
+alias set through outbound header generation is the future fix.
 
 **Intra-instance mail is not short-circuited.** An agent emailing a sibling
 agent's address goes out through the relay and comes back through the inbound

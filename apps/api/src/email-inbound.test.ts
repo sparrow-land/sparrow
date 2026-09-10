@@ -531,6 +531,32 @@ describe('POST /email/inbound', () => {
       expect(await threads()).toHaveLength(1);
     });
 
+    it('needs reply EVIDENCE: same subject, same sender, no threading headers opens a second thread', async () => {
+      const first = await opened('Weekly status');
+      // A recurring subject is not a reply. Nothing in this message claims to
+      // answer anything, so it starts its own conversation — as it always did.
+      const second = await send({ subject: 'Weekly status' });
+      expect(second.body.email.threadId).not.toBe(first);
+      expect(await threads()).toHaveLength(2);
+    });
+
+    it('a `Re:` subject with no In-Reply-To and no References is still fresh mail', async () => {
+      const first = await opened('Weekly status');
+      const second = await send({ subject: 'Re: Weekly status' });
+      expect(second.body.email.threadId).not.toBe(first);
+      expect(await threads()).toHaveLength(2);
+    });
+
+    it('References alone is reply evidence enough', async () => {
+      const threadId = await opened('Weekly status');
+      const reply = await send({
+        subject: 'Re: Weekly status',
+        references: ['<never-seen@relay.example>'],
+      });
+      expect(reply.body.email.threadId).toBe(threadId);
+      expect(await threads()).toHaveLength(1);
+    });
+
     it('the same subject from a NEW correspondent opens an independent thread', async () => {
       const threadId = await opened('Sparrow mail is on MailerSend');
       const stranger = await send({
@@ -551,12 +577,14 @@ describe('POST /email/inbound', () => {
         'Fwd: Q3 rollout',
         'Re: Fwd:   Q3 rollout',
         'AW: SV: Q3 rollout',
+        'R: Q3 rollout', // Italian Outlook
+        'R: Re[3]: Q3 rollout',
       ]) {
         const reply = await send({ subject, inReplyTo: '<nobody-knows-this@relay.example>' });
         expect(reply.body.email.threadId).toBe(threadId);
       }
       expect(await threads()).toHaveLength(1);
-      expect(await threadEmails(threadId)).toHaveLength(6);
+      expect(await threadEmails(threadId)).toHaveLength(8);
     });
 
     it('stops looking after 30 days of silence on the thread', async () => {

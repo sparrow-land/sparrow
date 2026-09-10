@@ -307,6 +307,21 @@ describe('email approvals, contacts and read rights', () => {
       headers: auth(fable.key),
     });
     expect(threads.json().items).toHaveLength(1);
+    // FRESH mail from the same address — no threading headers at all, whatever
+    // its subject line says — has no thread to inherit trust from and is
+    // quarantined again. A recurring subject must never launder a returned-to-
+    // unknown contact back onto an approved thread.
+    const sameSubject = await deliverEmail(
+      ts.app,
+      inboundPayload({
+        to: [{ email: at('fable') }],
+        from: { email: 'dana@partner.example.com' },
+        rfcMessageId: '<same-subject@mail.example.net>',
+      }),
+    );
+    expect(sameSubject.body.status).toBe('quarantined');
+    expect(sameSubject.body.email.threadId).not.toBe(email.threadId);
+
     // A NEW conversation from the same address — no thread to inherit trust
     // from (different subject, unknown parent) — is quarantined again.
     const fresh = await deliverEmail(

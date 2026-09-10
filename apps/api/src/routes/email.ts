@@ -422,9 +422,10 @@ export function registerEmailRoutes(app: FastifyInstance, ctx: AppContext): void
   /**
    * The WIRE `Message-ID` correction seam (SPEC "Threading → The wire
    * Message-ID"). Some providers mint their own `Message-ID` and only reveal it
-   * later, through an activity webhook — after our `2xx` from the send. The
-   * RELAY is the intended caller: when it learns the id, it pushes it here and
-   * the outbound row moves to it, so the reply that names it threads.
+   * later, through an activity webhook — after our `2xx` from the send, once per
+   * recipient. The RELAY is the intended caller: each id it learns is recorded
+   * against the email (the first one also becomes the row's own), so the reply
+   * that names any of them threads.
    *
    * Same bearer as `/email/inbound` — the instance's own `EMAIL_INBOUND_TOKEN`,
    * so a correction can only name emails of the instance that issued it; ids
@@ -447,7 +448,7 @@ export function registerEmailRoutes(app: FastifyInstance, ctx: AppContext): void
     if (outcome === 'conflict') {
       throw conflict('That Message-ID already belongs to another email');
     }
-    const response: WireMessageIdResponse = { corrected: outcome === 'corrected' };
+    const response: WireMessageIdResponse = { corrected: outcome === 'recorded' };
     return reply.send(response);
   });
 
