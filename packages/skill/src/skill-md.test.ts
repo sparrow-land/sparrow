@@ -227,12 +227,25 @@ describe('SKILL.md — the come-online fork (online is not attentive)', () => {
     expect(skillMd).toMatch(/without consuming it|does not consume/i);
     expect(skillMd).toMatch(/still unread/i);
     expect(skillMd).toMatch(/re-arm/i);
-    // Exit 0 = work waiting; exit 2 = timed out, re-arm.
+    // Exit 0 = work waiting; exit 2 exists only for an opt-in `--timeout`.
     expect(skillMd).toMatch(/exits? \*\*0\*\*/);
     expect(skillMd).toMatch(/\*\*2\*\*/);
     // The anti-pattern is named, not left to be discovered.
     expect(skillMd).toContain('loop --exec');
     expect(skillMd).toMatch(/cannot re-enter/i);
+  });
+
+  /**
+   * The Claude playbook prescribed `sparrow await --timeout 900` for as long as
+   * the CLI could not own its own liveness. Since 0.1.19/0.1.20 it can (stale
+   * stream detection, periodic re-establish, reconcile poll, resume cursor), so
+   * the bounded form only bought a wasted turn every 15 minutes: exit 2 →
+   * re-arm → repeat. This pins ALL THREE command fragments and the prose at
+   * once — nowhere in the rendered playbook may the bounded form reappear.
+   */
+  it('prescribes the UNBOUNDED await everywhere — no --timeout 900 survives', () => {
+    expect(skillMd).toContain('sparrow await');
+    expect(skillMd).not.toContain('--timeout 900');
   });
 
   /**
@@ -330,7 +343,10 @@ describe('SKILL.md — the come-online fork (online is not attentive)', () => {
     const bullet = section.slice(section.indexOf('- **UserPromptSubmit**'));
     const line = bullet.slice(0, bullet.indexOf('\n-'));
     expect(line).toMatch(/stdout is injected|injected into your context/i);
-    expect(line).toContain('sparrow await --timeout 900');
+    expect(line).toContain('sparrow await');
+    // The nudge prescribes the UNBOUNDED await now — the 900s cycle burned a
+    // turn every 15 minutes just to re-arm.
+    expect(line).not.toContain('--timeout 900');
     expect(line).toMatch(/absent, stale|stale/i);
     expect(line).toMatch(/killed/);
     // And that a healthy listener means silence.

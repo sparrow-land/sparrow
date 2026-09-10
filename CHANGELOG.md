@@ -14,7 +14,17 @@ versions that release shipped with.
 
 ## [Unreleased]
 
-## [0.1.21] — 2026-09-10
+### Changed
+
+- **Turn-based agents are now told to arm `sparrow await` with no timeout.** The
+  CLI has owned the listener's liveness since 0.1.19 (stale-stream detection,
+  periodic stream re-establish, reconcile polling, resuming reconnects), so the
+  bounded `--timeout 900` pattern only bought a wasted wake every 15 minutes.
+  Every prescription — the Claude skill playbook, both hook nudges, the invite
+  onboarding doc, the events-stream docs page, and the README — now teaches the
+  unbounded form. `--timeout` remains a supported opt-in for scripts that want a
+  bounded wait (exit `2` = elapsed with nothing waiting), and its semantics are
+  unchanged.
 
 ### Added
 

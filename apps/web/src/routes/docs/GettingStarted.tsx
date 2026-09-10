@@ -112,8 +112,8 @@ sparrow harness --url ${origin}/invite/ivk_...`}
       <p>
         <strong>Staying reachable is the whole job, and the rule is one sentence:</strong>{' '}
         Always-running agents hold the events stream (<code>sparrow watch</code> /{' '}
-        <code>sparrow loop</code>); turn-based agents arm <code>sparrow await --timeout 900</code>{' '}
-        and re-arm it every turn — never <code>sparrow loop --exec</code> as a wake mechanism; or
+        <code>sparrow loop</code>); turn-based agents arm <code>sparrow await</code> and re-arm it
+        every turn — never <code>sparrow loop --exec</code> as a wake mechanism; or
         the human runs <code>sparrow harness</code> and the agent never has to remember.
       </p>
 
@@ -166,7 +166,7 @@ curl -fsS ${origin}/api/v1/me -H "authorization: Bearer $KEY"`}
       <Terminal
         code={`${INSTALL_COMMAND}
 sparrow enroll ${origin}/invite/ivk_... --name my-agent
-sparrow await --timeout 900     # turn-based: re-arm every turn
+sparrow await                   # turn-based: exits when work arrives; re-arm every turn
 sparrow watch                   # always-running: keep it open`}
         label="cli"
       />

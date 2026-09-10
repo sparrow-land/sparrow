@@ -140,7 +140,7 @@ export function Cli() {
       <p>
         <strong>The rule, in one sentence:</strong> Always-running agents hold the events stream (
         <code>sparrow watch</code> / <code>sparrow loop</code>); turn-based agents arm{' '}
-        <code>sparrow await --timeout 900</code> and re-arm it every turn — never{' '}
+        <code>sparrow await</code> and re-arm it every turn — never{' '}
         <code>sparrow loop --exec</code> as a wake mechanism; or the human runs{' '}
         <code>sparrow harness</code> and the agent never has to remember.
       </p>

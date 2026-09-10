@@ -18,7 +18,7 @@ import { invites } from './db/schema.js';
  */
 const PRESENCE_RULE =
   'Always-running agents hold the events stream (`sparrow watch` / `sparrow loop`); ' +
-  'turn-based agents arm `sparrow await --timeout 900` and re-arm it every turn — never ' +
+  'turn-based agents arm `sparrow await` and re-arm it every turn — never ' +
   '`sparrow loop --exec` as a wake mechanism; or the human runs `sparrow harness` and the ' +
   'agent never has to remember.';
 
@@ -143,13 +143,22 @@ describe('invite onboarding doc', () => {
     // Process exit is the portable wake signal; the command that produces it.
     expect(body).toMatch(/process exit/i);
     expect(body).toContain('sparrow await');
-    expect(body).toContain('sparrow await --timeout');
+    // `--timeout` is an opt-in for scripts since CLI 0.1.19/0.1.20 — plain `await`
+    // holds indefinitely and the CLI owns its own liveness. `sparrow await` is a
+    // SUBSTRING of the old form, so the negative assertion is the real test.
+    expect(body).not.toContain('--timeout 900');
+    expect(body).toContain('```sh\n# ARM THIS AS A TRACKED BACKGROUND TASK');
+    expect(body).toMatch(/# ARM THIS AS A TRACKED BACKGROUND TASK[^\n]*\nsparrow await\n/);
     // Its two load-bearing properties: it holds presence, and it does NOT consume.
     expect(body).toMatch(/without consuming it|does not consume/i);
     expect(body).toMatch(/still unread/i);
     // The exit-code contract a harness re-arms on.
     expect(body).toMatch(/exits? \*\*0\*\*/);
     expect(body).toMatch(/\*\*2\*\*/);
+    // Exit 2 exists ONLY when a script opts into `--timeout`; the default form
+    // holds until work arrives, so the wake step must not read as "it times out".
+    expect(body).toContain('only a script that opted into `--timeout` ever sees `2`');
+    expect(body).toMatch(/holds for as long\s+as it takes/i);
     // The loop, including the re-arm that closes it.
     expect(body).toContain('sparrow pop');
     expect(body).toMatch(/re-arm/i);
@@ -402,7 +411,11 @@ describe('invite onboarding doc', () => {
     expect(quickstart).toContain('tracked background task');
     expect(quickstart).toMatch(/go-signal/);
     // 3 — the runtime fork, with both commands and the re-arm-every-turn rule.
-    expect(quickstart).toContain('sparrow await --timeout 900');
+    // The wake command is prescribed PLAIN — `--timeout` is a script opt-in, not
+    // the default pattern (and `sparrow await` alone would still match the old
+    // `--timeout 900` form, hence the negative assertion).
+    expect(quickstart).toContain('`sparrow await` as a tracked background task');
+    expect(quickstart).not.toContain('--timeout');
     expect(quickstart).toContain('sparrow watch');
     expect(quickstart).toMatch(/every turn/i);
     // 4/5 — Path 3 installs the skill first; set the role if one was given.

@@ -126,9 +126,10 @@ what kind of agent it is:
   or `sparrow loop` (hold the stream *and* drain the inbox, optionally piping each work
   item to `--exec <cmd>`). Presence rides the open connection.
 - **Turn-based agents** — a Claude Code session, a cron job, anything that only thinks
-  when something invokes it — arm `sparrow await --timeout 900` as a background task.
-  It holds the stream like `watch` does, then prints one JSON line and **exits** the
-  moment work is waiting, which is the wake signal. Drain with `sparrow pop`, handle,
+  when something invokes it — arm `sparrow await` as a background task.
+  It holds the stream like `watch` does — indefinitely, owning its own reconnects —
+  then prints one JSON line and **exits** the moment work is waiting, which is the
+  wake signal. Drain with `sparrow pop`, handle,
   then **re-arm `await` every turn**. The wake also heartbeats presence so the agent
   stays online across the turn.
 - **Or hand the loop over** to `sparrow harness`, which listens for you and spawns the

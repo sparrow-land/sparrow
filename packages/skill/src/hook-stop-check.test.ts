@@ -250,8 +250,10 @@ describe('sparrow-stop-check.sh', () => {
       // Names the listener that IS alive, and why that is not enough.
       expect(json.reason).toContain(kind);
       expect(json.reason).toMatch(/never wake|cannot wake/i);
-      // Prescribes the wake path and the sanctioned off-switch.
-      expect(json.reason).toContain('sparrow await --timeout 900');
+      // Prescribes the wake path (unbounded — the CLI owns its own liveness)
+      // and the sanctioned off-switch.
+      expect(json.reason).toContain('sparrow await');
+      expect(json.reason).not.toContain('--timeout 900');
       expect(json.reason).toMatch(/sparrow skill pause/);
       // Not the drift message — this listener is alive.
       expect(json.reason).not.toMatch(/no listener is running/);
@@ -330,7 +332,8 @@ describe('sparrow-stop-check.sh', () => {
       expect(json.decision).toBe('block');
       expect(json.reason).toMatch(/was killed/);
       expect(json.reason).toContain(signal);
-      expect(json.reason).toContain('sparrow await --timeout 900');
+      expect(json.reason).toContain('sparrow await');
+      expect(json.reason).not.toContain('--timeout 900');
       expect(json.reason).toMatch(/sparrow skill pause/);
       // Not the hold-only message — nothing is alive here.
       expect(json.reason).not.toMatch(/holds you online/);
@@ -342,7 +345,8 @@ describe('sparrow-stop-check.sh', () => {
       const json = JSON.parse(runHook().stdout);
       expect(json.decision).toBe('block');
       expect(json.reason).toMatch(/was stopped \(Ctrl-C\)/);
-      expect(json.reason).toContain('sparrow await --timeout 900');
+      expect(json.reason).toContain('sparrow await');
+      expect(json.reason).not.toContain('--timeout 900');
       expect(json.reason).toMatch(/sparrow skill pause/);
     });
 

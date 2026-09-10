@@ -172,11 +172,9 @@ listener_nudge() {
     esac
   fi
   [ -n "$cause" ] || return 0
-  if [ -n "${CODEX_THREAD_ID:-}" ]; then
-    command='sparrow await'
-  else
-    command='sparrow await --timeout 900'
-  fi
+  # Both runtimes re-arm the same way now: plain, unbounded `sparrow await` —
+  # the CLI owns its own liveness, so there is no timer to re-arm on.
+  command='sparrow await'
   printf 'Sparrow: your listener %s. Before anything else, re-arm it: run `%s` as a tracked background task, then continue. (To step away on purpose: sparrow skill pause.)\n' "$cause" "$command"
 }
 

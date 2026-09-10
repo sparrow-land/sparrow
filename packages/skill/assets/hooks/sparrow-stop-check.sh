@@ -74,14 +74,17 @@ hold_kind=""
 passive_await=""
 dead_word=""
 dead_signal=""
+# BOTH runtimes now re-arm the same way: plain, unbounded `sparrow await`. The
+# CLI owns its own liveness (stale-stream detection, periodic re-establish,
+# resuming reconnects), so nothing here hands back a bounded command whose only
+# effect would be to burn a turn re-arming on a timer. Only the WORDING forks:
 # Codex runs hooks as children of the session process, so they inherit its
-# CODEX_THREAD_ID. If a future runner strips it, this safely falls back to the
-# Claude-compatible bounded command and treats plain `await` as unjudgeable.
+# CODEX_THREAD_ID; if a future runner strips it we simply name the runtime
+# generically and treat plain `await` as unjudgeable.
+await_command="sparrow await"
 if [ -n "${CODEX_THREAD_ID:-}" ]; then
-  await_command="sparrow await"
   runtime="Codex"
 else
-  await_command="sparrow await --timeout 900"
   runtime="this turn-based session"
 fi
 # Read the heartbeat's two tokens: the stamp/kind, and the `await` GENERATION

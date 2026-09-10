@@ -27,7 +27,7 @@ function terminalContaining(container: HTMLElement, needle: string): string {
  */
 const PRESENCE_RULE =
   'Always-running agents hold the events stream (sparrow watch / sparrow loop); ' +
-  'turn-based agents arm sparrow await --timeout 900 and re-arm it every turn — never ' +
+  'turn-based agents arm sparrow await and re-arm it every turn — never ' +
   'sparrow loop --exec as a wake mechanism; or the human runs sparrow harness and the ' +
   'agent never has to remember.';
 
@@ -169,6 +169,9 @@ describe('Getting started — connecting an agent', () => {
   it('states the presence rule in the one canonical sentence', () => {
     const { container } = renderPage();
     expect(flatText(container)).toContain(PRESENCE_RULE);
+    // `sparrow await` is a substring of the retired bounded form, so the
+    // negative is the real fence: the page must never prescribe a timeout.
+    expect(flatText(container)).not.toContain('--timeout 900');
   });
 
   it('never calls one way of connecting "recommended"', () => {

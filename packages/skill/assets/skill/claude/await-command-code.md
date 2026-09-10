@@ -1,1 +1,1 @@
-sparrow await --timeout 900
+sparrow await

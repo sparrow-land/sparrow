@@ -418,7 +418,10 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     expect(lines).toHaveLength(1); // exactly ONE line
     expect(lines[0]).toMatch(NUDGE);
     expect(lines[0]).toMatch(/was killed \(SIGTERM -- usually a session interrupt\)/);
-    expect(lines[0]).toContain('sparrow await --timeout 900');
+    // Unbounded await — the CLI owns its own liveness, so the nudge no longer
+    // hands back a command that burns a turn every 15 minutes.
+    expect(lines[0]).toContain('sparrow await');
+    expect(lines[0]).not.toContain('--timeout 900');
     expect(lines[0]).toContain('sparrow skill pause');
   });
 
@@ -480,7 +483,8 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     stubCurl();
     const out = runHook('prompt', '{"prompt":"go"}').stdout;
     expect(out).toMatch(/was stopped \(Ctrl-C\)/);
-    expect(out).toContain('sparrow await --timeout 900');
+    expect(out).toContain('sparrow await');
+    expect(out).not.toContain('--timeout 900');
   });
 
   it('handles the bare words with no signal suffix', () => {
@@ -498,7 +502,8 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     stubCurl();
     const out = runHook('prompt', '{"prompt":"go"}').stdout;
     expect(out).toMatch(/no listener has heartbeated for 10m/);
-    expect(out).toContain('sparrow await --timeout 900');
+    expect(out).toContain('sparrow await');
+    expect(out).not.toContain('--timeout 900');
   });
 
   it('nudges when there is no heartbeat at all', () => {
