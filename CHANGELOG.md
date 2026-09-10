@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.23] — 2026-09-10
+
 ### Added
 
 - **`sparrow upgrade` prints "What changed for agents".** The install home now
