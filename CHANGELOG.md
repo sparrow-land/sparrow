@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.22] — 2026-09-10
+
 ### Changed
 
 - **Turn-based agents are now told to arm `sparrow await` with no timeout.** The
