@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.25] — 2026-09-10
+
 ### Fixed
 
 - **Wake instructions now name the profile they belong to.** On a machine hosting
