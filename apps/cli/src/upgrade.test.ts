@@ -73,6 +73,12 @@ let agentNotesHits: string[] = [];
  * socket never outlives its test.
  */
 const HANG = '@@HANG@@';
+/**
+ * Its sibling: headers arrive fine, the JSON BODY stalls mid-object — so the
+ * deadline has to stay active through `res.json()`, not just the header round
+ * trip.
+ */
+const HANG_BODY = '@@HANG-BODY@@';
 const hungResponses: http.ServerResponse[] = [];
 
 beforeAll(async () => {
@@ -82,6 +88,12 @@ beforeAll(async () => {
       agentNotesHits.push(url);
       if (agentNotesBody === HANG) {
         hungResponses.push(res); // accept, say nothing, hold the socket open
+        return;
+      }
+      if (agentNotesBody === HANG_BODY) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write('{"notes": {"9.9.9": "you will never fini'); // …and hold
+        hungResponses.push(res);
         return;
       }
       if (agentNotesBody === undefined) {
@@ -523,16 +535,25 @@ describe('sparrow upgrade — skill refresh', () => {
     });
 
     /**
-     * The nastier unavailability: the install home ACCEPTS the request and then
-     * says nothing (a wedged edge, a half-dead origin). "Best-effort" must mean
-     * bounded — the digest fetch carries its own timeout, so the upgrade the
-     * user asked for still completes promptly instead of hanging on a nicety.
+     * The nastier unavailabilities: the install home ACCEPTS the request and
+     * then stalls — either before the headers or mid-body (a wedged edge, a
+     * half-dead origin). "Best-effort" must mean BOUNDED, and the deadline must
+     * stay active through `res.json()`: the digest sits BEFORE the skill
+     * refresh in the action, so an unbounded stall would not just hang the
+     * upgrade, it would leave the installed skill on the old release with both
+     * binaries already replaced. Each case arranges a recorded skill install
+     * and asserts the refresh still ran.
      */
-    it(
-      'a digest endpoint that never answers cannot hang the upgrade',
+    it.each([
+      ['before the headers', HANG],
+      ['mid-body, after good headers', HANG_BODY],
+    ])(
+      'a digest endpoint that stalls %s cannot hang the upgrade or starve the skill refresh',
       { timeout: 15_000 },
-      async () => {
-        agentNotesBody = HANG;
+      async (_label, sentinel) => {
+        expect(await runCli(['skill', 'install'], env(), capture().io)).toBe(0);
+        fs.rmSync(refreshLog, { force: true });
+        agentNotesBody = sentinel;
 
         const started = Date.now();
         const cap = capture();
@@ -542,7 +563,9 @@ describe('sparrow upgrade — skill refresh', () => {
         expect(Date.now() - started).toBeLessThan(10_000);
         expect(cap.out()).toContain('Upgraded sparrow: 0.0.1+old → 9.9.9+new');
         expect(cap.out()).not.toContain('What changed for agents');
-        expect(cap.err()).toBe('');
+        // The refresh behind the stalled digest still ran, on the NEW bundle.
+        expect(refreshes().length).toBeGreaterThan(0);
+        expect(cap.out()).toContain('skill: refreshed');
       },
     );
 
