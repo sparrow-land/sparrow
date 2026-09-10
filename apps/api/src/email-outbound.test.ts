@@ -19,6 +19,7 @@ import {
   makeAgent,
   deliverEmail,
   inboundPayload,
+  TEST_INBOUND_TOKEN,
   type TestServer,
   type SignedUpHuman,
 } from './test-helpers.js';
@@ -346,6 +347,50 @@ describe('the outbound pipeline', () => {
     const email = res.json().email;
     expect(email.disposition).toBe('sent');
     expect(email.rfcMessageId).toBe(`<${email.id}@${slug}.example.com>`);
+  });
+
+  it('ignores a wire Message-ID that is an ALIAS of another email, which keeps routing its replies', async () => {
+    await setPolicy({ trustedPatterns: ['*@partner.example.com'] });
+    const first = await send({ to: ['dana@partner.example.com'], subject: 'Alpha', text: 'a' });
+    const firstId = first.json().email.id as string;
+    const firstThread = first.json().thread.id as string;
+    // Two wire ids on the first email: the second is an ALIAS only.
+    for (const rfcMessageId of ['<w1@provider.example>', '<w2@provider.example>']) {
+      const res = await ts.app.inject({
+        method: 'POST',
+        url: '/api/v1/email/wire-message-id',
+        headers: auth(TEST_INBOUND_TOKEN),
+        payload: { emailId: firstId, rfcMessageId },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+
+    // A later send whose relay reports that alias at SEND time hits the same
+    // ownership fence as the webhook route: an id names one email.
+    ts.app.emailFake!.setWireMessageId(() => '<w2@provider.example>');
+    const second = await send({ to: ['dana@partner.example.com'], subject: 'Beta', text: 'b' });
+    const secondEmail = second.json().email;
+    expect(secondEmail.disposition).toBe('sent');
+    expect(secondEmail.rfcMessageId).toBe(`<${secondEmail.id}@${slug}.example.com>`);
+
+    // The first email is untouched, and the alias still routes its replies.
+    const untouched = await ts.app.inject({
+      method: 'GET',
+      url: `/api/v1/me/email/emails/${firstId}?peek=true`,
+      headers: auth(fable.key),
+    });
+    expect(untouched.json().email.rfcMessageId).toBe('<w1@provider.example>');
+    const reply = await deliverEmail(
+      ts.app,
+      inboundPayload({
+        to: [{ email: at('fable') }],
+        from: { email: 'dana@partner.example.com' },
+        subject: 'unrelated entirely',
+        inReplyTo: '<w2@provider.example>',
+      }),
+    );
+    expect(reply.body.email.threadId).toBe(firstThread);
+    expect(reply.body.email.threadId).not.toBe(second.json().thread.id);
   });
 
   it('a held send never reaches the relay, so its Message-ID is never corrected', async () => {

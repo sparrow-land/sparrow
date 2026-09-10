@@ -2722,12 +2722,19 @@ set of wire ids an outbound email is known by. The rules:
   the email. `rfc_message_id` is unique across the table (an id names exactly one
   email); an id already claimed by a different email — on its row, in quarantine,
   or as another email's alias — is `409`, and re-reporting an id this email
-  already answers to is a no-op.
+  already answers to is a no-op. The send-time correction applies the SAME
+  ownership fence, so a relay that reports at send time an id another email is
+  already known by keeps its locally minted one and logs, exactly as the webhook
+  route refuses it.
 - The **first** id reported also becomes the row's own `rfc_message_id`, but only
   while that is still the locally minted `<{emailId}@{domain}>` value. It is the
   id the agent's own later replies cite in `In-Reply-To`/`References`, so it must
   name something the world has actually seen; once it does, later ids are stored
   as aliases and leave it alone. Callbacks therefore have no ordering dependency.
+  That promotion **retains the minted id as an alias of the same email**, in one
+  transaction with the promotion: the agent's own replies may already have cited
+  it before the delayed callback arrived, so it was never private to the core and
+  must keep resolving.
 - **Threading resolves through the alias set** exactly as through
   `rfc_message_id`, on both sides of the trust boundary and still scoped to the
   anchor agent — so each recipient's reply lands on the conversation by header,

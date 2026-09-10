@@ -233,6 +233,41 @@ describe('POST /email/wire-message-id', () => {
     expect((await readEmail(emailId)).rfcMessageId).toBe('<per-recipient-a@relay.example>');
   });
 
+  it('promotion RETAINS the minted id as an alias — a reply naming it still threads', async () => {
+    const sent = await send({
+      to: ['dana@partner.example.com'],
+      subject: 'Ledger sync',
+      text: 'body',
+    });
+    const emailId = sent.body.email.id as string;
+    const threadId = sent.body.thread.id as string;
+    const minted = sent.body.email.rfcMessageId as string;
+    expect(minted).toBe(`<${emailId}@${slug}.example.com>`);
+
+    const wire = '<0102019a7e33@relay.example>';
+    expect((await correct({ emailId, rfcMessageId: wire })).json()).toEqual({ corrected: true });
+    expect((await readEmail(emailId)).rfcMessageId).toBe(wire);
+
+    // The minted id was not private to core — the agent's own earlier replies may
+    // already have cited it in In-Reply-To/References before the callback landed.
+    // A reply naming it still resolves by Message-ID, unrelated subject and all.
+    const reply = await deliverEmail(
+      ts.app,
+      inboundPayload({
+        to: [{ email: at('fable') }],
+        subject: 'a totally different subject',
+        inReplyTo: minted,
+      }),
+    );
+    expect(reply.body.email.threadId).toBe(threadId);
+
+    // …and it is a genuine alias of the same email: re-reporting it is a no-op.
+    const replay = await correct({ emailId, rfcMessageId: minted });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json()).toEqual({ corrected: false });
+    expect((await readEmail(emailId)).rfcMessageId).toBe(wire);
+  });
+
   it('two recipients, two wire ids: EITHER reply threads by Message-ID, not by subject', async () => {
     const sent = await send({
       to: ['dana@partner.example.com', 'erin@partner.example.com'],

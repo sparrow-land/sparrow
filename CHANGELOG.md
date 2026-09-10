@@ -45,7 +45,10 @@ versions that release shipped with.
   a send to several recipients can be stamped with a different `Message-ID` per
   recipient, so every reported id is kept in the new `email_wire_ids` table and
   threading resolves through the whole set, while the first one reported becomes
-  the header id the agent's own replies cite. Idempotent, with no ordering
+  the header id the agent's own replies cite (the id it replaces is retained as
+  an alias, since earlier replies may already have cited it). One ownership
+  fence covers both the webhook and the send-time correction: an id names
+  exactly one email. Idempotent, with no ordering
   dependency between callbacks or against delivery/bounce events; a reply that
   already joined its thread stays put. The table is created on the next boot of
   an existing instance — additive, nothing to backfill.

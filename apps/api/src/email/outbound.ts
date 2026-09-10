@@ -364,12 +364,20 @@ export async function sendOutbound(
 }
 
 /**
- * Is `rfc` already the `Message-ID` of some OTHER row of this agent's mail
- * (either side of the trust boundary)? `(agent_id, rfc_message_id)` is the
- * medium's idempotency key and the DB enforces it per table, so a wire id that
- * collides is refused rather than allowed to fight the unique index.
+ * Does `rfc` already name an email OTHER than `row`? THE ownership fence, and
+ * the only one: both the send-time correction ({@link correctionFor}) and the
+ * webhook route ({@link applyWireMessageId}) ask this exact question, so the two
+ * paths cannot drift into disagreeing about who owns an id.
+ *
+ * Three places can claim one: the alias set (globally — an id names exactly one
+ * email anywhere on the instance), and either side of the trust boundary within
+ * this agent's own mail, where `(agent_id, rfc_message_id)` is the medium's
+ * idempotency key and the DB enforces it per table. A wire id that collides is
+ * refused rather than allowed to fight a unique index.
  */
 function rfcTakenByOther(ctx: AppContext, row: EmailRow, rfc: string): boolean {
+  const alias = wireIdOwner(ctx, rfc);
+  if (alias !== undefined) return alias !== row.id;
   const mine = ctx.db
     .select()
     .from(emails)
@@ -434,25 +442,32 @@ export function applyWireMessageId(
   // A held, rejected, or failed send never got an acceptance and never had a
   // wire id: the locally minted one stands, and nothing is recorded.
   if (row.disposition !== 'sent') return 'known';
-  const owner = wireIdOwner(ctx, wire);
-  if (owner === row.id || wire === row.rfcMessageId) return 'known';
-  if (owner !== undefined) return 'conflict';
+  if (wire === row.rfcMessageId || wireIdOwner(ctx, wire) === row.id) return 'known';
   if (rfcTakenByOther(ctx, row, wire)) return 'conflict';
   const at = nowIso();
+  const minted = row.rfcMessageId;
+  const promote = locallyMinted(row);
   try {
-    ctx.db.insert(emailWireIds).values({ rfcMessageId: wire, emailId: row.id, createdAt: at }).run();
+    // ONE transaction: promoting the row and RETAINING the id it is giving up
+    // must not be separable. The minted id was never private — the agent's own
+    // earlier replies may already have cited it in `In-Reply-To`/`References`
+    // before this callback landed — so it stays an alias of the same email and
+    // keeps resolving.
+    ctx.db.transaction((tx) => {
+      tx.insert(emailWireIds).values({ rfcMessageId: wire, emailId: row.id, createdAt: at }).run();
+      if (promote) {
+        tx.insert(emailWireIds)
+          .values({ rfcMessageId: minted, emailId: row.id, createdAt: at })
+          .onConflictDoNothing()
+          .run();
+        tx.update(emails).set({ rfcMessageId: wire }).where(eq(emails.id, row.id)).run();
+      }
+    });
   } catch {
     // Lost a race for the id: it names someone else's email now.
     return 'conflict';
   }
-  if (locallyMinted(row)) {
-    try {
-      ctx.db.update(emails).set({ rfcMessageId: wire }).where(eq(emails.id, row.id)).run();
-      row.rfcMessageId = wire;
-    } catch {
-      // The row keeps the local id; the alias still threads every reply.
-    }
-  }
+  if (promote) row.rfcMessageId = wire;
   return 'recorded';
 }
 
