@@ -59,7 +59,10 @@ import { appendChatMessageActivity } from '../activity.js';
 import {
   memberIdentity,
   toMessage,
+  toMessages,
   toInboxItem,
+  messagePageRefs,
+  inboxPageRefs,
   bodyPreview,
   messageInRoom,
   memberCanReadMessage,
@@ -367,19 +370,27 @@ export function registerMessageRoutes(app: FastifyInstance, ctx: AppContext): vo
     // Trigger (b): listing a message is server-observed delivery. Mark each
     // RETURNED row `received` (once) and notify the sender per newly-marked item.
     const page = rows.length > limit ? rows.slice(0, limit) : rows;
+    // One bundle of lookups for the whole page (see `inboxPageRefs`).
+    const refs = inboxPageRefs(ctx, page.map((r) => r.msg), [caller.member.id]);
     const markTs = nowIso();
     const effReceived = new Map<string, string | null>();
     for (const r of page) {
       effReceived.set(
         r.msg.id,
         r.receivedAt ??
-          markReceived(ctx, caller.room.id, r.msg.senderId, r.msg.id, caller.member.id, markTs),
+          markReceived(ctx, caller.room.id, r.msg.senderId, r.msg.id, caller.member.id, markTs, refs),
       );
     }
     const response: ListInboxResponse = pageResult(
       rows,
       limit,
-      (r) => toInboxItem(ctx, r.msg, recipientStatus(r.readAt, effReceived.get(r.msg.id) ?? r.receivedAt)),
+      (r) =>
+        toInboxItem(
+          ctx,
+          r.msg,
+          recipientStatus(r.readAt, effReceived.get(r.msg.id) ?? r.receivedAt),
+          refs,
+        ),
       (r) => ({ createdAt: r.msg.createdAt, id: r.msg.id }),
     );
     return reply.send(response);
@@ -431,7 +442,7 @@ export function registerMessageRoutes(app: FastifyInstance, ctx: AppContext): vo
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     const response: ListRoomMessagesResponse = {
-      items: page.map((r) => toMessage(ctx, r.msg)),
+      items: toMessages(ctx, page.map((r) => r.msg)),
       nextBefore: hasMore && page.length > 0 ? page[page.length - 1]!.msg.id : null,
     };
     return reply.send(response);
@@ -541,10 +552,11 @@ export function registerMessageRoutes(app: FastifyInstance, ctx: AppContext): vo
       .orderBy(asc(messages.createdAt), asc(messages.id))
       .limit(limit + 1)
       .all();
+    const outboxRefs = messagePageRefs(ctx, rows.slice(0, limit));
     const response: ListOutboxResponse = pageResult(
       rows,
       limit,
-      (r) => toMessage(ctx, r),
+      (r) => toMessage(ctx, r, outboxRefs),
       (r) => ({ createdAt: r.createdAt, id: r.id }),
     );
     return reply.send(response);

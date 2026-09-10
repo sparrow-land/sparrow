@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import Database from 'better-sqlite3';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -85,6 +86,54 @@ export async function deliverEmail(
     payload,
   });
   return { statusCode: res.statusCode, body: res.statusCode === 202 ? res.json() : res.json() };
+}
+
+/** A recording of the SQL better-sqlite3 executed, and how to stop recording. */
+export interface StatementLog {
+  /** Every executed statement, in order, with the parameters it ran with. */
+  statements: { sql: string; params: unknown[] }[];
+  /** How many recorded statements match `needle` (case-insensitive substring). */
+  count(needle: string): number;
+  /** Forget everything recorded so far (call between the setup and the act). */
+  reset(): void;
+  /** Un-patch. ALWAYS call this in an `afterEach`/`afterAll`. */
+  restore(): void;
+}
+
+/**
+ * Record every statement better-sqlite3 runs, for tests that assert on the SQL a
+ * route issues rather than on its response — query plans, and N+1 guards. Wraps
+ * `Database.prototype.prepare`, so it sees the driver's real SQL and needs no
+ * seam in the production code; `EXPLAIN` statements a test issues itself are
+ * skipped so the log stays the route's own work.
+ */
+export function recordStatements(): StatementLog {
+  const original = Database.prototype.prepare;
+  const statements: { sql: string; params: unknown[] }[] = [];
+  Database.prototype.prepare = function patched(this: Database.Database, ...args: unknown[]) {
+    const stmt = (original as (...a: unknown[]) => any).apply(this, args);
+    const sql = String(args[0]);
+    if (/^\s*EXPLAIN/i.test(sql)) return stmt;
+    for (const method of ['all', 'get', 'run'] as const) {
+      const bound = stmt[method].bind(stmt);
+      stmt[method] = (...params: unknown[]) => {
+        statements.push({ sql, params });
+        return bound(...params);
+      };
+    }
+    return stmt;
+  } as typeof Database.prototype.prepare;
+  return {
+    statements,
+    count: (needle) =>
+      statements.filter((e) => e.sql.toLowerCase().includes(needle.toLowerCase())).length,
+    reset: () => {
+      statements.length = 0;
+    },
+    restore: () => {
+      Database.prototype.prepare = original;
+    },
+  };
 }
 
 /** Bearer auth header helper (session token or agent key). */

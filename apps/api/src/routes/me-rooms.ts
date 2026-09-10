@@ -56,6 +56,7 @@ import {
 import {
   toMessage,
   toInboxItem,
+  inboxPageRefs,
   oldestUnreadAcrossMembers,
   recipientStatus,
   markReceived,
@@ -393,6 +394,12 @@ export function registerMeRoomRoutes(app: FastifyInstance, ctx: AppContext): voi
 
     const hasMore = merged.length > limit;
     const page = hasMore ? merged.slice(0, limit) : merged;
+    // One bundle of lookups for the whole page's chat rows (see `inboxPageRefs`).
+    const refs = inboxPageRefs(
+      ctx,
+      page.flatMap((m) => (m.rank === 0 ? [m.chat.msg] : [])),
+      page.flatMap((m) => (m.rank === 0 ? [m.chat.recipientId] : [])),
+    );
     // Listing marks each RETURNED chat row `received` (once) — server-observed
     // delivery. It marks NOTHING on an email item: SMTP delivery is not
     // sparrow's to witness.
@@ -404,7 +411,7 @@ export function registerMeRoomRoutes(app: FastifyInstance, ctx: AppContext): voi
       effReceived.set(
         r.msg.id,
         r.receivedAt ??
-          markReceived(ctx, r.msg.roomId, r.msg.senderId, r.msg.id, r.recipientId, markTs),
+          markReceived(ctx, r.msg.roomId, r.msg.senderId, r.msg.id, r.recipientId, markTs, refs),
       );
     }
     const items = page.map((m): InboxEntry => {
@@ -416,6 +423,7 @@ export function registerMeRoomRoutes(app: FastifyInstance, ctx: AppContext): voi
             ctx,
             r.msg,
             recipientStatus(r.readAt, effReceived.get(r.msg.id) ?? r.receivedAt),
+            refs,
           ),
           room: inboxRoomRef(ctx, r.room, principal.id),
         };

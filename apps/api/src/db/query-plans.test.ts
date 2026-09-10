@@ -20,57 +20,24 @@ import {
   firstOrgId,
   joinOrg,
   createRoom,
+  recordStatements,
+  type StatementLog,
   type TestServer,
   type SignedUpHuman,
 } from '../test-helpers.js';
-
-/** One statement better-sqlite3 executed, with the parameters it ran with. */
-interface Executed {
-  sql: string;
-  params: unknown[];
-}
-
-const executed: Executed[] = [];
-
-/**
- * Record every statement better-sqlite3 runs. Capturing the driver's SQL (rather
- * than re-deriving it in the test) is what keeps this suite honest: the SQL
- * explained below is byte-for-byte the SQL the route issued, so a query rewrite
- * cannot drift away from its plan guard without this file noticing.
- */
-function installStatementRecorder(): () => void {
-  const original = Database.prototype.prepare;
-  Database.prototype.prepare = function patched(this: Database.Database, ...args: unknown[]) {
-    const stmt = (original as (...a: unknown[]) => any).apply(this, args);
-    const sql = String(args[0]);
-    // Never record the EXPLAIN statements this suite itself prepares.
-    if (/^\s*EXPLAIN/i.test(sql)) return stmt;
-    for (const method of ['all', 'get', 'run'] as const) {
-      const bound = stmt[method].bind(stmt);
-      stmt[method] = (...params: unknown[]) => {
-        executed.push({ sql, params });
-        return bound(...params);
-      };
-    }
-    return stmt;
-  } as typeof Database.prototype.prepare;
-  return () => {
-    Database.prototype.prepare = original;
-  };
-}
 
 /** How many messages the seeded room holds — enough that a full scan is visible. */
 const SEEDED_MESSAGES = 4000;
 
 describe('room-open query plans', () => {
   let ts: TestServer;
-  let restore: () => void;
+  let log: StatementLog;
   let sqlite: Database.Database;
   let owner: SignedUpHuman;
   let alice: SignedUpHuman;
   let roomId: string;
   /** The four captured hot-path statements, by name. */
-  const captured = new Map<string, Executed>();
+  const captured = new Map<string, { sql: string; params: unknown[] }>();
 
   /** `EXPLAIN QUERY PLAN` rows for one captured statement, as detail strings. */
   function plan(name: string): string[] {
@@ -85,13 +52,13 @@ describe('room-open query plans', () => {
 
   /** The last recorded statement matching every predicate. */
   function pick(name: string, match: (sql: string) => boolean): void {
-    const hit = [...executed].reverse().find((e) => match(e.sql.toLowerCase()));
+    const hit = [...log.statements].reverse().find((e) => match(e.sql.toLowerCase()));
     if (!hit) throw new Error(`no executed statement matched ${name}`);
     captured.set(name, hit);
   }
 
   beforeAll(async () => {
-    restore = installStatementRecorder();
+    log = recordStatements();
     ts = await makeTestServer();
     owner = await signup(ts.app, { email: 'owner@example.com', displayName: 'Owner' });
     const orgId = await firstOrgId(ts.app, owner.token);
@@ -140,7 +107,7 @@ describe('room-open query plans', () => {
     })();
 
     // Drive the four hot paths, then capture the SQL each one issued.
-    executed.length = 0;
+    log.reset();
     const history = await ts.app.inject({
       method: 'GET',
       url: `/api/v1/rooms/${roomId}/messages?limit=50`,
@@ -209,7 +176,7 @@ describe('room-open query plans', () => {
 
   afterAll(async () => {
     sqlite?.close();
-    restore?.();
+    log?.restore();
     await ts?.close();
   });
 

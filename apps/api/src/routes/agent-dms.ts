@@ -40,7 +40,7 @@ import { messages, rooms } from '../db/schema.js';
 import { parse } from '../validate.js';
 import { badRequest, forbidden, notFound } from '../errors.js';
 import { membershipOf } from '../org-helpers.js';
-import { bodyPreview, toMessage } from '../message-helpers.js';
+import { bodyPreview, toMessages } from '../message-helpers.js';
 import {
   agentPairOf,
   allowAgentDm,
@@ -170,7 +170,7 @@ export function registerAgentDmRoutes(app: FastifyInstance, ctx: AppContext): vo
       const hasMore = rows.length > limit;
       const page = hasMore ? rows.slice(0, limit) : rows;
       const response: ListRoomMessagesResponse = {
-        items: page.map((r) => toMessage(ctx, r.msg)),
+        items: toMessages(ctx, page.map((r) => r.msg)),
         nextBefore: hasMore && page.length > 0 ? page[page.length - 1]!.msg.id : null,
       };
       return reply.send(response);

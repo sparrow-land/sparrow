@@ -18,7 +18,7 @@ import {
 } from '@sparrow/common-types';
 import type { AppContext } from './context.js';
 import { attachments, members, messageRecipients, messages } from './db/schema.js';
-import type { MemberRow, MessageRow } from './db/schema.js';
+import type { MemberRow, MessageRecipientRow, MessageRow } from './db/schema.js';
 import { avatarUrlForPrincipal } from './avatar-helpers.js';
 import { memberById, principalDisplayName, toMemberRef } from './room-helpers.js';
 import { emitMessageReceived } from './room-events.js';
@@ -62,19 +62,32 @@ export function memberIdentity(ctx: AppContext, row: MemberRow | undefined): Mem
  *     unresolved ref to a blank human is what silently converted an agent's
  *     transcript into a human's and misrouted on `kind`.
  */
-function refFor(ctx: AppContext, memberId: string, snapshot?: MemberIdentity): MemberRef {
-  const row = memberById(ctx, memberId);
-  if (row) return toMemberRef(ctx, row);
+function refFor(
+  ctx: AppContext,
+  memberId: string,
+  snapshot?: MemberIdentity,
+  page?: MessagePageRefs,
+): MemberRef {
+  // `page.memberIds` records which ids the page RESOLVED, so a miss inside it is
+  // an authoritative "no such member" rather than a cache miss — a member who
+  // left costs no extra query on the batched path either.
+  const row =
+    page && page.memberIds.has(memberId) ? page.members.get(memberId) : memberById(ctx, memberId);
+  if (row) {
+    const kind = row.principalType as PrincipalKind;
+    const { displayName, avatarUrl } = identityOf(ctx, kind, row.principalId, page);
+    return { id: row.id, kind, displayName, avatarUrl, principalId: row.principalId };
+  }
 
   const kind = snapshot?.principalType;
   const principalId = snapshot?.principalId;
   if ((kind === 'human' || kind === 'agent') && principalId) {
-    const live = principalDisplayName(ctx, kind, principalId);
+    const { displayName: live, avatarUrl } = identityOf(ctx, kind, principalId, page);
     return {
       id: memberId,
       kind,
       displayName: live || snapshot?.displayName || '',
-      avatarUrl: avatarUrlForPrincipal(ctx, kind, principalId),
+      avatarUrl,
       principalId,
     };
   }
@@ -114,6 +127,8 @@ export function markReceived(
   messageId: string,
   recipientMemberId: string,
   ts: string,
+  /** The listing's page bundle, so the emitted `by` ref costs no extra query. */
+  page?: MessagePageRefs,
 ): string | null {
   const res = ctx.db
     .update(messageRecipients)
@@ -129,7 +144,7 @@ export function markReceived(
   if (res.changes === 0) return null;
   emitMessageReceived(ctx, roomId, senderMemberId, {
     messageId,
-    by: refFor(ctx, recipientMemberId),
+    by: refFor(ctx, recipientMemberId, undefined, page),
     receivedAt: ts,
   });
   return ts;
@@ -140,6 +155,11 @@ export function bodyPreview(body: string): { preview: string; truncated: boolean
   return { preview: body.slice(0, PREVIEW_LENGTH), truncated: body.length > PREVIEW_LENGTH };
 }
 
+/** Project one attachment row to its wire metadata. */
+function toAttachmentMeta(a: typeof attachments.$inferSelect): AttachmentMeta {
+  return { id: a.id, filename: a.filename, contentType: a.contentType, sizeBytes: a.sizeBytes };
+}
+
 /** Attachment metadata rows for a message (ascending by id). */
 export function attachmentMetas(ctx: AppContext, messageId: string): AttachmentMeta[] {
   return ctx.db
@@ -148,12 +168,176 @@ export function attachmentMetas(ctx: AppContext, messageId: string): AttachmentM
     .where(eq(attachments.messageId, messageId))
     .orderBy(asc(attachments.id))
     .all()
-    .map((a) => ({
-      id: a.id,
-      filename: a.filename,
-      contentType: a.contentType,
-      sizeBytes: a.sizeBytes,
-    }));
+    .map(toAttachmentMeta);
+}
+
+/**
+ * How many ids one batched lookup binds at a time. SQLite's bound-parameter
+ * ceiling is finite, and a page is never near this — the chunk exists so a
+ * caller that hands over an unbounded id list still degrades to a few queries
+ * instead of failing.
+ */
+const PAGE_LOOKUP_CHUNK = 500;
+
+/** Split ids into bind-sized chunks (empty in, empty out). */
+function chunked(ids: string[]): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += PAGE_LOOKUP_CHUNK) out.push(ids.slice(i, i + PAGE_LOOKUP_CHUNK));
+  return out;
+}
+
+/**
+ * Everything a PAGE of messages needs from the database beyond its own rows,
+ * resolved in a handful of queries instead of a handful PER MESSAGE.
+ *
+ * Serializing a message used to cost one attachments query, one recipients
+ * query, and then — for the sender and every recipient — a member lookup plus a
+ * display-name and avatar lookup. On a 50-message room page with three members
+ * that was hundreds of round trips whose only variable was how much of the room
+ * you had scrolled through. This bundle is built once per page and threaded
+ * through {@link toMessage} / {@link toInboxItem}; single-message routes pass
+ * nothing and keep the original one-row-at-a-time path.
+ */
+export interface MessagePageRefs {
+  /** Attachment metadata by message id (absent = none). */
+  attachments: Map<string, AttachmentMeta[]>;
+  /**
+   * Delivery rows by message id, ascending by recipient id. Undefined when the
+   * page does not render `to` at all (inbox previews carry only a sender), in
+   * which case {@link toMessage} falls back to its own per-message query.
+   */
+  recipients?: Map<string, MessageRecipientRow[]>;
+  /** The member ids this page resolved — a miss here means the member is GONE. */
+  memberIds: Set<string>;
+  /** The live member rows among them. */
+  members: Map<string, MemberRow>;
+  /** Memo of `${kind}:${principalId}` → live display name + avatar. */
+  identities: Map<string, { displayName: string; avatarUrl: string | null }>;
+}
+
+/**
+ * A principal's live display name and avatar, memoized per page. Refs repeat
+ * hard on a transcript — the same handful of people wrote all fifty messages —
+ * so this collapses the name/avatar lookups from one per REF to one per distinct
+ * principal. The miss path calls exactly the helpers the unbatched ref uses, so
+ * the projection is identical either way.
+ */
+function identityOf(
+  ctx: AppContext,
+  kind: PrincipalKind,
+  principalId: string,
+  page?: MessagePageRefs,
+): { displayName: string; avatarUrl: string | null } {
+  const key = `${kind}:${principalId}`;
+  const hit = page?.identities.get(key);
+  if (hit) return hit;
+  const resolved = {
+    displayName: principalDisplayName(ctx, kind, principalId),
+    avatarUrl: avatarUrlForPrincipal(ctx, kind, principalId),
+  };
+  page?.identities.set(key, resolved);
+  return resolved;
+}
+
+/** Resolve the member rows for a set of member ids, in bind-sized batches. */
+function membersByIdFor(ctx: AppContext, memberIds: string[]): Map<string, MemberRow> {
+  const byId = new Map<string, MemberRow>();
+  for (const chunk of chunked(memberIds)) {
+    for (const row of ctx.db.select().from(members).where(inArray(members.id, chunk)).all()) {
+      byId.set(row.id, row);
+    }
+  }
+  return byId;
+}
+
+/**
+ * The page bundle for full Messages: attachments, delivery rows, and every
+ * member named by a sender or a recipient — three queries for the page.
+ */
+export function messagePageRefs(ctx: AppContext, rows: MessageRow[]): MessagePageRefs {
+  const ids = [...new Set(rows.map((row) => row.id))];
+  const recipients = new Map<string, MessageRecipientRow[]>();
+  const recipientIds: string[] = [];
+  for (const chunk of chunked(ids)) {
+    const recRows = ctx.db
+      .select()
+      .from(messageRecipients)
+      .where(inArray(messageRecipients.messageId, chunk))
+      // The per-message query reads these off the (message_id, recipient_id)
+      // primary key and so sees them recipient-id ascending; ordering explicitly
+      // is what makes the batched `to` array byte-for-byte the same.
+      .orderBy(asc(messageRecipients.messageId), asc(messageRecipients.recipientId))
+      .all();
+    for (const rec of recRows) {
+      recipientIds.push(rec.recipientId);
+      const list = recipients.get(rec.messageId);
+      if (list) list.push(rec);
+      else recipients.set(rec.messageId, [rec]);
+    }
+  }
+  const memberIds = [...new Set([...rows.map((row) => row.senderId), ...recipientIds])];
+  return {
+    attachments: attachmentMetasFor(ctx, ids),
+    recipients,
+    memberIds: new Set(memberIds),
+    members: membersByIdFor(ctx, memberIds),
+    identities: new Map(),
+  };
+}
+
+/**
+ * The page bundle for inbox PREVIEWS. A preview renders the sender and an
+ * attachment count and never the recipient list, so it skips the delivery-row
+ * read entirely — the inbox query already did that join.
+ */
+export function inboxPageRefs(
+  ctx: AppContext,
+  rows: MessageRow[],
+  /**
+   * Extra member ids the page will resolve refs for beyond the senders — the
+   * RECIPIENTS whose delivery this listing observes, whose refs ride along on
+   * the `message.received` events it emits (see {@link markReceived}).
+   */
+  alsoResolve: string[] = [],
+): MessagePageRefs {
+  const memberIds = [...new Set([...rows.map((row) => row.senderId), ...alsoResolve])];
+  return {
+    attachments: attachmentMetasFor(ctx, rows.map((row) => row.id)),
+    memberIds: new Set(memberIds),
+    members: membersByIdFor(ctx, memberIds),
+    identities: new Map(),
+  };
+}
+
+/**
+ * Attachment metadata for MANY messages at once, keyed by message id — the
+ * batched twin of {@link attachmentMetas}. Serializing a page used to ask the
+ * database once per message, so a 50-message history page issued 50 extra
+ * queries and got slower the more of a room you loaded; this asks once for the
+ * whole page. Messages with no attachments are simply absent from the map (read
+ * it with `?? []`). Ordering within a message matches the single-message helper
+ * exactly (ascending by attachment id), which is what lets the batched
+ * projection be byte-for-byte identical.
+ */
+export function attachmentMetasFor(
+  ctx: AppContext,
+  messageIds: string[],
+): Map<string, AttachmentMeta[]> {
+  const byMessage = new Map<string, AttachmentMeta[]>();
+  for (const chunk of chunked([...new Set(messageIds)])) {
+    const rows = ctx.db
+      .select()
+      .from(attachments)
+      .where(inArray(attachments.messageId, chunk))
+      .orderBy(asc(attachments.messageId), asc(attachments.id))
+      .all();
+    for (const a of rows) {
+      const list = byMessage.get(a.messageId);
+      if (list) list.push(toAttachmentMeta(a));
+      else byMessage.set(a.messageId, [toAttachmentMeta(a)]);
+    }
+  }
+  return byMessage;
 }
 
 /** Parse a message's stored `suggested_replies` JSON to the wire array. */
@@ -181,32 +365,46 @@ export function recipientMemberIds(ctx: AppContext, messageId: string): string[]
 }
 
 /** The recipient refs of a message, each resolved through its frozen identity. */
-function recipientRefs(ctx: AppContext, messageId: string): MemberRef[] {
-  return ctx.db
-    .select()
-    .from(messageRecipients)
-    .where(eq(messageRecipients.messageId, messageId))
-    .all()
-    .map((r) =>
-      refFor(ctx, r.recipientId, {
+function recipientRefs(ctx: AppContext, messageId: string, page?: MessagePageRefs): MemberRef[] {
+  const rows =
+    page?.recipients
+      ? (page.recipients.get(messageId) ?? [])
+      : ctx.db
+          .select()
+          .from(messageRecipients)
+          .where(eq(messageRecipients.messageId, messageId))
+          .all();
+  return rows.map((r) =>
+    refFor(
+      ctx,
+      r.recipientId,
+      {
         principalType: r.recipientPrincipalType,
         principalId: r.recipientPrincipalId,
         displayName: r.recipientDisplayName,
-      }),
-    );
+      },
+      page,
+    ),
+  );
 }
 
-/** Project a message row to the full wire Message. */
-export function toMessage(ctx: AppContext, row: MessageRow): Message {
-  const to = recipientRefs(ctx, row.id);
+/**
+ * Project a message row to the full wire Message. Pass `page` — a
+ * {@link messagePageRefs} bundle covering this row — when serializing a PAGE, so
+ * attachments, delivery rows and member refs cost a few queries for the whole
+ * page instead of several per message; omit it on single-message routes, which
+ * then resolve the row's dependencies one query at a time as before.
+ */
+export function toMessage(ctx: AppContext, row: MessageRow, page?: MessagePageRefs): Message {
+  const to = recipientRefs(ctx, row.id, page);
   return {
     id: row.id,
-    from: refFor(ctx, row.senderId, senderIdentity(row)),
+    from: refFor(ctx, row.senderId, senderIdentity(row), page),
     to,
     kind: row.kind as MessageKind,
     subject: row.subject ?? null,
     body: row.body,
-    attachments: attachmentMetas(ctx, row.id),
+    attachments: page ? (page.attachments.get(row.id) ?? []) : attachmentMetas(ctx, row.id),
     suggestedReplies: parseSuggestedReplies(row.suggestedReplies),
     inReplyTo: row.inReplyTo ?? null,
     replyValue: row.replyValue ?? null,
@@ -215,17 +413,39 @@ export function toMessage(ctx: AppContext, row: MessageRow): Message {
   };
 }
 
-/** Project a message row to a truncated inbox item for a given read status. */
-export function toInboxItem(ctx: AppContext, row: MessageRow, status: ReadStatus): InboxItem {
+/**
+ * Project a whole PAGE of message rows, resolving every row's attachments in one
+ * query. The list-route form of {@link toMessage} — use it wherever a route
+ * serializes more than one message.
+ */
+export function toMessages(ctx: AppContext, rows: MessageRow[]): Message[] {
+  const page = messagePageRefs(ctx, rows);
+  return rows.map((row) => toMessage(ctx, row, page));
+}
+
+/**
+ * Project a message row to a truncated inbox item for a given read status. Takes
+ * an {@link inboxPageRefs} bundle for the same reason {@link toMessage} does: a
+ * preview needs only the sender and an attachment COUNT, but resolving those per
+ * row is the same N+1.
+ */
+export function toInboxItem(
+  ctx: AppContext,
+  row: MessageRow,
+  status: ReadStatus,
+  page?: MessagePageRefs,
+): InboxItem {
   const { preview, truncated } = bodyPreview(row.body);
-  const attachmentCount = ctx.db
-    .select({ id: attachments.id })
-    .from(attachments)
-    .where(eq(attachments.messageId, row.id))
-    .all().length;
+  const attachmentCount = page
+    ? (page.attachments.get(row.id)?.length ?? 0)
+    : ctx.db
+        .select({ id: attachments.id })
+        .from(attachments)
+        .where(eq(attachments.messageId, row.id))
+        .all().length;
   return {
     id: row.id,
-    from: refFor(ctx, row.senderId, senderIdentity(row)),
+    from: refFor(ctx, row.senderId, senderIdentity(row), page),
     kind: row.kind as MessageKind,
     subject: row.subject ?? null,
     preview,

@@ -28,8 +28,10 @@ versions that release shipped with.
   room's history, the unread badge and both inboxes used to get slower with every
   message a room had ever held — the database walked and re-sorted the whole room
   to hand back one page. Two indexes now let it jump straight to the page (and to
-  your unread messages) instead. Existing databases pick them up on the next
-  start; nothing is rewritten and no data moves.
+  your unread messages) instead, and a page of messages now looks up its
+  attachments once for the whole page rather than once per message. Existing
+  databases pick the indexes up on the next start; nothing is rewritten and no
+  data moves.
 
 - **Rooms open with the latest 50 messages and load earlier ones as you scroll
   up.** Entering a busy room no longer waits on a page of 100 messages nobody
