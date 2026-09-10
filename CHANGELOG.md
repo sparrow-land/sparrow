@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.24] — 2026-09-10
+
 ### Fixed
 
 - **A reply now finds its thread even when the relay never stamped our
