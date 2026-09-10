@@ -175,13 +175,39 @@ export function recordSkillInstall(o: RecordSkillInstallOptions): SkillInstallMa
   }
 }
 
+/**
+ * WHICH harness a `sparrow skill …` command acts on, resolved exactly as the
+ * installer resolves it: the explicit `--claude` / `--codex`, else detection
+ * from the directory the command searches (HOME for `--user`, else the project).
+ *
+ * Callers must resolve this BEFORE the command runs. Detection is decided in
+ * large part by the installed skill dir — that is what breaks the tie in a
+ * project carrying both a `CLAUDE.md` and an `AGENTS.md` — and an `uninstall`
+ * deletes exactly that dir. Asking afterwards gets "ambiguous, cannot say",
+ * which would strand the marker of the install just removed and let the next
+ * `sparrow upgrade` resurrect it.
+ */
+export function resolveSkillProvider(
+  env: Env,
+  cwd: string,
+  opts: { user?: boolean; provider?: Provider } = {},
+): Provider | undefined {
+  if (opts.provider) return opts.provider;
+  const home = env.HOME?.trim() || os.homedir();
+  return detectProvider(opts.user ? home : cwd).provider;
+}
+
 /** The uninstall being performed — everything that decides WHICH install it removed. */
 export interface ForgetSkillInstallOptions {
   /** `--user`. */
   user?: boolean;
   /** `--shared`: the uninstall cleaned the COMMITTED settings file. */
   shared?: boolean;
-  /** Explicit `--claude` / `--codex`; detected from the directory otherwise. */
+  /**
+   * The harness this uninstall acted on — resolve it with
+   * {@link resolveSkillProvider} BEFORE the uninstall runs, since removing the
+   * skill dir destroys the evidence detection needs.
+   */
   provider?: Provider;
 }
 
@@ -196,11 +222,11 @@ export interface ForgetSkillInstallOptions {
  *   - LAYOUT. `--shared` and a personal install register in different settings
  *     files and can coexist, so a plain uninstall leaves a `--shared` install
  *     standing — assets and all — and its record must stand with it.
- *   - HARNESS. A Codex uninstall must never forget a Claude install. With no
- *     explicit flag the provider is detected exactly as the installer detects
- *     it, and an answer we cannot pin down retains the marker: keeping a stale
- *     record only costs one redundant refresh, while dropping a live one leaves
- *     the skill silently lagging the CLI forever.
+ *   - HARNESS. A Codex uninstall must never forget a Claude install. The caller
+ *     passes the provider it resolved BEFORE removing anything (see
+ *     {@link resolveSkillProvider}); an answer nobody can pin down retains the
+ *     marker, because keeping a stale record only costs one redundant refresh
+ *     while dropping a live one leaves the skill silently lagging the CLI.
  */
 export function forgetSkillInstall(
   env: Env,
@@ -219,7 +245,7 @@ export function forgetSkillInstall(
     const marker = readSkillInstallMarker(stateDir);
     if (!marker || marker.scope !== scope) return;
     if (Boolean(marker.shared) !== Boolean(opts.shared)) return;
-    const provider = opts.provider ?? detectProvider(scope === 'user' ? home : cwd).provider;
+    const provider = opts.provider ?? resolveSkillProvider(env, cwd, { user: opts.user });
     if (marker.provider !== provider) return;
     fs.rmSync(skillInstallMarkerPath(stateDir), { force: true });
   } catch {

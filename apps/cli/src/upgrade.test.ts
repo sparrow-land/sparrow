@@ -229,6 +229,52 @@ describe('sparrow upgrade — skill refresh', () => {
     expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))?.provider).toBe('claude');
   });
 
+  /**
+   * DETECTION MUST HAPPEN WHILE THE EVIDENCE IS STILL THERE.
+   *
+   * In a repo carrying BOTH harness fingerprints (a `CLAUDE.md` and an
+   * `AGENTS.md` — plenty of repos do) the tie is broken by the installed skill
+   * dir. An uninstall deletes that dir, so re-detecting the provider afterwards
+   * gets "ambiguous, refusing to guess", the marker survives its install, and
+   * the next `sparrow upgrade` cheerfully resurrects what was just removed.
+   */
+  describe('a project that looks like BOTH harnesses', () => {
+    beforeEach(() => {
+      fs.writeFileSync(path.join(projectDir, 'CLAUDE.md'), '# claude\n');
+      fs.writeFileSync(path.join(projectDir, 'AGENTS.md'), '# agents\n');
+    });
+
+    it('an unflagged uninstall still forgets the install it removed', async () => {
+      expect(await runCli(['skill', 'install', '--claude'], env(), capture().io)).toBe(0);
+      expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))?.provider).toBe('claude');
+
+      // No provider flag: the uninstall resolves it from the installed skill
+      // dir, and so must the bookkeeping that follows.
+      expect(await runCli(['skill', 'uninstall'], env(), capture().io)).toBe(0);
+
+      expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))).toBeUndefined();
+      fs.rmSync(refreshLog, { force: true });
+      expect(await runCli(['upgrade'], env(), capture().io)).toBe(0);
+      expect(refreshes()).toHaveLength(0);
+    });
+
+    it('the same holds for a Codex install', async () => {
+      expect(await runCli(['skill', 'install', '--codex'], env(), capture().io)).toBe(0);
+      expect(await runCli(['skill', 'uninstall'], env(), capture().io)).toBe(0);
+      expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))).toBeUndefined();
+    });
+
+    it('an uninstall for the OTHER harness still keeps this install\'s marker', async () => {
+      expect(await runCli(['skill', 'install', '--claude'], env(), capture().io)).toBe(0);
+      expect(await runCli(['skill', 'uninstall', '--codex'], env(), capture().io)).toBe(0);
+
+      expect(readSkillInstallMarker(path.join(projectDir, '.sparrow'))?.provider).toBe('claude');
+      fs.rmSync(refreshLog, { force: true });
+      expect(await runCli(['upgrade'], env(), capture().io)).toBe(0);
+      expect(refreshes()[0]!.argv).toEqual(['skill', 'install', '--claude']);
+    });
+  });
+
   /* ------------------------------ the refresh ------------------------------ */
 
   it('upgrade re-runs the recorded install with the NEW bundle, same provider and scope', async () => {

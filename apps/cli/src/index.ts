@@ -115,6 +115,7 @@ import { prepareAwaitGeneration, type AwaitGeneration } from './await-owner.js';
 import {
   recordSkillInstall,
   forgetSkillInstall,
+  resolveSkillProvider,
   refreshSkillInstalls,
   NO_SKILL_INSTALL_NOTE,
   type SkillRefreshResult,
@@ -3805,6 +3806,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           ...(opts.profile ? ['--profile', String(opts.profile)] : []),
         ];
         const cwd = process.cwd();
+        // Resolve the harness BEFORE running the command: an `uninstall`
+        // deletes the installed skill dir, which is the very thing detection
+        // uses to break the tie in a project that looks like both harnesses.
+        const provider = resolveSkillProvider(env, cwd, {
+          user: Boolean(opts.user),
+          provider: opts.codex ? 'codex' : opts.claude ? 'claude' : undefined,
+        });
         const code = await skillInstall(argv, { cwd, env, log: (m) => io.out(`${m}\n`) });
         if (code !== 0) throw new CliError(`sparrow skill ${argv[0]} failed`);
         // A removed skill must stay removed: drop the record before `upgrade`
@@ -3816,7 +3824,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           forgetSkillInstall(env, cwd, {
             user: Boolean(opts.user),
             shared: Boolean(opts.shared),
-            provider: opts.codex ? 'codex' : opts.claude ? 'claude' : undefined,
+            provider,
           });
         }
         // Record HOW this install was made, next to the loop switch it just
