@@ -68,7 +68,7 @@ function renderBoxes(opts: {
   list: () => AgentDmBox[];
   messages?: Message[];
   onMessagesUrl?: (url: string) => void;
-  /** Answer the sever/allow POSTs; default is a plain success. */
+  /** Answer the allow POST; default is a plain success. */
   onGovern?: (url: string) => Response | undefined;
 }) {
   const streams: ((s: string) => void)[] = [];
@@ -76,24 +76,12 @@ function renderBoxes(opts: {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     calls.push(url);
+    // The card has no Sever button any more; `/sever` is answered only so a
+    // regression that brings one back shows up as an assertion, not a 404.
     if (url.includes('/sever') || url.includes('/allow')) {
       const answer = opts.onGovern?.(url);
       if (answer) return answer;
-      return url.includes('/sever')
-        ? json({
-            sever: {
-              roomId: 'room_x',
-              orgId: ORG_ID,
-              agents: [
-                { id: 'agt_a', name: 'alpha' },
-                { id: 'agt_b', name: 'beta' },
-              ],
-              severedBy: { id: 'usr_1', displayName: 'Owner' },
-              authority: 'org',
-              severedAt: '2026-09-02T00:00:00.000Z',
-            },
-          })
-        : json({ roomId: 'room_x', allowed: true });
+      return json({ roomId: 'room_x', allowed: true });
     }
     if (url.includes('/me/events')) {
       const body = new ReadableStream<Uint8Array>({
@@ -194,21 +182,28 @@ describe('AgentDmBox — agent↔agent DM oversight boxes', () => {
     expect(screen.queryByRole('button', { name: /^sever$/i })).toBeNull();
   });
 
-  it('a human who governs the pair can sever it, then allow it again', async () => {
+  it('offers no Sever button even to a human who governs the pair', async () => {
+    // Severing is a deliberate act, not something to trip over next to a
+    // one-line preview; it lives on the API/CLI now. The card is a peek again.
     const { calls } = renderBoxes({ list: () => [box({ canSever: true })] });
-    await userEvent.click(await screen.findByRole('button', { name: /^sever$/i }));
-    await waitFor(() =>
-      expect(calls.some((u) => u.includes(`/orgs/${ORG_ID}/agent-dms/room_x/sever`))).toBe(true),
-    );
-    // The card says so and offers the way back — it never hides the transcript.
-    expect(await screen.findByText('Severed')).toBeInTheDocument();
-    expect(screen.getByText('reply from beta')).toBeInTheDocument();
+    await screen.findByRole('button', { name: /alpha ↔ beta/i });
+    expect(screen.queryByRole('button', { name: /^sever$/i })).toBeNull();
+    expect(calls.some((u) => u.includes('/sever'))).toBe(false);
+  });
 
+  it('a governing human can still lift an existing sever', async () => {
+    const { calls } = renderBoxes({
+      list: () => [box({ canSever: true, severedAt: '2026-09-02T00:00:00.000Z' })],
+    });
+    expect(await screen.findByText('Severed')).toBeInTheDocument();
+    // Undoing a sever is the safe direction, so the way back stays on the card.
     await userEvent.click(screen.getByRole('button', { name: /^allow$/i }));
     await waitFor(() =>
       expect(calls.some((u) => u.includes(`/orgs/${ORG_ID}/agent-dms/room_x/allow`))).toBe(true),
     );
     await waitFor(() => expect(screen.queryByText('Severed')).toBeNull());
+    // The transcript was never hidden by any of this.
+    expect(screen.getByText('reply from beta')).toBeInTheDocument();
   });
 
   it('a severed box arrives flagged, and a refused allow explains itself', async () => {

@@ -14,6 +14,30 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Added
+
+- **A half-written message now survives leaving the conversation.** Start typing in a
+  room, switch to another agent to check something, come back — the text is still
+  there. The composer's unsent text is kept in browser-local storage, keyed per (org,
+  conversation) so no two conversations (or two orgs sharing a room id) ever show each
+  other's words, written behind a short debounce and flushed on the way out (leaving
+  the room, closing the tab). It is local ONLY: nothing is sent to the server except
+  as the body of the send that consumes it. A successful send clears it, a failed send
+  keeps it, and a draft past 20,000 characters simply stops being backed up rather
+  than filling the origin's storage quota — the text stays on screen either way. Only
+  text is kept; staged attachments, reply-to state and suggested replies are not.
+
+### Changed
+
+- **No more Sever button on the agent↔agent DM oversight box.** Cutting a pair's line
+  is a deliberate governance act, and a small destructive control parked beside a
+  one-line conversation preview is one people hit by accident. Severing now happens
+  through SeverAgentDm / `sparrow agent-dms sever` only; the API and CLI are
+  unchanged. The box keeps everything else it had — a severed pair still shows,
+  flagged *Severed*, with its transcript intact — and a human who may govern the pair
+  still gets an **Allow** button to lift a sever, since undoing one is the safe
+  direction.
+
 ## [0.1.25] — 2026-09-10
 
 ### Fixed

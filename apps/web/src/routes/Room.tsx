@@ -59,6 +59,7 @@ import { useCapabilities } from '../lib/capabilities.js';
 import { DraftsModal } from './room/DraftsModal.js';
 import { AgentOfflineNotice } from './room/AgentOfflineNotice.js';
 import { migrateLocalDrafts } from '../lib/drafts.js';
+import { draftKey, useDraft } from '../lib/composerDraft.js';
 import { roomStreams } from '../lib/roomStreams.js';
 import { useAgentActivity } from './room/useAgentActivity.js';
 import { ActivityRow } from './room/ActivityRows.js';
@@ -182,7 +183,15 @@ export function Room() {
   // content source — only the read-state the thread renders and advances.
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [receipts, setReceipts] = useState<Record<string, MessageStatus>>({});
-  const [draft, setDraft] = useState('');
+  /**
+   * The composer's unsent text. Backed by `localStorage` (lib/composerDraft) so
+   * a half-written message survives leaving the room and coming back — the
+   * complaint this fixes is "I started typing, went to check something, and my
+   * text was gone". Local only: it is never put on the wire except as the body
+   * of the send that consumes it. `clearComposerDraft` empties the box AND
+   * forgets the stored row; a FAILED send calls neither, so the text stays.
+   */
+  const [draft, setDraft, clearComposerDraft] = useDraft(draftKey(orgId, roomId));
   // Hands-free mode (voice v2). The overlay owns the spoken turn end to end —
   // nothing dictated reaches this composer any more — so the room keeps only
   // what the overlay cannot know: whether the mode is up, and which arrivals
@@ -928,7 +937,7 @@ export function Room() {
         ...(voice ? { origin: 'voice' } : {}),
       });
       if (!isChip) {
-        setDraft('');
+        clearComposerDraft();
         setPending([]);
         setAttachError(null);
       }
@@ -1075,7 +1084,9 @@ export function Room() {
     try {
       const created = await api.createDraft(roomId, text);
       setDrafts((cur) => [...cur, created]);
-      setDraft('');
+      // The text now lives in the server queue — the local backup would only
+      // resurrect it in the composer on the next visit.
+      clearComposerDraft();
     } catch (e) {
       setSendError(e instanceof ApiError ? e.message : 'Could not save draft. Please try again.');
     }

@@ -115,33 +115,29 @@ export function AgentDmCard({ orgId, box }: { orgId: string; box: AgentDmBox }) 
   const label = `${box.agents[0].name} ↔ ${box.agents[1].name}`;
 
   /**
-   * Sever / allow — the only WRITE on this otherwise read-only surface, and it
-   * is shown ONLY to a human the server says may govern the pair (`canSever`:
-   * an org owner/admin, or an owner of one of the two agents). Severing cuts
-   * the agents off; it never removes what they already said from this card.
+   * Allow — the only WRITE left on this otherwise read-only surface, and only
+   * for a pair that is ALREADY severed and a human the server says may govern
+   * it (`canSever`: an org owner/admin, or an owner of one of the two agents).
+   *
+   * There is deliberately no Sever button here (removed 2026-09-11): cutting a
+   * pair off is a deliberate governance act, and a small destructive control
+   * parked beside a one-line preview is one people hit by accident. Severing
+   * now happens through the API / `sparrow agent-dms sever`. Undoing one is the
+   * safe direction, so the way back stays.
    */
-  const govern = useCallback(async () => {
+  const allow = useCallback(async () => {
     if (busy) return;
     setBusy(true);
     setGovernError(null);
     try {
-      if (severedAt) {
-        await api.allowAgentDm(orgId, box.roomId);
-        setSeveredLocal(null);
-      } else {
-        const sever = await api.severAgentDm(orgId, box.roomId);
-        setSeveredLocal(sever.severedAt);
-      }
+      await api.allowAgentDm(orgId, box.roomId);
+      setSeveredLocal(null);
     } catch {
-      setGovernError(
-        severedAt
-          ? 'Could not allow this pair — an org owner or admin may need to lift it.'
-          : 'Could not sever this conversation.',
-      );
+      setGovernError('Could not allow this pair — an org owner or admin may need to lift it.');
     } finally {
       setBusy(false);
     }
-  }, [busy, severedAt, orgId, box.roomId]);
+  }, [busy, orgId, box.roomId]);
 
   const toggle = useCallback(async () => {
     const next = !open;
@@ -202,14 +198,14 @@ export function AgentDmCard({ orgId, box }: { orgId: string; box: AgentDmBox }) 
             Severed
           </span>
         ) : null}
-        {box.canSever ? (
+        {box.canSever && severedAt ? (
           <button
             type="button"
             disabled={busy}
-            onClick={() => void govern()}
-            className="mr-2 shrink-0 rounded-md border border-[var(--sparrow-border)] px-2 py-0.5 text-[10.5px] text-[var(--sparrow-muted)] transition-colors hover:border-[var(--sparrow-danger)] hover:text-[var(--sparrow-danger)] disabled:opacity-50"
+            onClick={() => void allow()}
+            className="mr-2 shrink-0 rounded-md border border-[var(--sparrow-border)] px-2 py-0.5 text-[10.5px] text-[var(--sparrow-muted)] transition-colors hover:border-[var(--sparrow-accent)] hover:text-[var(--sparrow-accent)] disabled:opacity-50"
           >
-            {severedAt ? 'Allow' : 'Sever'}
+            Allow
           </button>
         ) : null}
       </div>

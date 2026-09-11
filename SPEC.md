@@ -4364,7 +4364,13 @@ beginning of the room), every later refetch MERGES into what is loaded rather th
 replacing it, and the receipts for a screen hydrate through ListMessageStatuses in
 one request instead of one per bubble. Compose box broadcasts; per-member DM threads
 are reached from the sidebar sections. Drafts are per-conversation; failed sends surface inline with the
-draft retained. The composer's hint line names every key it answers to, clawback
+draft retained. **Unsent composer text survives leaving the conversation**: what you
+have typed is kept in browser-local storage, keyed per (org, conversation), and
+restored when you come back — switching to another agent mid-sentence never costs
+the sentence. It is local ONLY (never sent to the server except as the body of the
+send that consumes it), each conversation sees only its own, a successful send
+clears it and a failed one keeps it, and text past a 20,000-character cap simply
+stops being backed up rather than filling the origin's storage quota. The composer's hint line names every key it answers to, clawback
 included ("Esc pulls back your last message") — an affordance no one is told about
 does not exist. A clawback pulls the message and restores its text to the composer;
 it never navigates, and the pulled message stays gone from the pane even if a stale
@@ -4393,9 +4399,12 @@ interleaved as compact **info boxes** between the bubbles.
 
 **"Info box" is the official term** for any NON-MESSAGE box on the activity
 stream's rail: the email info box, the Hint info box, the agent↔agent DM
-oversight box (read-only, save for one control: a human who may govern the pair
-— `canSever` — gets a **Sever** / **Allow** button beside the row, and a severed
-box stays listed, flagged *Severed*, with its transcript intact), and the
+oversight box (read-only, save for one control: a severed box stays listed,
+flagged *Severed*, with its transcript intact, and a human who may govern the pair
+— `canSever` — gets an **Allow** button beside it to lift the sever. There is
+deliberately NO Sever button on the box: cutting a pair off is a deliberate
+governance act, not a small destructive control parked beside a one-line preview,
+so severing is done through SeverAgentDm / `sparrow agent-dms sever`), and the
 collapsed runs they fold into. Message bubbles are never
 info boxes. Every info box shares one anatomy, and it opens with the **type
 mark**: the type's icon followed immediately by its label — **Email**,

@@ -22,6 +22,16 @@ afterEach(() => {
   // agent (the wake notice, a gray dot) silently sees a green one. Order-
   // dependent, so it hides until a runner shuffles or a file grows a new test.
   presenceStore.reset();
+  // jsdom hands every test in a FILE the same `localStorage`, and the app now
+  // writes to it while you type (lib/composerDraft keeps unsent composer text).
+  // Without this, one test's half-typed message is the next test's starting
+  // value — the composer opens pre-filled and assertions drift. A fresh test is
+  // a fresh browser.
+  try {
+    localStorage.clear();
+  } catch {
+    /* a test may have stubbed storage into throwing; nothing to clean up then */
+  }
 });
 
 // jsdom has no layout engine and no ResizeObserver. Provide a benign no-op so
