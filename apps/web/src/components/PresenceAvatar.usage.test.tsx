@@ -21,8 +21,12 @@ import { presenceStore } from '../lib/presenceStore.js';
 vi.mock('./PresenceAvatar.js', async () => {
   const { createElement } = await import('react');
   return {
-    PresenceAvatar: (props: { displayName: string }) =>
-      createElement('span', { 'data-testid': 'presence-avatar-probe', 'data-name': props.displayName }),
+    PresenceAvatar: (props: { displayName: string; animateBusy?: boolean }) =>
+      createElement('span', {
+        'data-testid': 'presence-avatar-probe',
+        'data-name': props.displayName,
+        'data-animate-busy': String(props.animateBusy === true),
+      }),
   };
 });
 
@@ -49,12 +53,20 @@ describe('PresenceAvatar is the one avatar+dot cluster on every presence surface
     await waitFor(() => {
       const probes = within(sidebar).getAllByTestId('presence-avatar-probe');
       expect(probes.some((p) => p.getAttribute('data-name') === 'Botty')).toBe(true);
+      expect(probes.find((p) => p.getAttribute('data-name') === 'Botty')).toHaveAttribute(
+        'data-animate-busy',
+        'true',
+      );
     });
 
     const main = screen.getByRole('main');
     await waitFor(() => {
       const probes = within(main).getAllByTestId('presence-avatar-probe');
       expect(probes.some((p) => p.getAttribute('data-name') === 'Botty')).toBe(true);
+      expect(probes.find((p) => p.getAttribute('data-name') === 'Botty')).toHaveAttribute(
+        'data-animate-busy',
+        'false',
+      );
     });
   });
 });

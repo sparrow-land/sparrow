@@ -1,0 +1,56 @@
+.busy-agent-avatar {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  overflow: hidden;
+  border-radius: 22%;
+}
+
+.busy-agent-avatar__still {
+  transition: opacity 180ms ease-out;
+}
+
+.busy-agent-avatar__sprite {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  border-radius: inherit;
+  background-image: var(--busy-avatar-sprite);
+  background-position: 100% 100%;
+  background-repeat: no-repeat;
+  background-size: 300% 300%;
+  transition: opacity 180ms ease-out;
+}
+
+.busy-agent-avatar[data-moving='true'] .busy-agent-avatar__still {
+  opacity: 0;
+}
+
+.busy-agent-avatar[data-moving='true'] .busy-agent-avatar__sprite {
+  opacity: 1;
+  animation: busy-avatar-hover 750ms steps(1, end) infinite;
+}
+
+@keyframes busy-avatar-hover {
+  0%, 100% { background-position: 0 0; }
+  11.111% { background-position: 50% 0; }
+  22.222% { background-position: 100% 0; }
+  33.333% { background-position: 0 50%; }
+  44.444% { background-position: 50% 50%; }
+  55.555% { background-position: 100% 50%; }
+  66.666% { background-position: 0 100%; }
+  77.777% { background-position: 50% 100%; }
+  88.888% { background-position: 100% 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .busy-agent-avatar__still,
+  .busy-agent-avatar__sprite {
+    transition: none;
+  }
+
+  .busy-agent-avatar__sprite {
+    display: none;
+    animation: none;
+  }
+}

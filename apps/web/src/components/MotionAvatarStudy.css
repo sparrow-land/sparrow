@@ -1,0 +1,43 @@
+.motion-avatar { position: relative; display: inline-block; flex: none; background: #9db69b; border-radius: 22%; overflow: hidden; isolation: isolate; }
+.motion-avatar img, .motion-rig { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.motion-avatar img { object-fit: contain; }
+.motion-still { opacity: 1; transition: opacity 240ms ease-out; }
+.motion-rig { opacity: 0; transition: opacity 240ms ease-out; }
+.motion-avatar[data-moving="true"] .motion-still { opacity: 0; }
+.motion-avatar[data-moving="true"] .motion-rig { opacity: 1; }
+.motion-body { clip-path: polygon(43% 0, 100% 0, 100% 100%, 0 100%, 0 62%, 31% 62%, 43% 42%); z-index: 1; }
+.motion-wing { clip-path: polygon(0 0, 43% 0, 43% 42%, 31% 62%, 0 62%); transform-origin: 43% 42%; }
+.motion-avatar[data-mode="energetic"] .motion-wing { animation: wing-energetic 650ms ease-in-out infinite paused; }
+.motion-avatar[data-mode="calm"] .motion-wing { animation: wing-calm 3200ms ease-in-out infinite paused; }
+.motion-avatar[data-moving="true"] .motion-wing { animation-play-state: running; }
+.motion-avatar[data-paused="true"] .motion-wing { animation-play-state: paused !important; }
+.motion-avatar .motion-preload { opacity: 0; }
+.motion-sprite { position: absolute; inset: 0; background-image: url('/avatars/motion-study/hover-sprites-v1.png'); background-size: 300% 300%; background-position: 0 0; animation: sprite-hover 750ms steps(1, end) infinite paused; }
+.motion-avatar[data-moving="true"] .motion-sprite { animation-play-state: running; }
+.motion-avatar[data-paused="true"] .motion-sprite { animation-play-state: paused !important; }
+@keyframes sprite-hover {
+  0%, 100% { background-position: 0 0; }
+  11.111% { background-position: 50% 0; }
+  22.222% { background-position: 100% 0; }
+  33.333% { background-position: 0 50%; }
+  44.444% { background-position: 50% 50%; }
+  55.555% { background-position: 100% 50%; }
+  66.666% { background-position: 0 100%; }
+  77.777% { background-position: 50% 100%; }
+  88.888% { background-position: 100% 100%; }
+}
+@keyframes wing-energetic {
+  0%, 100% { transform: rotate(0deg); }
+  45% { transform: rotate(-65deg) scaleX(.8); }
+  65% { transform: rotate(-48deg) scaleX(.9); }
+}
+@keyframes wing-calm {
+  0%, 12%, 40%, 100% { transform: rotate(0deg); }
+  20%, 33% { transform: rotate(-24deg) scaleX(.96); }
+  26% { transform: rotate(-4deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .motion-wing, .motion-sprite { animation: none !important; }
+  .motion-avatar .motion-rig { opacity: 0 !important; transition: none; }
+  .motion-avatar .motion-still { opacity: 1 !important; transition: none; }
+}

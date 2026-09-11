@@ -14,6 +14,13 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Changed
+
+- Busy agents animate with identity-matched hovering sprites in the left
+  navigation. Conversation and human avatars remain static. Motion respects
+  reduced-motion preferences, pauses offscreen and in hidden tabs, and falls
+  back to the original portrait if an animation asset cannot load.
+
 ## [0.1.31] — 2026-09-11
 
 ### Fixed

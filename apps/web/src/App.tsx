@@ -16,6 +16,7 @@ import { Login } from './routes/Login.js';
 import { Invite } from './routes/Invite.js';
 import { NotFound } from './routes/NotFound.js';
 import { AvatarGallery } from './routes/AvatarGallery.js';
+import { AvatarMotion } from './routes/AvatarMotion.js';
 import { NotMember } from './routes/NotMember.js';
 import { DocsRedirect } from './routes/docs/DocsRedirect.js';
 import { DOCS_ROOT } from './routes/docs/paths.js';
@@ -187,6 +188,7 @@ function ScopedRoutes({ scope }: { scope: Scope }) {
   return (
     <Routes>
       {import.meta.env.DEV && <Route path="/__dev/avatars" element={<AvatarGallery />} />}
+      {import.meta.env.DEV && <Route path="/__dev/avatar-motion" element={<AvatarMotion />} />}
       <Route path="/login" element={<Login />} />
       <Route path="/invite/:token" element={<Invite />} />
       {docsRoutes}
@@ -225,6 +227,7 @@ function AppRoutes({ scope }: { scope: Scope | null }) {
     return (
       <Routes>
         {import.meta.env.DEV && <Route path="/__dev/avatars" element={<AvatarGallery />} />}
+        {import.meta.env.DEV && <Route path="/__dev/avatar-motion" element={<AvatarMotion />} />}
         {docsRoutes}
         <Route path="*" element={null} />
       </Routes>
@@ -240,6 +243,7 @@ function AppRoutes({ scope }: { scope: Scope | null }) {
   return (
     <Routes>
       {import.meta.env.DEV && <Route path="/__dev/avatars" element={<AvatarGallery />} />}
+      {import.meta.env.DEV && <Route path="/__dev/avatar-motion" element={<AvatarMotion />} />}
       <Route path="/" element={<Home />} />
       <Route path="/welcome" element={<Welcome />} />
       <Route path="/org/:orgId" element={<OrgLayout />}>

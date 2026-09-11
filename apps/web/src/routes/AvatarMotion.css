@@ -1,0 +1,30 @@
+.motion-study { max-width: 1000px; min-height: 100vh; margin: auto; padding: 36px 28px; color: var(--sparrow-text); background: var(--sparrow-bg); letter-spacing: 0; }
+.motion-study-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-bottom: 28px; border-bottom: 1px solid var(--sparrow-border); }
+.motion-eyebrow, .motion-dimension, .motion-state, .motion-time { font-size: 12px; color: var(--sparrow-muted); }
+.motion-study h1 { margin: 8px 0 0; font-size: 28px; font-weight: 650; }
+.motion-controls { display: flex; gap: 20px; flex-wrap: wrap; }
+.motion-controls label { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+.motion-controls input { accent-color: #34785c; width: 16px; height: 16px; }
+.motion-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 44px; margin-top: 28px; }
+.motion-integrated { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 32px; }
+.motion-previous { margin-top: 20px; border-top: 1px solid var(--sparrow-border); padding-top: 20px; }
+.motion-previous summary { cursor: pointer; font-size: 14px; color: var(--sparrow-muted); }
+.motion-study h2 { font-size: 17px; font-weight: 600; margin: 0 0 24px; }
+.motion-sidebar { padding: 14px 0; border-top: 1px solid var(--sparrow-border); border-bottom: 1px solid var(--sparrow-border); }
+.motion-sidebar h3 { font-size: 12px; color: var(--sparrow-muted); margin: 0 12px 12px; text-transform: uppercase; font-weight: 600; }
+.motion-agent-row { display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 12px; font-size: 14px; }
+.motion-agent-row.selected { background: var(--sparrow-panel); border-radius: 6px; }
+.motion-state { margin-left: auto; }
+.motion-cluster { position: relative; display: inline-flex; }
+.motion-status { display: inline-flex; position: absolute; right: -1px; bottom: -1px; border-radius: 50%; box-shadow: 0 0 0 2px var(--sparrow-bg); }
+.motion-inspection { display: flex; align-items: center; gap: 28px; padding: 32px 12px; }
+.motion-inspection p { font-size: 14px; margin: 6px 0; }
+.motion-chat { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--sparrow-border); }
+.motion-chat-row { display: flex; align-items: flex-start; gap: 12px; font-size: 14px; }
+.motion-chat-row p { margin: 6px 0; line-height: 1.6; }
+@media (max-width: 640px) {
+  .motion-study { padding: 24px 18px; }
+  .motion-study-header { align-items: flex-start; flex-direction: column; gap: 20px; }
+  .motion-comparison { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .motion-integrated { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+}

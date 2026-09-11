@@ -1,5 +1,6 @@
 import type { PresenceDot } from '../lib/presence.js';
 import { Avatar } from './Avatar.js';
+import { BusyAgentAvatar } from './BusyAgentAvatar.js';
 import { PresenceGlyph } from './StatusIndicator.js';
 
 /**
@@ -24,6 +25,7 @@ export function PresenceAvatar({
   busy,
   activeAgo,
   className = '',
+  animateBusy = false,
 }: {
   kind: 'human' | 'agent';
   /** Stable principal id (`usr_…`/`agt_…`) — seeds the deterministic avatar. */
@@ -39,10 +41,16 @@ export function PresenceAvatar({
   activeAgo?: string;
   /** Extra classes for the wrapper (layout concerns of the host surface only). */
   className?: string;
+  /** Animate a busy agent with its assigned sprite atlas (left-nav opt-in). */
+  animateBusy?: boolean;
 }) {
   return (
     <span className={`relative inline-flex shrink-0 ${className}`.trim()}>
-      <Avatar kind={kind} id={id} displayName={displayName} avatarUrl={avatarUrl} size={size} />
+      {animateBusy && kind === 'agent' ? (
+        <BusyAgentAvatar id={id} displayName={displayName} size={size} busy={busy} />
+      ) : (
+        <Avatar kind={kind} id={id} displayName={displayName} avatarUrl={avatarUrl} size={size} />
+      )}
       <span className="absolute -bottom-px -right-px inline-flex rounded-full ring-2 ring-[var(--sparrow-panel)]">
         <PresenceGlyph presence={presence} busy={busy} activeAgo={activeAgo} />
       </span>

@@ -669,6 +669,7 @@ function AgentRow({
           displayName={entry.displayName}
           presence={entry.online ? 'online' : 'offline'}
           busy={entry.busy}
+          animateBusy
         />
         {/* Unread bolds the NAME too — the count badge alone was easy to miss. */}
         <span
