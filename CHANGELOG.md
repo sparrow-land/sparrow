@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.32] — 2026-09-11
+
 ### Changed
 
 - Busy agents animate with identity-matched hovering sprites in the left
