@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.31] — 2026-09-11
+
 ### Fixed
 
 - Draft persistence no longer reads browser storage on every keystroke. Typing
