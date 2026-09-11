@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.28] — 2026-09-11
+
 ### Removed
 
 - **The orphaned `drafts` SQLite table is dropped on the next boot.** 0.1.27
