@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.29] — 2026-09-11
+
 ### Changed
 
 - Agent avatars now use deterministic painterly Sparrow art: three bird bases
