@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.27] — 2026-09-11
+
 ### Removed
 
 - **The server-backed draft queue is gone.** Queueing a message body for later
