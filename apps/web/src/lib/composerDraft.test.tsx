@@ -149,6 +149,69 @@ describe('useDraft', () => {
     expect(loadDraft(KEY_A)).toBe('abcdef');
   });
 
+  it('keeps rapid updates immediate without reading storage while typing', () => {
+    vi.useFakeTimers();
+    const getItem = vi.spyOn(Storage.prototype, 'getItem');
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    render(<Box storageKey={KEY_A} />);
+    getItem.mockClear();
+    setItem.mockClear();
+
+    const ta = screen.getByLabelText('compose');
+    for (const v of ['a', 'ab', 'abc', 'abcd', 'abcde', 'abcdef']) {
+      fireEvent.change(ta, { target: { value: v } });
+      expect(ta).toHaveValue(v);
+    }
+
+    expect(getItem).not.toHaveBeenCalled();
+    expect(setItem).not.toHaveBeenCalled();
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(setItem).toHaveBeenLastCalledWith(KEY_A, 'abcdef');
+  });
+
+  it('retries a failed debounced write when the page is hidden', () => {
+    vi.useFakeTimers();
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementationOnce(() => {
+      throw new Error('SecurityError');
+    });
+    render(<Box storageKey={KEY_A} />);
+    fireEvent.change(screen.getByLabelText('compose'), { target: { value: 'recover me' } });
+
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(localStorage.getItem(KEY_A)).toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    expect(localStorage.getItem(KEY_A)).toBe('recover me');
+  });
+
+  it('does not retry an over-cap draft, but persists once it is shortened', () => {
+    vi.useFakeTimers();
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    render(<Box storageKey={KEY_A} />);
+    fireEvent.change(screen.getByLabelText('compose'), {
+      target: { value: 'x'.repeat(COMPOSER_DRAFT_MAX_CHARS + 1) },
+    });
+    act(() => {
+      vi.advanceTimersByTime(400);
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    expect(setItem).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('compose'), { target: { value: 'short enough' } });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(KEY_A)).toBe('short enough');
+  });
+
   it('flushes the pending write on unmount', () => {
     const { unmount } = render(<Box storageKey={KEY_A} />);
     fireEvent.change(screen.getByLabelText('compose'), { target: { value: 'mid-thought' } });
@@ -197,6 +260,29 @@ describe('useDraft', () => {
     view.rerender(<Box storageKey={KEY_A} />);
     expect(screen.getByLabelText('compose')).toHaveValue('A text');
     expect(loadDraft(KEY_B)).toBe('B had something');
+  });
+
+  it('flushes only the outgoing key and does not rewrite the incoming draft', () => {
+    vi.useFakeTimers();
+    saveDraft(KEY_B, 'B had something');
+    const getItem = vi.spyOn(Storage.prototype, 'getItem');
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const view = render(<Box storageKey={KEY_A} />);
+    getItem.mockClear();
+    setItem.mockClear();
+    fireEvent.change(screen.getByLabelText('compose'), { target: { value: 'A pending' } });
+
+    view.rerender(<Box storageKey={KEY_B} />);
+    expect(screen.getByLabelText('compose')).toHaveValue('B had something');
+    expect(getItem).toHaveBeenCalledTimes(1);
+    expect(getItem).toHaveBeenCalledWith(KEY_B);
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(setItem).toHaveBeenCalledWith(KEY_A, 'A pending');
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(setItem).toHaveBeenCalledTimes(1);
   });
 
   it('shows an empty box for a room with no draft of its own', () => {

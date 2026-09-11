@@ -37,6 +37,8 @@ export const COMPOSER_DRAFT_MAX_CHARS = 20_000;
 /** Default write-behind delay: long enough to coalesce a burst of typing. */
 export const COMPOSER_DRAFT_DEBOUNCE_MS = 300;
 
+type DraftSaveResult = 'saved' | 'skipped' | 'failed';
+
 /**
  * Storage key for one conversation's unsent text. Scoped by org as well as room
  * so the same room id under two orgs (or a stale row after an org switch) can
@@ -60,23 +62,25 @@ export function loadDraft(key: string): string {
  * the same as no draft). Text past {@link COMPOSER_DRAFT_MAX_CHARS} is dropped
  * silently, leaving whatever was last stored intact.
  */
-export function saveDraft(key: string, text: string): void {
-  if (text.length > COMPOSER_DRAFT_MAX_CHARS) return;
+function persistDraft(key: string, text: string): DraftSaveResult {
+  if (text.length > COMPOSER_DRAFT_MAX_CHARS) return 'skipped';
   try {
     if (text === '') localStorage.removeItem(key);
     else localStorage.setItem(key, text);
+    return 'saved';
   } catch {
     /* storage unavailable/full — the draft just doesn't survive this page */
+    return 'failed';
   }
+}
+
+export function saveDraft(key: string, text: string): void {
+  persistDraft(key, text);
 }
 
 /** Forget the draft for `key` (the message was sent, or deliberately dropped). */
 export function clearDraft(key: string): void {
-  try {
-    localStorage.removeItem(key);
-  } catch {
-    /* nothing to do — a stale row will be overwritten by the next save */
-  }
+  persistDraft(key, '');
 }
 
 /**
@@ -97,11 +101,19 @@ export function useDraft(
   key: string,
   { debounceMs = COMPOSER_DRAFT_DEBOUNCE_MS }: { debounceMs?: number } = {},
 ): [string, Dispatch<SetStateAction<string>>, () => void] {
-  const [value, setValue] = useState(() => loadDraft(key));
+  const initialRef = useRef<{ key: string; text: string } | null>(null);
+  if (initialRef.current === null) initialRef.current = { key, text: loadDraft(key) };
+  const [value, setValue] = useState(() => initialRef.current!.text);
+
+  // The last value loaded from or written to storage for the owned key. Comparing
+  // against this snapshot keeps localStorage entirely off the typing hot path.
+  const persistedRef = useRef(initialRef.current);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The write the timer owes, carrying the key it was typed under — a room
   // switch must not land the outgoing room's text under the incoming key.
+  // Failed writes can retry while this key is active; storage failure on room
+  // exit remains best-effort, not a durable cross-room retry queue.
   const pendingRef = useRef<{ key: string; text: string } | null>(null);
   const keyRef = useRef(key);
   keyRef.current = key;
@@ -117,8 +129,13 @@ export function useDraft(
   const flush = useCallback(() => {
     cancelTimer();
     const owed = pendingRef.current;
-    pendingRef.current = null;
-    if (owed) saveDraft(owed.key, owed.text);
+    if (owed) {
+      const result = persistDraft(owed.key, owed.text);
+      if (result !== 'failed') pendingRef.current = null;
+      if (result === 'saved' && persistedRef.current.key === owed.key) {
+        persistedRef.current = owed;
+      }
+    }
   }, [cancelTimer]);
   // Reachable from cleanups and listeners without re-subscribing them.
   const flushRef = useRef(flush);
@@ -131,17 +148,20 @@ export function useDraft(
   useLayoutEffect(() => {
     if (ownedKeyRef.current !== key) {
       ownedKeyRef.current = key;
-      setValue(loadDraft(key));
+      const loaded = { key, text: loadDraft(key) };
+      persistedRef.current = loaded;
+      setValue(loaded.text);
     }
     return () => flushRef.current();
   }, [key]);
 
   // Write-behind: each change replaces the owed write and restarts the clock,
-  // so a burst of typing costs one `setItem`. Skipped when the value already IS
-  // what storage holds — which covers the initial load and the post-switch
-  // re-read, so neither re-writes what it just read.
+  // so a burst of typing costs one `setItem`. Skipped when the value matches the
+  // cached value last loaded from or written to storage, so typing never performs
+  // a synchronous storage read.
   useEffect(() => {
-    if (value === loadDraft(key)) {
+    const persisted = persistedRef.current;
+    if (persisted.key === key && value === persisted.text) {
       pendingRef.current = null;
       cancelTimer();
       return;
@@ -151,8 +171,13 @@ export function useDraft(
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
       const owed = pendingRef.current;
-      pendingRef.current = null;
-      if (owed) saveDraft(owed.key, owed.text);
+      if (owed) {
+        const result = persistDraft(owed.key, owed.text);
+        if (result !== 'failed') pendingRef.current = null;
+        if (result === 'saved' && persistedRef.current.key === owed.key) {
+          persistedRef.current = owed;
+        }
+      }
     }, debounceMs);
     return cancelTimer;
   }, [key, value, debounceMs, cancelTimer]);
@@ -171,9 +196,11 @@ export function useDraft(
 
   const clear = useCallback(() => {
     cancelTimer();
-    pendingRef.current = null;
+    const currentKey = keyRef.current;
+    const result = persistDraft(currentKey, '');
+    pendingRef.current = result === 'failed' ? { key: currentKey, text: '' } : null;
+    if (result === 'saved') persistedRef.current = { key: currentKey, text: '' };
     setValue('');
-    clearDraft(keyRef.current);
   }, [cancelTimer]);
 
   return [value, setValue, clear];

@@ -14,6 +14,12 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Fixed
+
+- Draft persistence no longer reads browser storage on every keystroke. Typing
+  remains immediate, while writes stay debounced and pending drafts are saved
+  when leaving a conversation or closing the page.
+
 ## [0.1.30] — 2026-09-11
 
 ### Fixed

@@ -4355,7 +4355,11 @@ restored when you come back — switching to another agent mid-sentence never co
 the sentence. It is local ONLY (never sent to the server except as the body of the
 send that consumes it), each conversation sees only its own, a successful send
 clears it and a failed one keeps it, and text past a 20,000-character cap simply
-stops being backed up rather than filling the origin's storage quota. The composer's hint line names every key it answers to, clawback
+stops being backed up rather than filling the origin's storage quota. Typing
+updates the visible value immediately; storage work is kept off the keystroke
+path. Drafts are read when entering a conversation, writes are coalesced after
+300 ms of inactivity, and pending text is flushed when leaving the conversation
+or page. The composer's hint line names every key it answers to, clawback
 included ("Esc pulls back your last message") — an affordance no one is told about
 does not exist. A clawback pulls the message and restores its text to the composer;
 it never navigates, and the pulled message stays gone from the pane even if a stale
