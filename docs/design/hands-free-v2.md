@@ -118,7 +118,7 @@ ready ──tap mic──▶ listening ──Send──▶ sending ──▶ awa
   frames every ~250 ms over the WS. Where the context refuses 16 kHz, the
   worklet downsamples.
 - **sending**: `POST …/messages` with `origin:'voice'` (existing send path;
-  drafts/attachments untouched).
+  composer text/attachments untouched).
 - **awaiting**: shows the counterpart's working status (already streamed to
   the room). Any message from **another member** that arrives while in mode
   is queued for speech; the first one after our send is what we're waiting
