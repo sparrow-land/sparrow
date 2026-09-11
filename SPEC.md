@@ -170,7 +170,10 @@ agents            id, org_id, owner_human_id (FK humans; must be an org member),
                   role_title (nullable ≤60, ORG-VISIBLE label),
                   role_instructions (nullable ≤16 KB markdown, PRIVATE to owner +
                   the agent itself), role_updated_at (nullable — bumped on any
-                  role change; drives the re-read nudge), last_seen_at, created_at
+                  role change; drives the re-read nudge), last_seen_at,
+                  last_client_version (nullable — the version the agent's client
+                  last identified as via X-Sparrow-Client, stamped with
+                  last_seen_at; resolves upgrade-your-cli), created_at
                   UNIQUE(org_id, name) (case-insensitive)
 agent_visibility  agent_id, human_id, granted_by_human_id, created_at
                   PRIMARY KEY(agent_id, human_id). The owner's row is created
@@ -231,7 +234,13 @@ hint_state        principal_type ('human'|'agent'), principal_id,
                   level ('off'|'normal'|'aggressive', default 'normal'),
                   trigger_id (nullable — NULL is the principal's level row,
                   a set value is one trigger's cooldown row), last_fired_at,
-                  delivered_count, updated_at
+                  delivered_count, updated_at,
+                  id (nullable — a cooldown row's stable handle, minted on first
+                  delivery and kept across re-fires, so journaled entries point
+                  at it), payload_key (NOT NULL default '' — what the hint says
+                  now; the cooldown mutes only while it matches),
+                  resolved_at (nullable — when the taught condition was first
+                  observed to no longer hold; cleared on every re-fire)
                   PRIMARY KEY(principal_type, principal_id, trigger_id)
 config            key (PK), value (JSON text), updated_at
 
@@ -299,6 +308,8 @@ activity_entries  id, org_id, agent_id (nullable FK agents — the agent this
                   (all nullable — the typed refs),
                   hint_id, hint_text (nullable — hint.delivered's inline
                   payload, the one entries-are-refs exception),
+                  hint_delivery_id (nullable — the hint_deliveries row this
+                  entry was journaled from; NULL reads as resolution 'unknown'),
                   created_at
                   INDEX (agent_id, created_at, id)
                   INDEX (owner_human_id, created_at, id)
@@ -559,6 +570,22 @@ byte-identical for old clients. At most **one hint per pause** (priority = trigg
 order), cooldown-gated so it re-fires at most every `HINT_COOLDOWN_MS` (24h) per
 principal — or `HINT_COOLDOWN_AGGRESSIVE_MS` (~1h) on the `aggressive` level.
 
+**The cooldown is PAYLOAD-KEYED.** A trigger may declare a `payloadKey` — the
+identity of *what the hint currently says*, stored on the ledger row — and a
+delivery inside the window mutes a re-fire **only while that key still matches**.
+A changed key means the lesson itself changed, so the hint becomes eligible
+again and records the new key (this overrides `permanent` too, on the same
+reasoning that re-arms `refresh-your-role`). Triggers declare no key by default:
+`'' == ''` is the id-only cooldown, which is what every trigger but one has, and
+what rows written before the column read as. Exactly one trigger keys on a
+payload — `upgrade-your-cli`, on the recommended version string — because that is
+the one hint whose number moves under it: when `CLIENT_RECOMMENDED_VERSION` went
+0.1.25 → 0.1.30 within hours of a delivery, the day-long cooldown swallowed every
+re-fire and the agent sat at the old floor having been told the old number. A
+`payloadKey` is for a message that genuinely varies with server state and is
+worth re-teaching — never for a drifting name, count, or address, which would
+defeat the cooldown outright.
+
 Every other response is silent. **`POST /rooms/:roomId/messages` (send) no longer
 carries hints**: a send is the middle of a task. A pop that HANDS BACK WORK no
 longer carries them either: the agent is about to start. `SendMessageResponse`
@@ -645,6 +672,35 @@ over `HINT_TEXT_MAX` even with every interpolated value at its schema maximum
 `GET /me/hints` records NOTHING — no ledger row and no timeline entry — so the
 owner's timeline stays a record of what sparrow TAUGHT, not of what the agent
 browsed.
+
+**Did the lesson take?** "Sparrow hinted the agent to X" followed by nothing
+leaves the owner unable to tell IGNORED from DONE, so each delivery carries a
+**resolution**, in three states:
+
+| State | Meaning |
+|---|---|
+| `resolved` | the trigger's own DB/presence predicate says the condition it taught about no longer holds; `resolvedAt` is when the server FIRST observed that |
+| `unresolved` | the trigger defines a predicate and it still says the condition holds |
+| `unknown` | there is nothing honest to check — the trigger defines no predicate, or the entry predates the link to its ledger row |
+
+A trigger MAY define `resolved(ctx, principal)`, evaluated for the delivered-to
+principal and derived purely from server-observable state — **the agent never
+self-reports**; it just acts, and the server notices. `start-listening` (online
+now), `set-a-status` (a status is advertised), `drain-your-inbox` (unread back
+under the threshold), `you-have-email` (the mailbox has been read from or written
+from), `email-is-held` (nothing of the agent's is still `held`),
+`upgrade-your-cli` (`agents.last_client_version`, stamped from `X-Sparrow-Client`
+alongside `last_seen_at`, now parses at or above the floor) and
+`control-your-hints` (a stored hint preference exists) define one. The prose
+lessons — `refresh-your-role`, both `*-is-a-different-register` hints,
+`markdown-renders` — define **none**, and always read `unknown`: nothing the
+server stores says whether an agent wrote better or re-read its role, and a guess
+on an owner's timeline is worse than silence. **`unknown` is a first-class answer,
+never a failure**; readers render it as silence. Stamping is opportunistic and
+monotone: whenever the engine runs for a principal (a pause or `GET /me/hints`)
+it evaluates the predicates of that principal's unresolved deliveries from the
+last 7 days, and a timeline read evaluates the entries it is about to serve. A
+re-fire clears `resolved_at` — the hint is being taught again.
 
 The three email triggers are **dormant when the email medium is off** — they cannot
 fire without an address:
@@ -3142,13 +3198,22 @@ whose `type` or `medium` they do not recognize** — the registry is additive,
 and a v4 client must survive a v5 medium.
 
 Entries are refs, not payloads, with ONE exception: a `hint.delivered` entry
-may carry an inline `hint: { id, text }` — the trigger id and the verbatim text
-conveyed to the agent (`text` ≤ `HINT_TEXT_MAX`) — because the `system` medium
-has no fetch route; a delivered hint is not addressable anywhere else, and the
-payload is small and immutable. `summary` on such an entry is the trigger's
-owner-framed `ownerLabel` (*Hints & docs by convention*). `hint` is optional
-even there: rows that predate it render from `summary` alone (and are simply
-not expandable in the web's Hint info box).
+may carry an inline `hint: { id, text, deliveryId?, resolution? }` — the trigger
+id and the verbatim text conveyed to the agent (`text` ≤ `HINT_TEXT_MAX`) —
+because the `system` medium has no fetch route; a delivered hint is not
+addressable anywhere else, and the payload is small and immutable. `summary` on
+such an entry is the trigger's owner-framed `ownerLabel` (*Hints & docs by
+convention*). `hint` is optional even there: rows that predate it render from
+`summary` alone (and are simply not expandable in the web's Hint info box).
+
+`deliveryId` is the hint cooldown-ledger row the entry was journaled from;
+`resolution` is `{ state: 'resolved' | 'unresolved' | 'unknown', resolvedAt? }`
+and is the one field on a timeline entry **computed at serve time rather than
+stored** — whether a lesson took is a question about the world now, not a fact
+frozen on an append-only row, and the row is never mutated to record it. An entry
+with no `deliveryId` (written before the link existed) is always `unknown`; so is
+a hint whose trigger defines no check. See *Hints & docs by convention → Did the
+lesson take?*.
 
 **Who may read a timeline**
 

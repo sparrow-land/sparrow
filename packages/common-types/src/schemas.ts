@@ -2686,9 +2686,34 @@ export type ActivityRefs = z.infer<typeof ActivityRefsSchema>;
  * which the web's Hint info box reveals on expand. The entry's `summary` holds
  * the trigger's human-framed `ownerLabel` ("Sparrow hinted the agent to …").
  */
+/**
+ * Did the thing a hint taught about actually get done? Server-derived, never
+ * self-reported: `resolved` means the trigger's own DB predicate says the
+ * condition it taught about no longer holds (with `resolvedAt` the moment the
+ * server first observed that), `unresolved` means the predicate still says it
+ * does, and `unknown` means there is nothing honest to check — the trigger
+ * defines no predicate (a prose lesson leaves no server trace), or the entry
+ * predates the delivery-row link. A reader MUST render `unknown` as silence,
+ * never as a failure.
+ */
+export const ActivityHintResolutionSchema = z.object({
+  state: z.enum(['resolved', 'unresolved', 'unknown']),
+  /** Present only on `resolved`. */
+  resolvedAt: z.string().optional(),
+});
+export type ActivityHintResolution = z.infer<typeof ActivityHintResolutionSchema>;
+
 export const ActivityHintSchema = z.object({
   id: z.string(),
   text: z.string().max(HINT_TEXT_MAX),
+  /**
+   * The cooldown-ledger delivery row this entry was journaled from. Absent on
+   * entries written before the link existed — such an entry can only ever be
+   * `unknown`.
+   */
+  deliveryId: z.string().optional(),
+  /** Computed AT SERVE TIME (stored entries are never mutated). */
+  resolution: ActivityHintResolutionSchema.optional(),
 });
 export type ActivityHint = z.infer<typeof ActivityHintSchema>;
 

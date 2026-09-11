@@ -70,6 +70,14 @@ export const newExternalContactId = (): string => `ext_${nano12()}`;
 /** `act_` + 12-char base62 nanoid (one append-only activity timeline entry). */
 export const newActivityEntryId = (): string => `act_${nano12()}`;
 
+/**
+ * `hdl_` + 12-char base62 nanoid (one hint cooldown-ledger row). Minted on the
+ * first delivery of a hint to a principal and kept across every re-fire, so the
+ * `hint.delivered` entries journaled from that row all point at the one place
+ * its resolution is recorded.
+ */
+export const newHintDeliveryId = (): string => `hdl_${nano12()}`;
+
 /* ------------------------------------------------------------------ *
  * Secrets — `<prefix>_` + 32-char base62 (~190 bits). Stored hashed
  * (sha256); the plaintext is shown exactly once at mint time.

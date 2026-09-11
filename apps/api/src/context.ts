@@ -1,5 +1,6 @@
 import type { FastifyRequest } from 'fastify';
 import { eq } from 'drizzle-orm';
+import { parseClientIdent } from '@sparrow/common-types';
 import { sha256Hex } from '@sparrow/common-types/identity';
 import type { DbHandle, DB } from './db/index.js';
 import { agents } from './db/schema.js';
@@ -221,11 +222,30 @@ export function bearerToken(request: FastifyRequest): string | undefined {
 }
 
 /**
+ * The requesting client's self-reported version, parsed from `X-Sparrow-Client`
+ * (`<product>/<version>`), or undefined when absent/unparseable — the web, a
+ * third-party caller and a bare-curl agent all identify as nothing. Feeds the
+ * `upgrade-your-cli` hint's floor comparison and the `last_client_version` stamp
+ * below. Re-exported from `hints.ts`, which is where its consumers reach for it.
+ */
+export function clientVersionOf(request: FastifyRequest): string | undefined {
+  const raw = request.headers['x-sparrow-client'];
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  return parseClientIdent(header)?.version;
+}
+
+/**
  * Resolve an `agk_` agent key to its agent row, bumping `last_seen_at`. Returns
  * undefined when no agent key is present (so callers can fall back to a session);
  * throws `401` when an `agk_` token is present but does not resolve.
  * `tokenOverride` supplies the `?token=` value for SSE (EventSource can't set
  * headers).
+ *
+ * The same write stamps `last_client_version` when — and only when — the request
+ * identified itself. This is the ONE place an agent's liveness is recorded, so
+ * the version rides along rather than earning a write path of its own; a
+ * header-less call leaves the last known version standing instead of erasing it
+ * (one `sparrow watch` from an old shell must not un-know an upgrade).
  */
 export function resolveAgentKey(
   ctx: AppContext,
@@ -237,8 +257,14 @@ export function resolveAgentKey(
   const agent = ctx.db.select().from(agents).where(eq(agents.keyHash, sha256Hex(bearer))).get();
   if (!agent) throw unauthorized('Invalid agent key');
   const seen = nowIso();
-  ctx.db.update(agents).set({ lastSeenAt: seen }).where(eq(agents.id, agent.id)).run();
+  const clientVersion = clientVersionOf(request);
+  ctx.db
+    .update(agents)
+    .set(clientVersion ? { lastSeenAt: seen, lastClientVersion: clientVersion } : { lastSeenAt: seen })
+    .where(eq(agents.id, agent.id))
+    .run();
   agent.lastSeenAt = seen;
+  if (clientVersion) agent.lastClientVersion = clientVersion;
   return agent;
 }
 

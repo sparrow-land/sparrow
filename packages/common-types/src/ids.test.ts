@@ -15,6 +15,7 @@ import {
   newEmailId,
   newExternalContactId,
   newActivityEntryId,
+  newHintDeliveryId,
   newInviteToken,
   newEnrollmentToken,
   newAgentKey,
@@ -48,6 +49,7 @@ describe('id generators', () => {
     ['newEmailId', newEmailId, /^eml_[0-9A-Za-z]{12}$/],
     ['newExternalContactId', newExternalContactId, /^ext_[0-9A-Za-z]{12}$/],
     ['newActivityEntryId', newActivityEntryId, /^act_[0-9A-Za-z]{12}$/],
+    ['newHintDeliveryId', newHintDeliveryId, /^hdl_[0-9A-Za-z]{12}$/],
   ] as const)('%s matches its 12-char prefix', (_name, gen, re) => {
     expect(gen()).toMatch(re);
   });

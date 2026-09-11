@@ -29,6 +29,7 @@ import { badRequest, notFound } from '../errors.js';
 import { membershipOf, roleAtLeast } from '../org-helpers.js';
 import { resolveLimit, beforeCondition, withCursor, transcriptResult } from '../pagination.js';
 import { toActivityEntry } from '../activity.js';
+import { decorateHintResolutions } from '../hints.js';
 
 /**
  * The timeline's tiebreak column: SQLite's insertion order (`rowid`), matching
@@ -72,12 +73,19 @@ function page(
     .orderBy(desc(activityEntries.createdAt), desc(ENTRY_ROWID))
     .limit(limit + 1)
     .all() as { row: ActivityEntryRow; rowid: number }[];
-  return transcriptResult(
+  const result = transcriptResult(
     rows,
     limit,
     (r) => toActivityEntry(ctx, r.row),
     (r) => r.row.id,
   );
+  // "Sparrow hinted the agent to X" and then nothing left the owner unable to
+  // tell IGNORED from DONE. Each `hint.delivered` entry now answers for itself,
+  // computed here rather than stored: the journal records what was taught, and
+  // whether it took is read off the world at serve time (see
+  // `decorateHintResolutions`). One page's worth of lookups, memoized.
+  decorateHintResolutions(ctx, result.items);
+  return result;
 }
 
 /**

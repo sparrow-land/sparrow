@@ -104,6 +104,11 @@ export function toActivityEntry(ctx: AppContext, row: ActivityEntryRow): Activit
   // that predates the columns renders from summary alone, not expandable.
   if (row.hintId && row.hintText !== null) {
     entry.hint = { id: row.hintId, text: row.hintText };
+    // The link to the cooldown-ledger row, when the entry has one. `resolution`
+    // is NOT projected here: it is computed at serve time by the activity
+    // routes, because whether a lesson took is a question about the world now,
+    // not a fact frozen on the row.
+    if (row.hintDeliveryId) entry.hint.deliveryId = row.hintDeliveryId;
   }
   return entry;
 }
@@ -139,6 +144,7 @@ export function appendActivity(ctx: AppContext, input: ActivityAppendInput): Act
     emailId: input.refs?.emailId ?? null,
     hintId: input.hint?.id ?? null,
     hintText: input.hint?.text ?? null,
+    hintDeliveryId: input.hint?.deliveryId ?? null,
     createdAt: input.createdAt ?? nowIso(),
   };
   ctx.db.insert(activityEntries).values(row).run();

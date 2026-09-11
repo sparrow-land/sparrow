@@ -365,8 +365,10 @@ describe('hints engine — cooldown, one-per-response, kill switches', () => {
     // the human reader, not the agent-directed imperative.
     const trigger = TRIGGERS.find((t) => t.id === firedId)!;
     expect(entries[0]!.summary).toBe(trigger.ownerLabel);
-    // The verbatim text conveyed to the agent rides the entry's hint payload.
-    expect(entries[0]!.hint).toEqual({ id: firedId, text: first.hints![0]!.text });
+    // The verbatim text conveyed to the agent rides the entry's hint payload,
+    // now alongside the ledger link and the serve-time resolution.
+    expect(entries[0]!.hint).toMatchObject({ id: firedId, text: first.hints![0]!.text });
+    expect(entries[0]!.hint.deliveryId).toBeTypeOf('string');
 
     // A cooldown-suppressed pause delivers nothing → journals nothing.
     await pause(fx.ts.app, fx.agentKey);
@@ -755,5 +757,240 @@ describe('voice-is-a-different-register', () => {
     await popAs(fx.ts.app, fx.agentKey);
     await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: TABLE_REPLY, inReplyTo: spoken });
     expect((await pause(fx.ts.app, fx.agentKey)).hints![0]!.text).toContain(VOICE_REGISTER_NOTE);
+  });
+});
+
+/* ================================================================== *
+ * Payload-keyed cooldown + server-checkable resolution
+ * ================================================================== */
+
+/** `X-Sparrow-Client` headers for a given CLI version. */
+const CLI = (version: string): Record<string, string> => ({
+  'x-sparrow-client': `sparrow-cli/${version}`,
+});
+
+/** Open the test server's DB on a second connection (the tests' only peek). */
+function openDb(dataDir: string): Database.Database {
+  return new Database(path.join(dataDir, 'sparrow.db'));
+}
+
+/** The cooldown-ledger row for one (agent, ledger key), straight from SQLite. */
+function deliveryRow(
+  dataDir: string,
+  agentId: string,
+  hintId: string,
+): { id: string | null; payload_key: string; delivered_at: string; resolved_at: string | null } {
+  const db = openDb(dataDir);
+  const row = db
+    .prepare(
+      `SELECT id, payload_key, delivered_at, resolved_at FROM hint_deliveries
+        WHERE principal_type='agent' AND principal_id = ? AND hint_id = ?`,
+    )
+    .get(agentId, hintId) as any;
+  db.close();
+  return row;
+}
+
+/** The agent row's presence/version stamps. */
+function agentStamps(
+  dataDir: string,
+  agentId: string,
+): { last_seen_at: string | null; last_client_version: string | null } {
+  const db = openDb(dataDir);
+  const row = db
+    .prepare('SELECT last_seen_at, last_client_version FROM agents WHERE id = ?')
+    .get(agentId) as any;
+  db.close();
+  return row;
+}
+
+/** Rewrite a ledger row's payload key — simulates a row written before the column. */
+function setPayloadKey(dataDir: string, agentId: string, hintId: string, key: string): void {
+  const db = openDb(dataDir);
+  db.prepare(
+    `UPDATE hint_deliveries SET payload_key = ?
+      WHERE principal_type='agent' AND principal_id = ? AND hint_id = ?`,
+  ).run(key, agentId, hintId);
+  db.close();
+}
+
+/** The agent's `hint.delivered` entries, as the OWNER reads them off the route. */
+async function hintEntries(f: Fixture): Promise<any[]> {
+  const res = await f.ts.app.inject({
+    method: 'GET',
+    url: `/api/v1/orgs/${f.orgId}/agents/${f.agentId}/activity`,
+    headers: auth(f.ownerToken),
+  });
+  if (res.statusCode !== 200) throw new Error(`activity failed: ${res.body}`);
+  return (res.json().items as any[]).filter((e) => e.type === 'hint.delivered');
+}
+
+/** A pause with the upgrade hint's two higher-priority rivals suppressed. */
+async function quietOnline(f: Fixture): Promise<void> {
+  await goOnline(f.ts.app, f.agentKey);
+  await holdStatus(f.ts.app, f.agentKey, f.roomId);
+}
+
+describe('payload-keyed cooldown — a hint whose MESSAGE changed re-teaches', () => {
+  it('a changed payload re-fires INSIDE the cooldown window', async () => {
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+    const first = await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    expect(first.hints![0]!.id).toBe('upgrade-your-cli');
+    expect(first.hints![0]!.text).toContain('0.1.25');
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').payload_key).toBe('0.1.25');
+
+    // Same recommendation, minutes later: nothing new to say → still muted.
+    expect('hints' in (await pause(fx.ts.app, fx.agentKey, CLI('0.1.20')))).toBe(false);
+
+    // The operator moves the floor. The hint now SAYS something different, so
+    // the ledger must not mute it — the real defect this fixes (0.1.25 → 0.1.30
+    // within hours, and the agent never learned).
+    fx.ts.config.clientRecommendedVersion = '0.1.30';
+    const third = await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    expect(third.hints![0]!.id).toBe('upgrade-your-cli');
+    expect(third.hints![0]!.text).toContain('0.1.30');
+    // The re-fire records the NEW key, so the window restarts against it.
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').payload_key).toBe('0.1.30');
+    expect('hints' in (await pause(fx.ts.app, fx.agentKey, CLI('0.1.20')))).toBe(false);
+  });
+
+  it('a trigger with no payloadKey keys on the id alone — exactly today’s behavior', async () => {
+    fx = await setup();
+    expect((await pause(fx.ts.app, fx.agentKey)).hints![0]!.id).toBe('start-listening');
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'start-listening').payload_key).toBe('');
+    expect('hints' in (await pause(fx.ts.app, fx.agentKey))).toBe(false);
+  });
+
+  it('a LEGACY row (payload key written as empty) suppresses just as it always did', async () => {
+    fx = await setup();
+    await pause(fx.ts.app, fx.agentKey);
+    // A row written by a build that predates the column reads as ''.
+    setPayloadKey(fx.ts.dataDir, fx.agentId, 'start-listening', '');
+    expect('hints' in (await pause(fx.ts.app, fx.agentKey))).toBe(false);
+  });
+});
+
+describe('hint resolution — the server checks, the agent never self-reports', () => {
+  it('stamps the agent’s lastClientVersion from X-Sparrow-Client, alongside lastSeenAt', async () => {
+    fx = await setup();
+    expect(agentStamps(fx.ts.dataDir, fx.agentId).last_client_version).toBeNull();
+    await pause(fx.ts.app, fx.agentKey, CLI('0.9.9'));
+    const stamps = agentStamps(fx.ts.dataDir, fx.agentId);
+    expect(stamps.last_client_version).toBe('0.9.9');
+    expect(stamps.last_seen_at).not.toBeNull();
+    // A header-less call leaves the last known version alone rather than erasing it.
+    await pause(fx.ts.app, fx.agentKey);
+    expect(agentStamps(fx.ts.dataDir, fx.agentId).last_client_version).toBe('0.9.9');
+  });
+
+  it('stamps resolvedAt at a LATER pause, once the taught condition cleared', async () => {
+    fx = await setup();
+    expect((await pause(fx.ts.app, fx.agentKey)).hints![0]!.id).toBe('start-listening');
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'start-listening').resolved_at).toBeNull();
+    // The agent did the thing: it is now reachable.
+    await goOnline(fx.ts.app, fx.agentKey);
+    await pause(fx.ts.app, fx.agentKey);
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'start-listening').resolved_at).not.toBeNull();
+  });
+
+  it('upgrade-your-cli resolves once the agent CALLS IN at the recommended version', async () => {
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').resolved_at).toBeNull();
+    // Still behind → still unresolved.
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.24'));
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').resolved_at).toBeNull();
+    // Upgraded: the next call identifies at the floor.
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.25'));
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').resolved_at).not.toBeNull();
+  });
+
+  it('GET /me/hints (the ASK) stamps resolutions too, while still recording no delivery', async () => {
+    fx = await setup();
+    await pause(fx.ts.app, fx.agentKey); // start-listening delivered
+    await goOnline(fx.ts.app, fx.agentKey);
+    const res = await fx.ts.app.inject({
+      method: 'GET',
+      url: '/api/v1/me/hints',
+      headers: auth(fx.agentKey),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'start-listening').resolved_at).not.toBeNull();
+    // …and the tips view still wrote no new ledger row.
+    expect(await hintEntries(fx)).toHaveLength(1);
+  });
+});
+
+describe('hint resolution on the wire — decorated at SERVE time, never stored', () => {
+  it('carries the deliveryId and flips unresolved → resolved on a later read', async () => {
+    fx = await setup();
+    await pause(fx.ts.app, fx.agentKey); // start-listening (the agent is offline)
+    const before = (await hintEntries(fx))[0]!;
+    expect(before.hint.id).toBe('start-listening');
+    expect(before.hint.deliveryId).toBe(
+      deliveryRow(fx.ts.dataDir, fx.agentId, 'start-listening').id,
+    );
+    expect(before.hint.resolution).toEqual({ state: 'unresolved' });
+
+    // The agent opens a stream / marks presence: the condition cleared. The read
+    // evaluates and stamps — no stored entry is ever mutated.
+    await goOnline(fx.ts.app, fx.agentKey);
+    const after = (await hintEntries(fx))[0]!;
+    expect(after.hint.resolution.state).toBe('resolved');
+    expect(after.hint.resolution.resolvedAt).toBe(
+      deliveryRow(fx.ts.dataDir, fx.agentId, 'start-listening').resolved_at,
+    );
+    // Stored columns untouched: only id + text were ever written.
+    const db = openDb(fx.ts.dataDir);
+    const stored = db
+      .prepare("SELECT hint_id, hint_text FROM activity_entries WHERE type='hint.delivered'")
+      .all() as any[];
+    db.close();
+    expect(stored).toHaveLength(1);
+    expect(stored[0]!.hint_id).toBe('start-listening');
+  });
+
+  it('a trigger with no honest check reads `unknown` — never a guess', async () => {
+    fx = await setup();
+    await quietOnline(fx);
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: LONG_PLAIN });
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: LONG_PLAIN });
+    await sendAs(fx.ts.app, fx.agentKey, fx.roomId, { body: LONG_PLAIN });
+    expect((await pause(fx.ts.app, fx.agentKey)).hints![0]!.id).toBe('markdown-renders');
+    const entry = (await hintEntries(fx)).find((e) => e.hint.id === 'markdown-renders')!;
+    expect(entry.hint.deliveryId).toBeTypeOf('string');
+    expect(entry.hint.resolution).toEqual({ state: 'unknown' });
+  });
+
+  it('a LEGACY entry with no deliveryId reads `unknown`', async () => {
+    fx = await setup();
+    const db = openDb(fx.ts.dataDir);
+    const owner = db
+      .prepare('SELECT owner_human_id FROM agents WHERE id = ?')
+      .get(fx.agentId) as { owner_human_id: string };
+    db.prepare(
+      `INSERT INTO activity_entries
+        (id, org_id, agent_id, owner_human_id, medium, type, actor_kind, actor_label,
+         summary, hint_id, hint_text, created_at)
+       VALUES (?,?,?,?,'system','hint.delivered','system','sparrow',?,?,?,?)`,
+    ).run(
+      'act_legacyhintrow000000000',
+      fx.orgId,
+      fx.agentId,
+      owner.owner_human_id,
+      'Sparrow hinted the agent to open an events stream so it stays reachable.',
+      'start-listening',
+      'you look offline',
+      new Date().toISOString(),
+    );
+    db.close();
+    const entry = (await hintEntries(fx))[0]!;
+    expect(entry.hint).toEqual({
+      id: 'start-listening',
+      text: 'you look offline',
+      resolution: { state: 'unknown' },
+    });
   });
 });

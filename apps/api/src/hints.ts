@@ -38,9 +38,12 @@ import {
   HINT_COOLDOWN_MS,
   HINT_COOLDOWN_AGGRESSIVE_MS,
   HINT_META_THRESHOLD,
-  parseClientIdent,
+  newHintDeliveryId,
+  parseClientVersion,
   clientVersionBelow,
   VOICE_REGISTER_NOTE,
+  type ActivityEntry,
+  type ActivityHintResolution,
   type Hint,
   type HintAction,
   type HintLevel,
@@ -59,7 +62,7 @@ import {
   messages,
   messageRecipients,
 } from './db/schema.js';
-import type { AgentRow, EmailRow } from './db/schema.js';
+import type { AgentRow, EmailRow, HintDeliveryRow } from './db/schema.js';
 import { agentAddress, emailMediumOn } from './email/addresses.js';
 import { appendActivity } from './activity.js';
 
@@ -181,26 +184,68 @@ export interface Trigger {
    * meta-hint tally.
    */
   ledgerKey?(h: HintEvalCtx): string;
+  /**
+   * The identity of WHAT THIS HINT IS CURRENTLY SAYING — not that it applies,
+   * but what it would tell the agent if it fired now. Defaults to a constant
+   * `''` (the id-only cooldown every trigger had before this existed).
+   *
+   * The cooldown mutes a re-fire only while the stored key still matches: a
+   * CHANGED key means the lesson itself changed, and muting it would teach the
+   * agent something now stale. The defect that forced this (2026-09): the
+   * recommended CLI version moved from 0.1.25 to 0.1.30 within hours of an
+   * `upgrade-your-cli` delivery, and the 24h cooldown swallowed every re-fire,
+   * so the agent sat at the old floor having been told the old number.
+   *
+   * Define it ONLY where the message genuinely varies with server state and the
+   * change is worth re-teaching — a name, a count, or an address drifting is
+   * not a new lesson, and keying on a count would defeat the cooldown outright.
+   */
+  payloadKey?(h: HintEvalCtx): string;
   applies(h: HintEvalCtx): boolean;
   build(h: HintEvalCtx): { text: string; action?: HintAction };
+  /**
+   * Whether the condition this hint taught about NO LONGER HOLDS — a purely
+   * db/presence-derived predicate, evaluated for the delivered-to principal.
+   * The agent never self-reports; it just acts, and the server notices.
+   *
+   * A trigger that has no HONEST check must leave this undefined: its
+   * deliveries then report `unknown` forever, which is the truthful answer for
+   * a lesson about PROSE (how to write an email, a voice reply, a long chat
+   * message) or about re-reading something that leaves no server trace. Never
+   * approximate one — "probably done" on an owner's timeline is worse than
+   * silence. Deliberately given only `(ctx, principal)`: a resolution is a
+   * statement about the principal's world NOW, not about the request that is
+   * asking, and it must read identically from the pause and from a timeline
+   * read.
+   */
+  resolved?(ctx: AppContext, principal: PrincipalIdent): boolean;
 }
 
-/** Count of the principal's unread received messages across all memberships. */
-function unreadInboxCount(h: HintEvalCtx): number {
-  if (h.memberIds.length === 0) return 0;
-  return h.ctx.db
+/**
+ * Count of unread received messages across a set of memberships. Split out of
+ * {@link unreadInboxCount} so `drain-your-inbox` can ask the SAME question from
+ * its resolution check, which sees only `(ctx, principal)`.
+ */
+function unreadCountFor(ctx: AppContext, memberIds: string[]): number {
+  if (memberIds.length === 0) return 0;
+  return ctx.db
     .select({ messageId: messageRecipients.messageId })
     .from(messageRecipients)
     .innerJoin(messages, eq(messages.id, messageRecipients.messageId))
     .where(
       and(
-        inArray(messageRecipients.recipientId, h.memberIds),
+        inArray(messageRecipients.recipientId, memberIds),
         isNull(messageRecipients.readAt),
         // Clawed-back messages are dead — they must not trigger drain-your-inbox.
         isNull(messages.clawedBackAt),
       ),
     )
     .all().length;
+}
+
+/** Count of the principal's unread received messages across all memberships. */
+function unreadInboxCount(h: HintEvalCtx): number {
+  return unreadCountFor(h.ctx, h.memberIds);
 }
 
 /** One of the principal's recent sends, as `markdown-renders` judges it. */
@@ -264,16 +309,24 @@ function recentlyActive(h: HintEvalCtx): boolean {
  * for a human caller and for an instance with the medium off, because neither
  * has an address to nudge about.
  */
+function emailAgentFor(ctx: AppContext, principal: PrincipalIdent): AgentRow | undefined {
+  if (principal.type !== 'agent') return undefined;
+  if (!emailMediumOn(ctx)) return undefined;
+  const agent = ctx.db.select().from(agents).where(eq(agents.id, principal.id)).get();
+  return agent && agentAddress(ctx, agent) ? agent : undefined;
+}
+
 function emailAgent(h: HintEvalCtx): AgentRow | undefined {
-  if (h.principal.type !== 'agent') return undefined;
-  if (!emailMediumOn(h.ctx)) return undefined;
-  const agent = h.ctx.db.select().from(agents).where(eq(agents.id, h.principal.id)).get();
-  return agent && agentAddress(h.ctx, agent) ? agent : undefined;
+  return emailAgentFor(h.ctx, h.principal);
 }
 
 /** Every email row anchored to an agent (small per-agent set; one indexed scan). */
+function agentEmailsFor(ctx: AppContext, agentId: string): EmailRow[] {
+  return ctx.db.select().from(emails).where(eq(emails.agentId, agentId)).all();
+}
+
 function agentEmails(h: HintEvalCtx, agentId: string): EmailRow[] {
-  return h.ctx.db.select().from(emails).where(eq(emails.agentId, agentId)).all();
+  return agentEmailsFor(h.ctx, agentId);
 }
 
 /**
@@ -420,6 +473,13 @@ export const TRIGGERS: Trigger[] = [
     applies(h) {
       return !h.ctx.rooms.isPrincipalOnline(h.principal.type, h.principal.id);
     },
+    // Honest and exact: the negation of `applies`. The agent is reachable now,
+    // by the very predicate the lesson was issued on. Presence is transient, so
+    // this can flip back — but the STAMP is monotone, and "it did come online
+    // after being told" stays true forever.
+    resolved(ctx, principal) {
+      return ctx.rooms.isPrincipalOnline(principal.type, principal.id);
+    },
     build() {
       return {
         // Must stay within HINT_TEXT_MAX (300) — the client rejects a longer hint,
@@ -454,6 +514,13 @@ export const TRIGGERS: Trigger[] = [
       if (h.ctx.statuses.anyForMembers(h.memberIds)) return false;
       return recentlyActive(h);
     },
+    // NOT the negation of `applies` — that also goes false when the agent
+    // merely stops being recently active or drops offline, which teaches
+    // nothing. The honest signal is the POSITIVE one: a status is advertised
+    // somewhere, which is exactly the act the hint asked for.
+    resolved(ctx, principal) {
+      return ctx.statuses.anyForMembers(principalMemberIds(ctx, principal));
+    },
     build() {
       return {
         text:
@@ -482,6 +549,11 @@ export const TRIGGERS: Trigger[] = [
     applies(h) {
       return unreadInboxCount(h) >= DRAIN_UNREAD_THRESHOLD;
     },
+    // The backlog is back under the threshold: the pile-up the hint named is
+    // gone. Exactly the trigger's own condition, negated.
+    resolved(ctx, principal) {
+      return unreadCountFor(ctx, principalMemberIds(ctx, principal)) < DRAIN_UNREAD_THRESHOLD;
+    },
     build() {
       return {
         text:
@@ -498,6 +570,11 @@ export const TRIGGERS: Trigger[] = [
     // drain-your-inbox/start-listening (being reachable comes first), before the
     // room-etiquette nudges (role freshness beats etiquette). Unchanged by the
     // move to the pause — it reads only the agent row and its own ledger key.
+    //
+    // NO `resolved`: reading `GET /me` leaves no server-side trace, so there is
+    // nothing to check. Its deliveries report `unknown`, which is the truth.
+    // (No `payloadKey` either — the per-version `ledgerKey` plus `permanent`
+    // already re-arms it exactly once per role version.)
     id: 'refresh-your-role',
     docs: 'me',
     ownerLabel: 'Sparrow hinted the agent to re-read its updated role.',
@@ -531,6 +608,10 @@ export const TRIGGERS: Trigger[] = [
     //
     // Stays `permanent` (once ever): the register lesson only needs teaching the
     // first time an agent meets the medium.
+    //
+    // NO `resolved`: the lesson is about PROSE. Deciding whether the next reply
+    // "restated the background" would mean judging writing, which this engine
+    // never does. `unknown` forever, honestly.
     id: 'email-is-a-different-register',
     docs: 'me/email/threads',
     ownerLabel: 'Sparrow hinted the agent to write email for an outside reader, not like chat.',
@@ -571,6 +652,10 @@ export const TRIGGERS: Trigger[] = [
     //
     // Stays `permanent` (once ever), exactly like its email sibling: the
     // register only needs teaching the first time an agent meets the medium.
+    //
+    // NO `resolved`, for the same reason as its email sibling: a prose lesson.
+    // The next reply may simply never answer anything spoken again, which is
+    // not evidence either way.
     id: 'voice-is-a-different-register',
     docs: 'voice',
     ownerLabel: 'Sparrow hinted the agent to answer a spoken message in a speakable way.',
@@ -611,6 +696,17 @@ export const TRIGGERS: Trigger[] = [
       const mail = agentEmails(h, agent.id);
       return mail.length > 0 && mail.every((e) => e.direction === 'in' && e.readAt === null);
     },
+    // The agent has now MET its mailbox: it read something or wrote from the
+    // address — the same two traces `applies` looks for the absence of. A mail
+    // that merely disappeared (reaped, moved to quarantine) does not count, so
+    // this never reads as done because the evidence vanished.
+    resolved(ctx, principal) {
+      const agent = emailAgentFor(ctx, principal);
+      if (!agent) return false;
+      return agentEmailsFor(ctx, agent.id).some(
+        (e) => e.direction === 'out' || e.readAt !== null,
+      );
+    },
     build(h) {
       const agent = emailAgent(h)!;
       const unread = agentEmails(h, agent.id).length;
@@ -639,6 +735,17 @@ export const TRIGGERS: Trigger[] = [
       const cutoff = new Date(h.now - HELD_EMAIL_AGE_MS).toISOString();
       return agentEmails(h, agent.id).some(
         (e) => e.direction === 'out' && e.disposition === 'held' && e.createdAt < cutoff,
+      );
+    },
+    // Nothing of the agent's is waiting on a human any more — approval or
+    // denial both move the row off `held`. This one resolves by the OWNER
+    // acting, not the agent; the state means "this hint is moot now", which is
+    // what the owner's timeline is asking.
+    resolved(ctx, principal) {
+      const agent = emailAgentFor(ctx, principal);
+      if (!agent) return false;
+      return !agentEmailsFor(ctx, agent.id).some(
+        (e) => e.direction === 'out' && e.disposition === 'held',
       );
     },
     build(h) {
@@ -676,6 +783,12 @@ export const TRIGGERS: Trigger[] = [
     // streak the old form assembled from `current + previous two` is the same
     // streak, one message later. The recency bound keeps the pause honest: an
     // agent whose plain-text spree was last Tuesday is not mid-lesson.
+    //
+    // NO `resolved`: the streak also breaks by the agent simply going quiet or
+    // writing short, neither of which is learning — and a resolution check sees
+    // only `(ctx, principal)`, never the delivery's own timestamp, so it could
+    // not tell a formatted message written AFTER the lesson from one written
+    // before it. `unknown` rather than a flattering guess.
     id: 'markdown-renders',
     docs: 'rooms/messages',
     ownerLabel: 'Sparrow hinted the agent to format long messages with Markdown.',
@@ -703,6 +816,27 @@ export const TRIGGERS: Trigger[] = [
     id: 'upgrade-your-cli',
     docs: 'versioning',
     ownerLabel: 'Sparrow hinted the agent to upgrade its sparrow CLI.',
+    // The one trigger whose MESSAGE moves under it: the number it names is the
+    // operator's recommended floor, and that floor is raised on every release.
+    // Keying the cooldown on it means a raised floor re-teaches immediately
+    // instead of being swallowed for the rest of the day.
+    payloadKey(h) {
+      return h.ctx.config.clientRecommendedVersion ?? '';
+    },
+    // The agent CALLED IN at or above the floor (`agents.lastClientVersion`,
+    // stamped from `X-Sparrow-Client` on every authenticated request). Three
+    // honest abstentions: no floor configured, never identified, or a version
+    // string we cannot parse — `clientVersionBelow` reads an unparseable
+    // version as "not below", which must not be mistaken for an upgrade.
+    resolved(ctx, principal) {
+      if (principal.type !== 'agent') return false;
+      const recommended = ctx.config.clientRecommendedVersion;
+      if (!recommended) return false;
+      const agent = ctx.db.select().from(agents).where(eq(agents.id, principal.id)).get();
+      const seen = agent?.lastClientVersion;
+      if (!seen || !parseClientVersion(seen)) return false;
+      return !clientVersionBelow(seen, recommended);
+    },
     applies(h) {
       const recommended = h.ctx.config.clientRecommendedVersion;
       const current = h.info.clientVersion;
@@ -732,6 +866,23 @@ export const TRIGGERS: Trigger[] = [
     permanent: true,
     applies(h) {
       return deliveryCount(h.ctx, h.principal) >= HINT_META_THRESHOLD;
+    },
+    // A stored preference row exists only if someone PUT one — the exact act
+    // this hint taught. `getHintLevel` can't answer it (it invents the default
+    // for a principal that never chose), so ask for the row itself.
+    resolved(ctx, principal) {
+      return (
+        ctx.db
+          .select({ level: hintPreferences.level })
+          .from(hintPreferences)
+          .where(
+            and(
+              eq(hintPreferences.principalType, principal.type),
+              eq(hintPreferences.principalId, principal.id),
+            ),
+          )
+          .get() !== undefined
+      );
     },
     build() {
       return {
@@ -795,14 +946,14 @@ export function deliveryCount(ctx: AppContext, principal: PrincipalIdent): numbe
   return new Set(rows.map((r) => r.hintId.split(':')[0])).size;
 }
 
-/** The last delivery time (ISO) of `hintId` to `principal`, or undefined if never. */
-function lastDeliveredAt(
+/** The ledger row for `(principal, ledgerKey)`, or undefined if never delivered. */
+function deliveryRow(
   ctx: AppContext,
   principal: PrincipalIdent,
   hintId: string,
-): string | undefined {
+): HintDeliveryRow | undefined {
   return ctx.db
-    .select({ deliveredAt: hintDeliveries.deliveredAt })
+    .select()
     .from(hintDeliveries)
     .where(
       and(
@@ -811,20 +962,44 @@ function lastDeliveredAt(
         eq(hintDeliveries.hintId, hintId),
       ),
     )
-    .get()?.deliveredAt;
+    .get();
 }
 
-/** Record (or refresh) a hint delivery for the cooldown ledger. */
-function recordDelivery(ctx: AppContext, principal: PrincipalIdent, hintId: string): void {
+/**
+ * Record (or refresh) a hint delivery, returning the ledger row's STABLE id so
+ * the journaled activity entry can point at it.
+ *
+ * The row id is minted once and preserved across every re-fire (a legacy row
+ * with no id gets one here), because "was this lesson ever taken?" is a question
+ * about the (principal, hint) pair, not about one telling of it. `resolvedAt` is
+ * cleared: the hint is being taught again, so whatever we had observed about the
+ * previous telling no longer describes it.
+ */
+function recordDelivery(
+  ctx: AppContext,
+  principal: PrincipalIdent,
+  hintId: string,
+  payloadKey: string,
+): string {
   const at = nowIso();
+  const id = deliveryRow(ctx, principal, hintId)?.id ?? newHintDeliveryId();
   ctx.db
     .insert(hintDeliveries)
-    .values({ principalType: principal.type, principalId: principal.id, hintId, deliveredAt: at })
+    .values({
+      principalType: principal.type,
+      principalId: principal.id,
+      hintId,
+      id,
+      payloadKey,
+      deliveredAt: at,
+      resolvedAt: null,
+    })
     .onConflictDoUpdate({
       target: [hintDeliveries.principalType, hintDeliveries.principalId, hintDeliveries.hintId],
-      set: { deliveredAt: at },
+      set: { id, payloadKey, deliveredAt: at, resolvedAt: null },
     })
     .run();
+  return id;
 }
 
 /**
@@ -833,19 +1008,149 @@ function recordDelivery(ctx: AppContext, principal: PrincipalIdent, hintId: stri
  * per-version key for a re-arming hint (see {@link Trigger.ledgerKey}). A
  * `permanent` trigger fires once per DISTINCT key: never again for the same key,
  * but a fresh key (e.g. a new `roleUpdatedAt`) is "never delivered" and so fires.
+ *
+ * The cooldown is PAYLOAD-KEYED (see {@link Trigger.payloadKey}): a stored key
+ * that no longer matches what the hint would say means the previous delivery
+ * taught a different thing, so it cannot mute this one — not even for a
+ * `permanent` trigger, on the same reasoning that re-arms `refresh-your-role`.
+ * Triggers with no `payloadKey` compare `'' === ''` and behave exactly as they
+ * always did, legacy rows (written before the column) included.
  */
 function offCooldown(
   ctx: AppContext,
   principal: PrincipalIdent,
   trigger: Trigger,
   ledgerKey: string,
+  payloadKey: string,
   windowMs: number,
   now: number,
 ): boolean {
-  const last = lastDeliveredAt(ctx, principal, ledgerKey);
+  const last = deliveryRow(ctx, principal, ledgerKey);
   if (last === undefined) return true; // never delivered (this key)
+  if (last.payloadKey !== payloadKey) return true; // it says something new now
   if (trigger.permanent) return false; // fire once per key
-  return now - Date.parse(last) >= windowMs;
+  return now - Date.parse(last.deliveredAt) >= windowMs;
+}
+
+/* ------------------------------------------------------------------ *
+ * Resolution — did the lesson take?
+ * ------------------------------------------------------------------ */
+
+/**
+ * How far back the opportunistic stamp looks. The pause is a hot path and the
+ * owner's question ("is this hint still live?") is about recent coaching, so a
+ * delivery older than this simply keeps whatever state it had — it is not worth
+ * a predicate evaluation on every pop.
+ */
+const RESOLUTION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The trigger a ledger key belongs to. Keys are canonicalized to the part before
+ * the first `:` (a re-arming hint stores `refresh-your-role:<ts>`); trigger ids
+ * never contain one, which `hints.registry.test.ts` pins.
+ */
+function triggerForLedgerKey(ledgerKey: string): Trigger | undefined {
+  const id = ledgerKey.split(':')[0];
+  return TRIGGERS.find((t) => t.id === id);
+}
+
+/** Write the observation down. Monotone: a stamped row is never un-stamped. */
+function stampResolved(ctx: AppContext, row: HintDeliveryRow, at: string): void {
+  ctx.db
+    .update(hintDeliveries)
+    .set({ resolvedAt: at })
+    .where(
+      and(
+        eq(hintDeliveries.principalType, row.principalType),
+        eq(hintDeliveries.principalId, row.principalId),
+        eq(hintDeliveries.hintId, row.hintId),
+      ),
+    )
+    .run();
+}
+
+/**
+ * Opportunistically stamp `resolvedAt` on this principal's still-unresolved
+ * recent deliveries. Called from BOTH hint entry points, because the pause and
+ * the ask are the two moments the engine is already looking at this principal's
+ * world — no new write path, no background job, nothing the agent must do.
+ *
+ * Bounded twice over: only rows delivered inside {@link RESOLUTION_WINDOW_MS},
+ * and only those whose trigger defines a check at all.
+ */
+export function stampResolutions(ctx: AppContext, principal: PrincipalIdent): void {
+  const cutoff = new Date(Date.now() - RESOLUTION_WINDOW_MS).toISOString();
+  const rows = ctx.db
+    .select()
+    .from(hintDeliveries)
+    .where(
+      and(
+        eq(hintDeliveries.principalType, principal.type),
+        eq(hintDeliveries.principalId, principal.id),
+        isNull(hintDeliveries.resolvedAt),
+        gte(hintDeliveries.deliveredAt, cutoff),
+      ),
+    )
+    .all();
+  if (rows.length === 0) return;
+  const at = nowIso();
+  for (const row of rows) {
+    const resolved = triggerForLedgerKey(row.hintId)?.resolved;
+    if (!resolved) continue;
+    if (resolved(ctx, principal)) stampResolved(ctx, row, at);
+  }
+}
+
+/**
+ * The resolution state of ONE delivery, evaluated (and stamped) on read. Three
+ * answers, and `unknown` is a first-class one: an entry that predates the
+ * delivery link, a ledger row that no longer exists, and a trigger with no
+ * honest check all report it rather than implying the agent ignored the lesson.
+ */
+function resolutionOf(ctx: AppContext, deliveryId: string): ActivityHintResolution {
+  const row = ctx.db
+    .select()
+    .from(hintDeliveries)
+    .where(eq(hintDeliveries.id, deliveryId))
+    .get();
+  if (!row) return { state: 'unknown' };
+  if (row.resolvedAt) return { state: 'resolved', resolvedAt: row.resolvedAt };
+  const resolved = triggerForLedgerKey(row.hintId)?.resolved;
+  if (!resolved) return { state: 'unknown' };
+  const principal: PrincipalIdent = {
+    type: row.principalType as PrincipalIdent['type'],
+    id: row.principalId,
+  };
+  if (!resolved(ctx, principal)) return { state: 'unresolved' };
+  const at = nowIso();
+  stampResolved(ctx, row, at);
+  return { state: 'resolved', resolvedAt: at };
+}
+
+/**
+ * Decorate a page of activity entries with each `hint.delivered` entry's current
+ * resolution — AT SERVE TIME. Stored entries are never mutated: the journal
+ * records what sparrow TAUGHT, and whether it took is a question about the
+ * world, answered fresh on every read (and memoized within the page, since one
+ * agent's timeline repeats the same delivery ids).
+ */
+export function decorateHintResolutions(ctx: AppContext, entries: ActivityEntry[]): void {
+  const memo = new Map<string, ActivityHintResolution>();
+  for (const entry of entries) {
+    const hint = entry.hint;
+    if (entry.type !== 'hint.delivered' || !hint) continue;
+    const deliveryId = hint.deliveryId;
+    if (!deliveryId) {
+      hint.resolution = { state: 'unknown' };
+      continue;
+    }
+    let state = memo.get(deliveryId);
+    if (!state) {
+      state = resolutionOf(ctx, deliveryId);
+      memo.set(deliveryId, state);
+    }
+    hint.resolution = state;
+  }
 }
 
 /** Every member id belonging to a principal, across all rooms. */
@@ -861,16 +1166,14 @@ function principalMemberIds(ctx: AppContext, principal: PrincipalIdent): string[
 }
 
 /**
- * The requesting client's self-reported version, parsed from `X-Sparrow-Client`
- * (`<product>/<version>`), or undefined when absent/unparseable. Fed into
+ * The requesting client's self-reported version (`X-Sparrow-Client`), fed into
  * {@link HintRequestInfo.clientVersion} so the `upgrade-your-cli` trigger can
- * compare it to the recommended floor.
+ * compare it to the recommended floor. It LIVES in `context.ts`, next to the
+ * agent-key resolution that stamps the same value onto `agents.lastClientVersion`
+ * — one parse, one meaning — and is re-exported here because its callers are
+ * hint routes.
  */
-export function clientVersionOf(request: FastifyRequest): string | undefined {
-  const raw = request.headers['x-sparrow-client'];
-  const header = Array.isArray(raw) ? raw[0] : raw;
-  return parseClientIdent(header)?.version;
-}
+export { clientVersionOf } from './context.js';
 
 /** Whether the request opted out of hints via the `X-Sparrow-No-Hints: 1` header. */
 export function requestOptedOut(request: FastifyRequest): boolean {
@@ -939,6 +1242,10 @@ export function computeHints(
 ): Hint[] | undefined {
   if (ctx.config.hintsEnabled === false) return undefined;
   if (principal.type !== 'agent') return undefined; // agents only in v1
+  // Bookkeeping, not teaching: run it BEFORE the opt-outs, so an agent that
+  // silenced its own hints still lets its owner see which lessons took. It
+  // writes nothing the agent can observe.
+  stampResolutions(ctx, principal);
   if (requestOptedOut(request)) return undefined;
   const level = getHintLevel(ctx, principal);
   if (level === 'off') return undefined;
@@ -948,11 +1255,14 @@ export function computeHints(
 
   for (const trigger of TRIGGERS) {
     const ledgerKey = trigger.ledgerKey ? trigger.ledgerKey(evalCtx) : trigger.id;
-    if (!offCooldown(ctx, principal, trigger, ledgerKey, windowMs, evalCtx.now)) continue;
+    const payloadKey = trigger.payloadKey ? trigger.payloadKey(evalCtx) : '';
+    if (!offCooldown(ctx, principal, trigger, ledgerKey, payloadKey, windowMs, evalCtx.now)) {
+      continue;
+    }
     if (!trigger.applies(evalCtx)) continue;
     const { text, action } = trigger.build(evalCtx);
     // The ledger records the per-version key; the public hint id stays clean.
-    recordDelivery(ctx, principal, ledgerKey);
+    const deliveryId = recordDelivery(ctx, principal, ledgerKey, payloadKey);
     // The owner's window onto what the system taught their agent: every real
     // delivery is journaled on the agent's timeline (medium `system`, actor
     // sparrow itself), so it surfaces as a Hint info box in the owner's DM pane.
@@ -969,7 +1279,9 @@ export function computeHints(
         type: 'hint.delivered',
         actor: { kind: 'system', label: 'sparrow' },
         summary: trigger.ownerLabel,
-        hint: { id: trigger.id, text },
+        // `deliveryId` links the entry to the ledger row whose resolution the
+        // owner's timeline asks about on every read.
+        hint: { id: trigger.id, text, deliveryId },
       });
     }
     return [toHint(trigger, { text, action }, ctx)];
@@ -1003,6 +1315,10 @@ export function previewHints(
 ): Hint[] {
   if (ctx.config.hintsEnabled === false) return [];
   if (principal.type !== 'agent') return []; // agents only in v1
+  // Read-only about HINTS — but the resolution ledger is bookkeeping about the
+  // world, and the ask is the other moment the engine is already here. It still
+  // records no delivery and journals nothing.
+  stampResolutions(ctx, principal);
   const evalCtx = makeEvalCtx(ctx, principal, info);
   const hints: Hint[] = [];
   for (const trigger of TRIGGERS) {

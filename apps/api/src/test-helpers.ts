@@ -10,6 +10,12 @@ export interface TestServer {
   app: FastifyInstance;
   dataDir: string;
   baseUrl: string;
+  /**
+   * The LIVE config object the server's `AppContext` holds (same reference), so
+   * a test can move an operator-set knob mid-run — e.g. raising
+   * `clientRecommendedVersion` the way a real deploy does.
+   */
+  config: ServerConfig;
   close(): Promise<void>;
 }
 
@@ -33,6 +39,7 @@ export async function makeTestServer(
     app,
     dataDir,
     baseUrl: config.baseUrl,
+    config,
     async close() {
       await app.close();
       rmSync(dataDir, { recursive: true, force: true });

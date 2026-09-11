@@ -454,6 +454,17 @@ export function migrate(sqlite: Database.Database): void {
   // dev/staging DBs; old hint rows keep nulls (their box just isn't expandable).
   addColumnIfMissing(sqlite, 'activity_entries', 'hint_id', 'TEXT');
   addColumnIfMissing(sqlite, 'activity_entries', 'hint_text', 'TEXT');
+  // Hint OUTCOMES postdate the hint tables. Nothing to backfill, and every
+  // default is today's behavior: a legacy ledger row reads `payload_key = ''`
+  // (the id-only cooldown it was written under), carries no stable `id` and no
+  // `resolved_at`, so the entries pointing at it report `unknown` rather than
+  // guessing. `last_client_version` is null until an agent calls in with the
+  // `X-Sparrow-Client` header.
+  addColumnIfMissing(sqlite, 'hint_deliveries', 'id', 'TEXT');
+  addColumnIfMissing(sqlite, 'hint_deliveries', 'payload_key', "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(sqlite, 'hint_deliveries', 'resolved_at', 'TEXT');
+  addColumnIfMissing(sqlite, 'activity_entries', 'hint_delivery_id', 'TEXT');
+  addColumnIfMissing(sqlite, 'agents', 'last_client_version', 'TEXT');
   // The email_quarantine split postdates databases whose pre-split build wrote
   // quarantined/rejected inbound rows into `emails`. Move them across — safe on
   // EVERY boot (INSERT OR IGNORE dedupes on the primary key, the DELETE matches

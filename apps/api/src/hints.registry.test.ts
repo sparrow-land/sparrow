@@ -7,7 +7,7 @@ import {
   ORG_SLUG_MAX,
 } from '@sparrow/common-types';
 import { TRIGGERS } from './hints.js';
-import { agents, emails, humans, orgs } from './db/schema.js';
+import { agents, emails, humans, members, orgs } from './db/schema.js';
 
 /**
  * REGISTRY-WIDE invariants over the trigger table — the tests that make "add a
@@ -70,6 +70,8 @@ function rowFor(tbl: unknown): unknown {
   if (tbl === humans) return HUMAN_ROW;
   if (tbl === orgs) return ORG_ROW;
   if (tbl === emails) return EMAIL_ROW;
+  // `resolved()` maps membership rows to ids, so this one must be shaped.
+  if (tbl === members) return { id: 'mem_registrytest' };
   return undefined;
 }
 
@@ -79,13 +81,16 @@ const fakeDb = {
       // `build()` reads one row per table, sometimes through an
       // `.orderBy().limit()` tail (the last read inbound email) — every chain
       // shape resolves to the worst-case row for whichever table was named.
+      // `resolved()` adds an `.innerJoin()` hop (the unread count).
       const terminal = { get: () => rowFor(tbl), all: () => [rowFor(tbl)] };
       const chain: Record<string, unknown> = {
         ...terminal,
+        where: () => chain,
         orderBy: () => chain,
         limit: () => chain,
+        innerJoin: () => chain,
       };
-      return { where: () => chain, ...chain };
+      return chain;
     },
   }),
 };
@@ -100,6 +105,10 @@ function evalCtx() {
         clientRecommendedVersion: '10.20.30-beta.11+build.9999',
       },
       email: { provider: {} },
+      // Presence/status the RESOLUTION checks read. Both say "not done yet", so
+      // an honest predicate answers `false` rather than flattering the agent.
+      rooms: { isPrincipalOnline: () => false },
+      statuses: { anyForMembers: () => false },
     },
     principal: { type: 'agent', id: AGENT_ROW.id },
     // The request context is now just an origin + a client version: a trigger
@@ -153,5 +162,50 @@ describe('the trigger registry (invariants every trigger must hold)', () => {
 
   it('the meta-hint stays LAST — it teaches control, which presumes the others fired', () => {
     expect(TRIGGERS[TRIGGERS.length - 1]!.id).toBe('control-your-hints');
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Outcome invariants: the payload key and the resolution predicate
+   * ---------------------------------------------------------------- */
+
+  it('payloadKey (where defined) is a deterministic string — the cooldown keys on it', () => {
+    for (const trigger of TRIGGERS) {
+      if (!trigger.payloadKey) continue; // default: the id-only cooldown
+      const key = trigger.payloadKey(evalCtx() as unknown as BuildArg);
+      expect(key, trigger.id).toBeTypeOf('string');
+      // Re-deriving it from the same world must give the same answer, or the
+      // hint would re-fire on every pause instead of once per real change.
+      expect(trigger.payloadKey(evalCtx() as unknown as BuildArg), trigger.id).toBe(key);
+    }
+  });
+
+  it('exactly one trigger keys its cooldown on a payload — the one whose number moves', () => {
+    // A deliberate whitelist, not a count: adding a payloadKey means a hint can
+    // now re-fire inside its cooldown, which is a decision worth a line here.
+    expect(TRIGGERS.filter((t) => t.payloadKey).map((t) => t.id)).toEqual(['upgrade-your-cli']);
+  });
+
+  it('resolved (where defined) returns a boolean for a principal with nothing done yet', () => {
+    const h = evalCtx() as unknown as BuildArg & { ctx: never; principal: never };
+    for (const trigger of TRIGGERS) {
+      if (!trigger.resolved) continue; // no honest check → always `unknown`
+      const answer = trigger.resolved(h.ctx, h.principal);
+      expect(answer, trigger.id).toBeTypeOf('boolean');
+    }
+  });
+
+  it('the prose lessons define NO resolution check — `unknown` is the honest answer', () => {
+    // Nothing the server stores says whether an agent WROTE better, or re-read
+    // a role. Any `resolved` added to these would be a guess on an owner's
+    // timeline, which is worse than silence.
+    const unknowable = [
+      'refresh-your-role',
+      'email-is-a-different-register',
+      'voice-is-a-different-register',
+      'markdown-renders',
+    ];
+    for (const id of unknowable) {
+      expect(TRIGGERS.find((t) => t.id === id)!.resolved, id).toBeUndefined();
+    }
   });
 });

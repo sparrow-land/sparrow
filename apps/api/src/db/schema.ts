@@ -126,6 +126,14 @@ export const agents = sqliteTable(
     roleUpdatedAt: text('role_updated_at'),
     /** Null for a freshly minted agent that has never authenticated. */
     lastSeenAt: text('last_seen_at'),
+    /**
+     * The version the agent's client last IDENTIFIED as (`X-Sparrow-Client`),
+     * stamped alongside `lastSeenAt`. Null for an agent that has never called in
+     * with the header (a bare-HTTPS agent, the web, a third-party client). It is
+     * the server-observable evidence behind `upgrade-your-cli`'s resolution
+     * check — the agent never self-reports "I upgraded"; it just calls in.
+     */
+    lastClientVersion: text('last_client_version'),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({
@@ -636,6 +644,12 @@ export const activityEntries = sqliteTable(
      */
     hintId: text('hint_id'),
     hintText: text('hint_text'),
+    /**
+     * The `hint_deliveries` row this entry was journaled from, so a reader can
+     * ask whether the lesson ever took. Null on entries written before the link
+     * existed — those can only ever report `unknown`.
+     */
+    hintDeliveryId: text('hint_delivery_id'),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({
@@ -706,7 +720,27 @@ export const hintDeliveries = sqliteTable(
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     hintId: text('hint_id').notNull(),
+    /**
+     * A stable handle for this ledger row, minted on first delivery and PRESERVED
+     * across re-fires, so every `hint.delivered` entry for this (principal, hint)
+     * points at the one row whose resolution state is asked about. Nullable only
+     * for rows written before the column existed.
+     */
+    id: text('id'),
+    /**
+     * The identity of WHAT THE HINT CURRENTLY SAYS (see `Trigger.payloadKey`);
+     * `''` for the id-only cooldown every trigger had before it existed. A
+     * delivery inside the cooldown window suppresses only when this matches —
+     * otherwise the hint is saying something new and must re-teach.
+     */
+    payloadKey: text('payload_key').notNull().default(''),
     deliveredAt: text('delivered_at').notNull(),
+    /**
+     * When the server first OBSERVED that the condition this hint taught about
+     * no longer holds (see `Trigger.resolved`). Null while unresolved, while the
+     * trigger defines no honest check, and again after every re-fire.
+     */
+    resolvedAt: text('resolved_at'),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.principalType, t.principalId, t.hintId] }),

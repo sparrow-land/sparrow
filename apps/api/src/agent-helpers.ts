@@ -407,6 +407,7 @@ export function insertAgent(
     roleInstructions: null,
     roleUpdatedAt: null,
     lastSeenAt: null,
+    lastClientVersion: null,
     createdAt: ts,
   };
   ctx.db.transaction((tx) => {

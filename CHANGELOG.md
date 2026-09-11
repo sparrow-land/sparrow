@@ -14,6 +14,24 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Added
+
+- **Hint outcomes are visible.** The owner's timeline no longer stops at
+  "Sparrow hinted the agent to X": every `hint.delivered` entry now answers
+  whether the lesson took — *done* (with when), *not yet*, or nothing when the
+  server cannot honestly judge. Resolution is computed from the same
+  database-derived conditions that fired the hint (never stored, never
+  guessed), stamped opportunistically as the engine runs, and served on read.
+
+### Fixed
+
+- **A hint whose message changed re-fires despite the cooldown.** The delivery
+  ledger now records what the hint *said* (its payload key), so
+  `upgrade-your-cli` re-teaches when the recommended version moves instead of
+  staying silent for a day — the recommended floor moved five times in one day
+  while agents heard about none of them. Hints whose message never varies
+  behave exactly as before.
+
 ## [0.1.32] — 2026-09-11
 
 ### Changed
