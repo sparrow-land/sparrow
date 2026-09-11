@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.30] — 2026-09-11
+
 ### Fixed
 
 - **`--room` now accepts a DM's `@handle` — the very label `sparrow rooms`
