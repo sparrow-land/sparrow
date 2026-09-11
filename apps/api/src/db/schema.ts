@@ -381,27 +381,6 @@ export const attachments = sqliteTable(
   }),
 );
 
-/**
- * ORPHANED. The server-backed draft queue was removed; nothing reads or writes
- * this table any more. It is still created on fresh databases (dropping it would
- * be a schema migration for throwaway data) and will go in a later schema
- * cleanup. Do not build on it.
- */
-export const drafts = sqliteTable(
-  'drafts',
-  {
-    id: text('id').primaryKey(),
-    roomId: text('room_id').notNull(),
-    /** The authoring member id. */
-    memberId: text('member_id').notNull(),
-    text: text('text').notNull(),
-    createdAt: text('created_at').notNull(),
-  },
-  (t) => ({
-    roomMemberIdx: index('drafts_room_member').on(t.roomId, t.memberId),
-  }),
-);
-
 export const config = sqliteTable('config', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
@@ -763,7 +742,6 @@ export type RoomInvitationRow = typeof roomInvitations.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type MessageRecipientRow = typeof messageRecipients.$inferSelect;
 export type AttachmentRow = typeof attachments.$inferSelect;
-export type DraftRow = typeof drafts.$inferSelect;
 export type ConfigRow = typeof config.$inferSelect;
 export type ExternalContactRow = typeof externalContacts.$inferSelect;
 export type EmailThreadRow = typeof emailThreads.$inferSelect;

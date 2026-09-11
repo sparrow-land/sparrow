@@ -293,6 +293,66 @@ describe('migrate: idempotent column adds', () => {
     sqlite.close();
   });
 
+  it('drops the orphaned drafts table from a 0.1.26 database, keeping everything else', () => {
+    // 0.1.27 removed the server-backed draft queue but left its table behind.
+    // A database created by that line still carries `drafts` with rows in it;
+    // the next boot must take the table away and touch nothing else. The rows
+    // are throwaway personal text, so there is nothing to migrate out first.
+    const sqlite = new Database(path.join(dir, 'with-drafts.db'));
+    migrate(sqlite);
+    // Stand in for a 0.1.26 database: today's schema plus the old drafts table,
+    // populated, alongside real rows in the tables that must survive.
+    sqlite.exec(`
+      CREATE TABLE drafts (
+        id         TEXT PRIMARY KEY,
+        room_id    TEXT NOT NULL,
+        member_id  TEXT NOT NULL,
+        text       TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX drafts_room_member ON drafts(room_id, member_id);
+      INSERT INTO drafts (id, room_id, member_id, text, created_at)
+      VALUES ('drf_1', 'rm_1', 'mem_a', 'half a thought', '2026-01-01T00:00:00.000Z');
+      INSERT INTO rooms (id, org_id, name, created_at)
+      VALUES ('rm_1', 'org_1', 'General', '2026-01-01T00:00:00.000Z');
+      INSERT INTO messages (id, room_id, sender_id, kind, body, created_at)
+      VALUES ('msg_1', 'rm_1', 'mem_a', 'broadcast', 'sent for real', '2026-01-01T00:00:01.000Z');
+    `);
+    const tables = (): Set<string> =>
+      new Set(
+        (
+          sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
+            name: string;
+          }[]
+        ).map((r) => r.name),
+      );
+    const before = tables();
+    expect(before.has('drafts')).toBe(true);
+
+    migrate(sqlite);
+
+    const after = tables();
+    expect(after.has('drafts')).toBe(false);
+    // Every other table is still there — the drop took exactly one thing.
+    expect([...before].filter((t) => t !== 'drafts').every((t) => after.has(t))).toBe(true);
+    // …and its index went with it, rather than being left dangling.
+    const indexes = (
+      sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as {
+        name: string;
+      }[]
+    ).map((r) => r.name);
+    expect(indexes).not.toContain('drafts_room_member');
+    // Rows in the surviving tables are untouched.
+    expect(sqlite.prepare('SELECT body AS b FROM messages').get()).toEqual({ b: 'sent for real' });
+    expect(sqlite.prepare('SELECT name AS n FROM rooms').get()).toEqual({ n: 'General' });
+
+    // Safe on every subsequent boot: there is simply nothing left to drop.
+    migrate(sqlite);
+    expect(tables().has('drafts')).toBe(false);
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 1 });
+    sqlite.close();
+  });
+
   it('is idempotent — a second migrate does not error or duplicate the column', () => {
     const sqlite = new Database(path.join(dir, 'fresh.db'));
     migrate(sqlite);

@@ -38,8 +38,6 @@ describe('fresh v3 schema', () => {
       'messages',
       'message_recipients',
       'attachments',
-      // Orphaned: the draft queue is gone, but the table is still created.
-      'drafts',
       'config',
       // Unified attention (layer 3): the append-only timeline every medium writes.
       'activity_entries',
@@ -56,6 +54,9 @@ describe('fresh v3 schema', () => {
     ]) {
       expect(names.has(t)).toBe(true);
     }
+    // The draft queue's table was dropped in the 0.1.28 schema cleanup: a fresh
+    // database must not resurrect it.
+    expect(names.has('drafts')).toBe(false);
   });
 
   it('creates the email medium tables to the spec fence', () => {

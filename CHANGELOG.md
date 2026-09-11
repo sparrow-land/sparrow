@@ -14,6 +14,13 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Removed
+
+- **The orphaned `drafts` SQLite table is dropped on the next boot.** 0.1.27
+  removed the server-backed draft queue but left its table standing; nothing has
+  read or written it since, the rows were throwaway personal text, and no data
+  moves — the table (and its index) simply goes.
+
 ## [0.1.27] — 2026-09-11
 
 ### Removed

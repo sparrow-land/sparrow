@@ -11,6 +11,15 @@ export function migrate(sqlite: Database.Database): void {
   sqlite.pragma('journal_mode = WAL');
 
   sqlite.exec(`
+    -- The server-backed draft queue went in 0.1.27, leaving its table orphaned;
+    -- this takes it away on the next boot. Nothing has read or written it since,
+    -- nothing references it (no FK anywhere points at drafts), and the rows were
+    -- throwaway personal text, so there is nothing to migrate out first. The
+    -- drafts_room_member index goes with the table — SQLite drops a table's
+    -- indexes with it. Runs ahead of the creates so a fresh database simply
+    -- never has one.
+    DROP TABLE IF EXISTS drafts;
+
     CREATE TABLE IF NOT EXISTS orgs (
       id          TEXT PRIMARY KEY,
       name        TEXT NOT NULL,
@@ -217,17 +226,6 @@ export function migrate(sqlite: Database.Database): void {
       created_at   TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
-
-    -- ORPHANED: the draft queue was removed; no code reads this table. Kept so
-    -- removal costs no schema migration; dropped in a later schema cleanup.
-    CREATE TABLE IF NOT EXISTS drafts (
-      id         TEXT PRIMARY KEY,
-      room_id    TEXT NOT NULL,
-      member_id  TEXT NOT NULL,
-      text       TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS drafts_room_member ON drafts(room_id, member_id);
 
     CREATE TABLE IF NOT EXISTS config (
       key        TEXT PRIMARY KEY,

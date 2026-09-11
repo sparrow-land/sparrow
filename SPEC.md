@@ -227,10 +227,6 @@ message_recipients message_id, recipient_id (member id),
                   PRIMARY KEY(message_id, recipient_id)
                   INDEX(recipient_id, read_at)  -- every unread surface
 attachments       id, message_id, filename, content_type, size_bytes, created_at
-drafts            ORPHANED — the draft queue was removed and nothing reads or
-                  writes this table. Still created on fresh databases (dropping
-                  it would be a schema migration for throwaway data); it goes in
-                  a later schema cleanup.
 hint_state        principal_type ('human'|'agent'), principal_id,
                   level ('off'|'normal'|'aggressive', default 'normal'),
                   trigger_id (nullable — NULL is the principal's level row,
