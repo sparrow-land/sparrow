@@ -14,6 +14,22 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Removed
+
+- **The server-backed draft queue is gone.** Queueing a message body for later
+  (Cmd/Ctrl+Enter, the **Draft** button, the drafts list with its Insert / Send /
+  Delete / Combine actions) went unused, so it has been deleted outright rather
+  than carried: the `Draft` wire type and its schemas, `GET`/`POST`
+  `/rooms/:roomId/drafts` and `DELETE /rooms/:roomId/drafts/:draftId`, the
+  `listDrafts` / `createDraft` / `deleteDraft` client methods, the `drf_` id
+  prefix, the `DRAFTS_PER_ROOM_MAX` cap, and the one-time migration of the old
+  `sparrow:drafts` browser store. Cmd/Ctrl+Enter now simply sends, which is what
+  most people expected it to do. **Unsent composer text is untouched** — the
+  half-written message that survives leaving a conversation is browser-local and
+  always was, and it keeps working exactly as before. The `drafts` SQLite table is
+  left in place, orphaned: nothing reads or writes it, dropping it would cost a
+  schema migration for throwaway data, and it will go in a later schema cleanup.
+
 ## [0.1.26] — 2026-09-11
 
 ### Added

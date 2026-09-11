@@ -1837,38 +1837,6 @@ export const ListMessageStatusesResponseSchema = z.object({
 export type ListMessageStatusesResponse = z.infer<typeof ListMessageStatusesResponseSchema>;
 
 /* ================================================================== *
- * Drafts (personal, room-scoped)
- * ================================================================== */
-
-/**
- * A saved message draft. Personal to its authoring member and scoped to one
- * room; only the author ever lists or deletes it. `text` is stored trimmed.
- */
-export const DraftSchema = z.object({
-  id: z.string(),
-  text: z.string(),
-  createdAt: IsoDateTimeSchema,
-});
-export type Draft = z.infer<typeof DraftSchema>;
-
-/**
- * POST /rooms/:roomId/drafts body. `text` is trimmed and must be non-empty; the
- * byte cap (same as a message body, `MAX_BODY_BYTES`) is enforced server-side.
- */
-export const CreateDraftRequestSchema = z.object({
-  text: z.string().trim().min(1),
-});
-export type CreateDraftRequest = z.infer<typeof CreateDraftRequestSchema>;
-
-/** POST /rooms/:roomId/drafts response: `{ draft }`. */
-export const CreateDraftResponseSchema = z.object({ draft: DraftSchema });
-export type CreateDraftResponse = z.infer<typeof CreateDraftResponseSchema>;
-
-/** GET /rooms/:roomId/drafts response: the caller's own drafts, oldest first. */
-export const ListDraftsResponseSchema = listResponseSchema(DraftSchema);
-export type ListDraftsResponse = z.infer<typeof ListDraftsResponseSchema>;
-
-/* ================================================================== *
  * The email medium (layer 2)
  *
  * The medium is entirely dormant unless the operator configures it: every

@@ -31,7 +31,6 @@ vi.mock('../lib/roomStreams.js', () => ({
     },
   },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson, binary } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -142,7 +141,6 @@ function stubRoom(initial: Message[] = [], opts: StubOpts = {}) {
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, BOT], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: state.inbox, nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     if (url.includes('/voice/transcriptions') && method === 'POST') {
       return json({ text: 'ship it please' });
     }

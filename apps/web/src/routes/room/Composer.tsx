@@ -69,35 +69,20 @@ export interface ReplyEcho {
   replyValue: string;
 }
 
-type NavLike = { platform?: string; userAgent?: string };
-
-/** Whether we're on a Mac (⌘) vs. a Ctrl-based platform. Testable via an injected nav. */
-export function isMac(nav: NavLike = navigator): boolean {
-  return /Mac|iPhone|iPad|iPod/i.test(`${nav.platform ?? ''} ${nav.userAgent ?? ''}`);
-}
-
-/** The composer-hotkey modifier label for the current platform. */
-export function modKeyLabel(nav: NavLike = navigator): string {
-  return isMac(nav) ? '⌘' : 'Ctrl';
-}
-
 /**
  * The conversation composer: the suggested-reply chips (v6), the textarea, an
  * inline send-error line, and the send row. Presentation + input handling only —
  * the actual `POST /message` lives in the Room view and arrives via `onSend`.
  *
- * `onSend()` with no args sends the current draft (Enter, or the Send button); a
- * chip passes its label as `body` plus the structured `reply` echo, leaving the
- * draft untouched. Chips render only while `suggestions` is set AND the composer
- * is enabled.
+ * `onSend()` with no args sends the current composer text (Enter, or the Send
+ * button); a chip passes its label as `body` plus the structured `reply` echo,
+ * leaving the composer untouched. Chips render only while `suggestions` is set
+ * AND the composer is enabled.
  */
 export function Composer({
   value,
   onChange,
   onSend,
-  onDraft,
-  onOpenDrafts,
-  draftCount,
   canCompose,
   sending,
   sendError,
@@ -113,11 +98,6 @@ export function Composer({
   value: string;
   onChange: (value: string) => void;
   onSend: (body?: string, reply?: ReplyEcho) => void;
-  /** Enqueue the current composer text as a draft (Cmd/Ctrl+Enter, Draft button). */
-  onDraft: () => void;
-  /** Open the drafts list (Cmd/Ctrl+Shift+Enter, or the count link). */
-  onOpenDrafts: () => void;
-  draftCount: number;
   canCompose: boolean;
   sending: boolean;
   sendError: string | null;
@@ -126,7 +106,7 @@ export function Composer({
   /**
    * Everything hands-free mode needs (voice v2). Present iff the room can host a
    * spoken turn; the composer forwards it opaquely to the mic and is otherwise
-   * uninvolved — a voice turn never touches the draft or the staged files.
+   * uninvolved — a voice turn never touches the composer text or staged files.
    */
   handsFree?: HandsFreeWiring;
   /** Files staged on the composer, awaiting send (rendered as removable chips). */
@@ -146,7 +126,6 @@ export function Composer({
    */
   autoFocus?: boolean;
 }) {
-  const canDraft = canCompose && !sending && value.trim().length > 0;
   // A send is allowed with text OR at least one staged attachment (empty-body
   // attachment-only sends are valid on the wire).
   const canSend = canCompose && !sending && (value.trim().length > 0 || attachments.length > 0);
@@ -290,17 +269,6 @@ export function Composer({
 
   function onComposeKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key !== 'Enter') return;
-    const mod = e.metaKey || e.ctrlKey;
-    if (mod && e.shiftKey) {
-      e.preventDefault();
-      onOpenDrafts();
-      return;
-    }
-    if (mod) {
-      e.preventDefault();
-      if (canDraft) onDraft();
-      return;
-    }
     if (!e.shiftKey) {
       e.preventDefault();
       onSend();
@@ -389,18 +357,8 @@ export function Composer({
             {/* Decorative hotkey hint — the hotkeys work regardless. Hidden on
                 narrow (phone) widths where it only crowds the controls. */}
             <span aria-hidden="true" className="hidden truncate text-xs text-[var(--sparrow-muted)] sm:inline">
-              Enter to send · Shift+Enter for newline · {modKeyLabel()}+Enter to draft · Esc pulls
-              back your last message
+              Enter to send · Shift+Enter for newline · Esc pulls back your last message
             </span>
-            {draftCount > 0 && (
-              <button
-                type="button"
-                onClick={onOpenDrafts}
-                className="shrink-0 text-xs font-medium text-[var(--sparrow-accent)] transition-colors hover:underline"
-              >
-                Drafts ({draftCount})
-              </button>
-            )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <button
@@ -416,15 +374,6 @@ export function Composer({
             {handsFree && (
               <MicButton handsFree={handsFree} disabled={!canCompose || sending} />
             )}
-            <button
-              type="button"
-              onClick={onDraft}
-              disabled={!canDraft}
-              title={`Queue as a draft (${modKeyLabel()}+Enter)`}
-              className="rounded border border-[var(--sparrow-border-strong)] px-3 py-1.5 text-sm font-medium text-[var(--sparrow-muted)] transition-colors hover:border-[var(--sparrow-accent)] hover:text-[var(--sparrow-accent)] disabled:opacity-50"
-            >
-              Draft
-            </button>
             <button
               onClick={() => onSend()}
               disabled={!canSend}

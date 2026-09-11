@@ -38,6 +38,7 @@ describe('fresh v3 schema', () => {
       'messages',
       'message_recipients',
       'attachments',
+      // Orphaned: the draft queue is gone, but the table is still created.
       'drafts',
       'config',
       // Unified attention (layer 3): the append-only timeline every medium writes.

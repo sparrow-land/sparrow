@@ -33,9 +33,6 @@ export const newRoomId = (): string => `room_${nano12()}`;
 /** `msg_` + 12-char base62 nanoid. */
 export const newMessageId = (): string => `msg_${nano12()}`;
 
-/** `drf_` + 12-char base62 nanoid (a personal, room-scoped message draft). */
-export const newDraftId = (): string => `drf_${nano12()}`;
-
 /** `att_` + 12-char base62 nanoid. */
 export const newAttachmentId = (): string => `att_${nano12()}`;
 

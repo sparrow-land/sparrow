@@ -30,7 +30,6 @@ vi.mock('../components/AppShell.js', () => ({ useShell: () => ({ reportBroadcast
 vi.mock('../lib/roomStreams.js', () => ({
   roomStreams: { subscribe: () => () => {} },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -184,7 +183,6 @@ function stubRoom(opts: Opts = {}): Stub {
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, AGENT], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: opts.inbox ?? [], nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     // Receipts hydrate for a whole screen at once (`GET …/messages/status?ids=`);
     // answered before the per-message route whose prefix it shares.
     if (url.endsWith('/messages/status')) {

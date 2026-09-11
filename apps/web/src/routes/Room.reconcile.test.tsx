@@ -27,7 +27,6 @@ vi.mock('../lib/roomStreams.js', () => ({
     },
   },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -151,7 +150,6 @@ function stubRoom() {
     if (url.endsWith('/messages')) {
       return json({ items: [...server.inbox].reverse().map(historyItem), nextBefore: null });
     }
-    if (url.includes('/drafts')) return json({ items: [] });
     if (url.endsWith('/status')) {
       server.statusCalls += 1;
       return json({

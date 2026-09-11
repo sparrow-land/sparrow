@@ -22,7 +22,6 @@ vi.mock('../lib/roomStreams.js', () => ({
     },
   },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -77,7 +76,6 @@ function stubProjectRoom(statusItems: StatusItem[]) {
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
     // Room history — the thread's content source (`GET /rooms/:id/messages`).
     if (url.endsWith('/messages')) return json({ items: [], nextBefore: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     if (url.endsWith('/status')) {
       return json({
         items: statusItems.map((s) => ({

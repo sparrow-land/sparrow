@@ -193,8 +193,7 @@ function serverFetch(server: Server): typeof fetch {
         );
         return json({ items, nextBefore: null });
       }
-      if (url.includes('/drafts')) return json({ items: [] });
-      if (url.endsWith('/whoami')) return json(SELF);
+        if (url.endsWith('/whoami')) return json(SELF);
       if (url.endsWith('/members')) return json({ items: [SELF, BOT], nextCursor: null });
       if (new RegExp(`/rooms/${roomId}$`).test(url)) {
         return json({

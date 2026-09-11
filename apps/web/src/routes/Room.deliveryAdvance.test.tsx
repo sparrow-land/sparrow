@@ -12,7 +12,6 @@ vi.mock('../components/AppShell.js', () => ({ useShell: () => ({ reportBroadcast
 vi.mock('../lib/roomStreams.js', () => ({
   roomStreams: { subscribe: () => () => {} },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -93,7 +92,6 @@ function stubRecipient(status: ReadStatus) {
     if (url.includes('/inbox')) {
       return json({ items: status === 'read' ? [] : [inbound(status)], nextCursor: null });
     }
-    if (url.includes('/drafts')) return json({ items: [] });
     if (new RegExp(`/messages/${INBOUND_ID}$`).test(url) && method === 'GET') {
       return json({ message: fullInbound() });
     }

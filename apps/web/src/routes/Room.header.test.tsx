@@ -24,7 +24,6 @@ vi.mock('../components/AppShell.js', () => ({ useShell: () => ({ reportBroadcast
 vi.mock('../lib/roomStreams.js', () => ({
   roomStreams: { subscribe: () => () => {} },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -68,7 +67,6 @@ function stubRoom(room: RoomResource, history: Message[] = []) {
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, BOT], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     if (url.endsWith('/messages') && method === 'GET') return json({ items: history, nextBefore: null });
     if (url.endsWith('/status')) return json({ items: [], presence: { online: [] } });
     if (/\/rooms\/room_abc$/.test(url)) return json(room);
@@ -95,7 +93,6 @@ function stubRoomDeferred(room: RoomResource): { release: () => void } {
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, BOT], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     if (url.endsWith('/messages') && method === 'GET') return json({ items: [], nextBefore: null });
     if (url.endsWith('/status')) return json({ items: [], presence: { online: [] } });
     if (/\/rooms\/room_abc$/.test(url)) {

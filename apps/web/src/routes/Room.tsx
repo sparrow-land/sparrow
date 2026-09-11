@@ -14,7 +14,6 @@ import type {
   RoomUpdatedEvent,
   StatusChangedEvent,
   Room as RoomResource,
-  Draft,
 } from '@sparrow/common-types';
 import { MAX_PAGE_LIMIT, MESSAGE_STATUS_IDS_MAX } from '@sparrow/common-types';
 import { ApiError } from '@sparrow/client';
@@ -56,9 +55,7 @@ import { SpeakerButton } from './room/SpeakerButton.js';
 import type { HandsFreeIncoming } from './room/HandsFreeOverlay.js';
 import { Attachment } from './room/Attachment.js';
 import { useCapabilities } from '../lib/capabilities.js';
-import { DraftsModal } from './room/DraftsModal.js';
 import { AgentOfflineNotice } from './room/AgentOfflineNotice.js';
-import { migrateLocalDrafts } from '../lib/drafts.js';
 import { draftKey, useDraft } from '../lib/composerDraft.js';
 import { roomStreams } from '../lib/roomStreams.js';
 import { useAgentActivity } from './room/useAgentActivity.js';
@@ -227,10 +224,6 @@ export function Room() {
   const [presenceHydrated, setPresenceHydrated] = useState(false);
   const [addPeople, setAddPeople] = useState(false);
   const [addAgent, setAddAgent] = useState(false);
-  // Server-backed draft queue for THIS room (loaded on mount; Room is keyed by
-  // roomId in App, so it remounts on room switch and refetches the right room's).
-  const [drafts, setDrafts] = useState<Draft[]>([]);
-  const [showDrafts, setShowDrafts] = useState(false);
 
   const isDm = room?.kind === 'dm';
   const meRoom = ws.rooms.find((r) => r.room.id === roomId);
@@ -372,7 +365,7 @@ export function Room() {
     [handleAuthExpiry, navigate, orgId, ws],
   );
 
-  // INCIDENTAL failure: one message's status/read, a draft, some best-effort
+  // INCIDENTAL failure: one message's status/read, some best-effort
   // side call. A 403/404 here says that ONE thing is gone or not ours — the room
   // is fine and the user must stay in it. This split is the clawback-eject bug
   // (issue #34): pulling a message back made its `GET …/messages/:id/status`
@@ -727,31 +720,6 @@ export function Room() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
-  // Load this room's drafts (migrating any legacy localStorage queue first).
-  useEffect(() => {
-    if (!roomId) return;
-    let cancelled = false;
-    void (async () => {
-      // One-time localStorage→server migration; best-effort, never blocks the load.
-      try {
-        await migrateLocalDrafts(roomId, api);
-      } catch {
-        /* leave un-migrated drafts for the next mount */
-      }
-      try {
-        const items = await api.listDrafts(roomId);
-        if (!cancelled) setDrafts(items);
-      } catch (e) {
-        // The draft queue is a side feature — never a reason to leave the room.
-        handleBenignError(e);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId]);
-
   // Live "x ago" tick + status expiry backup.
   useEffect(() => {
     const t = setInterval(() => setNowMs(Date.now()), 30_000);
@@ -1072,69 +1040,6 @@ export function Room() {
   function removeAttachment(id: string) {
     setPending((cur) => cur.filter((p) => p.id !== id));
     setAttachError(null);
-  }
-
-  // Enqueue the current composer text as a server draft, then clear the composer.
-  // On failure we keep the text in the composer (nothing is lost) and surface the
-  // error like a send error.
-  async function enqueueDraft() {
-    const text = draft.trim();
-    if (!text || archived) return;
-    setSendError(null);
-    try {
-      const created = await api.createDraft(roomId, text);
-      setDrafts((cur) => [...cur, created]);
-      // The text now lives in the server queue — the local backup would only
-      // resurrect it in the composer on the next visit.
-      clearComposerDraft();
-    } catch (e) {
-      setSendError(e instanceof ApiError ? e.message : 'Could not save draft. Please try again.');
-    }
-  }
-
-  // Pull a draft back into the composer. If the composer already has text we
-  // append (newline-separated) rather than silently destroying the in-progress edit.
-  function insertDraft(d: Draft) {
-    setDraft((cur) => (cur.trim() ? `${cur}\n${d.text}` : d.text));
-    setShowDrafts(false);
-  }
-
-  // Fire a draft down the existing send path; drop it (server + local) only on a
-  // confirmed success. The chip-style body arg leaves the live composer untouched.
-  async function sendDraft(d: Draft) {
-    if (sending) return;
-    const ok = (await send(d.text)) !== null;
-    if (!ok) return;
-    setDrafts((cur) => cur.filter((x) => x.id !== d.id));
-    setShowDrafts(false);
-    // The message is already sent; a failed cleanup would just re-list the draft
-    // on the next load, so swallow it rather than surfacing a scary error.
-    void api.deleteDraft(roomId, d.id).catch(() => {});
-  }
-
-  async function deleteDraft(d: Draft) {
-    setDrafts((cur) => cur.filter((x) => x.id !== d.id));
-    try {
-      await api.deleteDraft(roomId, d.id);
-    } catch (e) {
-      handleBenignError(e);
-    }
-  }
-
-  // Fold every draft into one composer message (newline-joined, display order)
-  // and clear the queue. Composer-append semantics match insertDraft: an
-  // in-progress edit is preserved by prepending it, newline-separated. Server
-  // cleanup is best-effort — a failed delete just re-lists that draft next load.
-  function combineDrafts() {
-    if (drafts.length < 2) return;
-    const joined = drafts.map((d) => d.text).join('\n');
-    setDraft((cur) => (cur.trim() ? `${cur}\n${joined}` : joined));
-    const removed = drafts;
-    setDrafts([]);
-    setShowDrafts(false);
-    for (const d of removed) {
-      void api.deleteDraft(roomId, d.id).catch(() => {});
-    }
   }
 
   async function restore() {
@@ -1502,9 +1407,6 @@ export function Room() {
         }}
         handsFree={handsFree}
         onSend={(body, reply) => void send(body, reply)}
-        onDraft={enqueueDraft}
-        onOpenDrafts={() => setShowDrafts(true)}
-        draftCount={drafts.length}
         attachments={pending}
         onAddFiles={addFiles}
         onRemoveAttachment={removeAttachment}
@@ -1524,18 +1426,6 @@ export function Room() {
         }
         suggestions={suggestions}
       />
-
-      {showDrafts && (
-        <DraftsModal
-          drafts={drafts}
-          sending={sending}
-          onInsert={insertDraft}
-          onSend={(d) => void sendDraft(d)}
-          onDelete={deleteDraft}
-          onCombine={combineDrafts}
-          onClose={() => setShowDrafts(false)}
-        />
-      )}
 
       {addPeople && (
         <AddPeopleModal roomId={roomId} orgId={orgId} onClose={() => setAddPeople(false)} />

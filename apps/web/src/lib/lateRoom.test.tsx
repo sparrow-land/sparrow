@@ -184,8 +184,7 @@ function serverFetch(server: Server): typeof fetch {
       if (url.endsWith('/messages')) {
         return json({ items: [...server.history].reverse(), nextBefore: null });
       }
-      if (url.includes('/drafts')) return json({ items: [] });
-      if (url.endsWith('/whoami')) return json(SELF);
+        if (url.endsWith('/whoami')) return json(SELF);
       if (url.endsWith('/members')) return json({ items: [SELF, BOT], nextCursor: null });
       if (new RegExp(`/rooms/${DM_ROOM}$`).test(url)) {
         return json({

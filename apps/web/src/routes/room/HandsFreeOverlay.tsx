@@ -22,8 +22,8 @@ import { LevelMeter } from './LevelMeter.js';
  *
  * The transcript NEVER lands in the composer: a spoken turn is posted by the
  * overlay (through `onSend`, which is the room's ordinary send path carrying
- * `origin:'voice'`) and the mode stays up for the answer. Drafts and
- * attachments are untouched — a voice turn is text and nothing else.
+ * `origin:'voice'`) and the mode stays up for the answer. The composer's text
+ * and attachments are untouched — a voice turn is text and nothing else.
  *
  * Two capture paths behind one UI:
  * - `voice.sttStreaming` → 16 kHz PCM over the WebSocket route, words appearing

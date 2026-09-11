@@ -32,7 +32,6 @@ import { registerConfigRoutes } from './routes/config.js';
 import { registerOnboardingRoutes } from './routes/onboarding.js';
 import { registerRoomRoutes } from './routes/rooms.js';
 import { registerMessageRoutes } from './routes/messages.js';
-import { registerDraftRoutes } from './routes/drafts.js';
 import { registerStatusRoutes } from './routes/status.js';
 import { registerPresenceRoutes } from './routes/presence.js';
 import { registerDmRoutes } from './routes/dms.js';
@@ -550,7 +549,6 @@ export function buildServer(config: ServerConfig): FastifyInstance {
   registerConfigRoutes(app, ctx);
   registerRoomRoutes(app, ctx);
   registerMessageRoutes(app, ctx);
-  registerDraftRoutes(app, ctx);
   registerStatusRoutes(app, ctx);
   registerPresenceRoutes(app, ctx);
   registerDmRoutes(app, ctx);

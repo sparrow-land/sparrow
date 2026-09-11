@@ -218,6 +218,8 @@ export function migrate(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
 
+    -- ORPHANED: the draft queue was removed; no code reads this table. Kept so
+    -- removal costs no schema migration; dropped in a later schema cleanup.
     CREATE TABLE IF NOT EXISTS drafts (
       id         TEXT PRIMARY KEY,
       room_id    TEXT NOT NULL,

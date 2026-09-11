@@ -61,10 +61,6 @@ import {
   GetMessageStatusResponseSchema,
   ListMessageStatusesQuerySchema,
   ListMessageStatusesResponseSchema,
-  DraftSchema,
-  CreateDraftRequestSchema,
-  CreateDraftResponseSchema,
-  ListDraftsResponseSchema,
   InboxRoomRefSchema,
   ChatInboxEntrySchema,
   MeInboxResponseSchema,
@@ -594,25 +590,6 @@ describe('voice (STT & TTS)', () => {
   });
   it('MAX_TRANSCRIPTION_AUDIO_BYTES is 15 MiB', () => {
     expect(MAX_TRANSCRIPTION_AUDIO_BYTES).toBe(15 * 1024 * 1024);
-  });
-});
-
-describe('drafts', () => {
-  const draft = { id: 'drf_x7YtR2wQ9zKe', text: 'work in progress', createdAt: '2026-08-20T17:00:00Z' };
-  it('DraftSchema is { id, text, createdAt }', () => {
-    expect(DraftSchema.parse(draft)).toEqual(draft);
-    expect(DraftSchema.safeParse({ id: 'drf_x', text: 'x' }).success).toBe(false);
-  });
-  it('CreateDraftRequestSchema trims + requires non-empty text', () => {
-    expect(CreateDraftRequestSchema.parse({ text: '  hi  ' }).text).toBe('hi');
-    expect(CreateDraftRequestSchema.safeParse({ text: '   ' }).success).toBe(false);
-    expect(CreateDraftRequestSchema.safeParse({ text: '' }).success).toBe(false);
-    expect(CreateDraftRequestSchema.safeParse({}).success).toBe(false);
-  });
-  it('CreateDraft / ListDrafts envelopes', () => {
-    expect(CreateDraftResponseSchema.parse({ draft }).draft.id).toBe(draft.id);
-    expect(ListDraftsResponseSchema.parse({ items: [draft] }).items[0]!.text).toBe(draft.text);
-    expect(ListDraftsResponseSchema.parse({ items: [] }).items).toEqual([]);
   });
 });
 

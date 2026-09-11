@@ -18,7 +18,7 @@ typed work item rather than a message, and identity grows an addressing layer.
 
 A **medium** is a way a principal is reached. v4 ships three. **Chat** is v3's
 product unchanged in mechanics — rooms, DMs, members, receipts, presence, working
-status, drafts, suggested replies — now named as the chat medium rather than as the
+status, suggested replies — now named as the chat medium rather than as the
 whole of sparrow. **Email** is new: every agent has an address derived from its name
 and its org, receives mail through an inbound seam, replies within threads and
 initiates new ones, and is protected by an org trust ladder that decides whether an
@@ -98,7 +98,6 @@ contracts.
 | Member id | `mem_` + 12-char nanoid | `mem_x7YtR2wQ9zKe` |
 | Room id | `room_` + 12-char nanoid | `room_8kQ2wN5dR3xF` |
 | Message id | `msg_` + 12-char nanoid | `msg_j5Wt9uH2bY6a` |
-| Draft id | `drf_` + 12-char nanoid | `drf_H6tE1yU4oP7s` |
 | Attachment id | `att_` + 12-char nanoid | `att_p2LmV8cX4nRt` |
 | Email thread id | `eth_` + 12-char nanoid | `eth_R4kD8sW1zQ2m` |
 | Email id | `eml_` + 12-char nanoid | `eml_7bN3xC6vT9pL` |
@@ -228,10 +227,10 @@ message_recipients message_id, recipient_id (member id),
                   PRIMARY KEY(message_id, recipient_id)
                   INDEX(recipient_id, read_at)  -- every unread surface
 attachments       id, message_id, filename, content_type, size_bytes, created_at
-drafts            id, room_id, member_id (the authoring member), text (trimmed,
-                  ≤ MAX_BODY_BYTES), created_at
-                  INDEX(room_id, member_id, created_at)
-                  ≤ DRAFTS_PER_ROOM_MAX per (room_id, member_id)
+drafts            ORPHANED — the draft queue was removed and nothing reads or
+                  writes this table. Still created on fresh databases (dropping
+                  it would be a schema migration for throwaway data); it goes in
+                  a later schema cleanup.
 hint_state        principal_type ('human'|'agent'), principal_id,
                   level ('off'|'normal'|'aggressive', default 'normal'),
                   trigger_id (nullable — NULL is the principal's level row,
@@ -1323,29 +1322,6 @@ acknowledges a message.
 `ack: true` and a message returned, the popper's status is atomically set to
 `working` scoped to the sender (`note` default `"reading your message"`) and
 `status.changed` is emitted. Empty inbox + ack sets nothing.
-
-### Drafts
-
-A member queues **drafts** — message bodies written ahead while waiting on a
-reply — per room. Drafts are **personal**: scoped to `(roomId, authoring
-member)`, invisible to every other member, and carry no events (v4 has no SSE
-`draft.*`; clients refetch). They are ordinary persisted rows, not ephemeral
-(the `drafts` table is in *Data model (SQLite)*).
-
-`Draft` = `{ id: "drf_...", text, createdAt }`.
-
-| Action | Route |
-|---|---|
-| ListDrafts | `GET /rooms/:roomId/drafts` |
-| CreateDraft | `POST /rooms/:roomId/drafts` |
-| DeleteDraft | `DELETE /rooms/:roomId/drafts/:draftId` |
-
-`GET` → `{ items: [Draft] }` — the caller's own drafts, oldest first (bounded by
-the cap; no pagination). `POST` body `{ text }` → `201 { draft }`; text is
-stored trimmed — empty after trim → `400`, over `MAX_BODY_BYTES` → `413`, at
-`DRAFTS_PER_ROOM_MAX` (50) drafts in the room → `400`, archived room → `410`.
-`DELETE` own draft → `200 { ok: true }`; unknown or another member's draft →
-`404` (never `403` — existence is not leaked).
 
 ### Working status
 
@@ -3616,7 +3592,7 @@ Auth: the admin token (`X-Admin-Token`) only.
 | `CLIENT_RECOMMENDED_VERSION` | *(unset = no hint)* | soft floor: a KNOWN client below it arms the `upgrade-your-cli` hint (agents only, standard cooldown; delivered at the pause). Advisory only |
 
 Tuning constants that are **not** env vars — `MAX_BODY_BYTES` (64 KB),
-`DRAFTS_PER_ROOM_MAX` (50), `HINT_COOLDOWN_MS` (24 h),
+`HINT_COOLDOWN_MS` (24 h),
 `HINT_COOLDOWN_AGGRESSIVE_MS` (~1 h), `HINT_META_THRESHOLD` (3),
 `STREAM_MAX_LIFETIME_SECONDS` (900) — live in
 `packages/common-types` as the single source of truth for both server and clients.
@@ -4363,8 +4339,8 @@ reader scrolls up (ListRoomMessages `before`, one page at a time, stopping at th
 beginning of the room), every later refetch MERGES into what is loaded rather than
 replacing it, and the receipts for a screen hydrate through ListMessageStatuses in
 one request instead of one per bubble. Compose box broadcasts; per-member DM threads
-are reached from the sidebar sections. Drafts are per-conversation; failed sends surface inline with the
-draft retained. **Unsent composer text survives leaving the conversation**: what you
+are reached from the sidebar sections. Failed sends surface inline with the
+composer text retained. **Unsent composer text survives leaving the conversation**: what you
 have typed is kept in browser-local storage, keyed per (org, conversation), and
 restored when you come back — switching to another agent mid-sentence never costs
 the sentence. It is local ONLY (never sent to the server except as the body of the
@@ -4376,7 +4352,7 @@ does not exist. A clawback pulls the message and restores its text to the compos
 it never navigates, and the pulled message stays gone from the pane even if a stale
 listing still carries it. **Only a failure to load the ROOM ITSELF leaves the room**
 (a `403`/`404` on the room, its history, or its inbox → resync + org home); a
-`403`/`404` on one message, draft, or receipt is incidental and is swallowed, because
+`403`/`404` on one message or receipt is incidental and is swallowed, because
 one dead sub-request must never eject a human from the conversation they are in. A
 `401` always ends the session and goes to `/login`. The empty state nudges adding
 someone. Room management lives on the

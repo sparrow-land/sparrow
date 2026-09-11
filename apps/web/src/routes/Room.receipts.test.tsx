@@ -10,7 +10,6 @@ vi.mock('../lib/workspace.js', () => ({
 vi.mock('../lib/org.js', () => ({ useOrg: () => ({ orgId: 'org_1' }) }));
 vi.mock('../lib/auth.js', () => ({ useAuth: () => ({ sessionExpired: vi.fn() }) }));
 vi.mock('../components/AppShell.js', () => ({ useShell: () => ({ reportBroadcastUnread: vi.fn() }) }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 // Controllable stream: capture the Room's subscribe callback so a test can emit
 // live SSE events (message.received / message.read) into the running component.
@@ -100,7 +99,6 @@ function stubRoom() {
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     // Receipts hydrate for a whole screen at once (`GET …/messages/status?ids=`);
     // answered before the per-message route whose prefix it shares.
     if (url.endsWith('/messages/status')) {

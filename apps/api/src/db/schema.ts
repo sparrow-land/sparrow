@@ -382,9 +382,10 @@ export const attachments = sqliteTable(
 );
 
 /**
- * Personal, room-scoped message drafts. Keyed for `(room_id, member_id)`
- * listing; `member_id` is the authoring member (drafts are private to their
- * author). Hard-capped per (room, member) by the route layer.
+ * ORPHANED. The server-backed draft queue was removed; nothing reads or writes
+ * this table any more. It is still created on fresh databases (dropping it would
+ * be a schema migration for throwaway data) and will go in a later schema
+ * cleanup. Do not build on it.
  */
 export const drafts = sqliteTable(
   'drafts',

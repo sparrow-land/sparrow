@@ -909,10 +909,6 @@ describe('DMs & messages', () => {
 });
 
 /* ================================================================== *
- * Drafts (personal, room-scoped)
- * ================================================================== */
-
-/* ================================================================== *
  * Hints — the PAUSE is the only hinted surface
  *
  * The right time to teach an agent is BETWEEN tasks. A hint rides the
@@ -986,38 +982,6 @@ describe('hints (the API teaches agents at the pause)', () => {
 
   it('meHints() is an agent surface — a human session gets 403', async () => {
     await expect(owner.meHints()).rejects.toMatchObject({ status: 403 });
-  });
-});
-
-describe('drafts', () => {
-  let h: Harness;
-  let owner: SparrowClient;
-  let orgId: string;
-  let roomId: string;
-  beforeAll(async () => {
-    h = await startServer();
-    owner = await signUp(h, 'Owner');
-    orgId = await firstOrgId(owner);
-    roomId = (await owner.createRoom(orgId, { name: 'drafts-room' })).id;
-  });
-  afterAll(() => h.close());
-
-  it('create (trimmed) → list oldest-first → delete', async () => {
-    expect(await owner.listDrafts(roomId)).toEqual([]);
-    const a = await owner.createDraft(roomId, '  first  ');
-    expect(a.id).toMatch(/^drf_/);
-    expect(a.text).toBe('first'); // server trims
-    expect(typeof a.createdAt).toBe('string');
-    await owner.createDraft(roomId, 'second');
-    expect((await owner.listDrafts(roomId)).map((d) => d.text)).toEqual(['first', 'second']);
-    // Delete the first; the remainder stays.
-    expect(await owner.deleteDraft(roomId, a.id)).toEqual({ ok: true });
-    expect((await owner.listDrafts(roomId)).map((d) => d.text)).toEqual(['second']);
-  });
-
-  it('empty text → 400; unknown draft delete → 404', async () => {
-    await expect(owner.createDraft(roomId, '   ')).rejects.toMatchObject({ status: 400 });
-    await expect(owner.deleteDraft(roomId, 'drf_nope')).rejects.toMatchObject({ status: 404 });
   });
 });
 

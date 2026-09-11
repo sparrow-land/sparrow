@@ -21,7 +21,6 @@ vi.mock('../lib/roomStreams.js', () => ({
     },
   },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -108,7 +107,6 @@ function stubRoom(opts: Opts = {}) {
     if (url.includes('/members')) return json({ items: [SELF, OWNER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: server.inbox, nextCursor: null });
     if (url.includes('/outbox')) return json({ items: [], nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     // Receipts come back for a whole screen at once (`?ids=`); this shadows the
     // per-message route below, so it is answered first.
     if (url.endsWith('/messages/status')) {

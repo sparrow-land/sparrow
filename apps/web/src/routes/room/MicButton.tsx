@@ -36,7 +36,7 @@ export interface HandsFreeWiring {
  * the composer, send by hand. Voice v2 makes it a door instead — it opens
  * {@link HandsFreeOverlay}, which owns capture, the transcript, the send and the
  * spoken reply, and stays up for as many turns as the speaker wants. Nothing
- * dictated ever lands in the composer any more, so the composer's draft and
+ * dictated ever lands in the composer any more, so the composer's text and
  * staged attachments are untouched by a voice turn.
  */
 export function MicButton({

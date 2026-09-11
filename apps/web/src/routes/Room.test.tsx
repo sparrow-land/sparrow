@@ -26,7 +26,6 @@ vi.mock('../lib/roomStreams.js', () => ({
     },
   },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { act } from '@testing-library/react';
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
@@ -96,7 +95,6 @@ function stubRoom(opts: Opts = {}) {
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     // Receipts hydrate for a whole screen at once (`GET …/messages/status?ids=`);
     // answered before the per-message route whose prefix it shares.
     if (url.endsWith('/messages/status')) {
@@ -171,7 +169,6 @@ function stubDmRoom(partnerNote: string | null) {
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
     if (url.endsWith('/messages')) return json({ items: [], nextBefore: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     if (url.endsWith('/status')) {
       // A working agent is, by definition, online — mark it so the agent-offline
       // notice (which needs an OFFLINE agent) stays out of these working-indicator tests.
@@ -260,8 +257,7 @@ describe('Room DM working indicator (iMessage-style, bottom placement)', () => {
       if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
       if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
       if (url.endsWith('/messages')) return json({ items: [], nextBefore: null });
-      if (url.includes('/drafts')) return json({ items: [] });
-      // Agent online (no working status) → neither the working indicator nor the
+        // Agent online (no working status) → neither the working indicator nor the
       // agent-offline notice should render.
       if (url.endsWith('/status')) return json({ items: [], presence: { online: [OTHER.id] } });
       if (/\/rooms\/room_abc$/.test(url)) return json(DM_ROOM);
@@ -286,7 +282,6 @@ function stubOfflineDm(type: 'agent' | 'human') {
     if (url.includes('/members')) return json({ items: [SELF, other], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
     if (url.endsWith('/messages')) return json({ items: [], nextBefore: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     if (url.endsWith('/status')) return json({ items: [], presence: { online: [] } });
     if (/\/rooms\/room_abc$/.test(url)) return json(DM_ROOM);
     return errorJson('not_found', 404);
@@ -356,8 +351,7 @@ describe('Room historical bubbles are never collapsed (always full body, no elli
       if (url.includes('/whoami')) return json(SELF);
       if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
       if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
-      if (url.includes('/drafts')) return json({ items: [] });
-      if (url.endsWith('/messages')) return json({ items: [msg], nextBefore: null });
+        if (url.endsWith('/messages')) return json({ items: [msg], nextBefore: null });
       if (url.endsWith('/status')) return json({ items: [], presence: { online: [OTHER.id] } });
       if (/\/rooms\/room_abc$/.test(url)) return json(room);
       return errorJson('not_found', 404);

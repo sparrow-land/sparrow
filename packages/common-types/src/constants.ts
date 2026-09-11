@@ -9,9 +9,6 @@ export const MAX_BODY_BYTES = 64 * 1024;
 /** Maximum number of attachments on a single message. */
 export const MAX_ATTACHMENTS = 8;
 
-/** Maximum number of saved drafts per (room, authoring member). */
-export const DRAFTS_PER_ROOM_MAX = 50;
-
 /** Maximum size of a single attachment in bytes. */
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 

@@ -41,7 +41,6 @@ vi.mock('../lib/roomStreams.js', () => ({
     },
   },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -123,7 +122,6 @@ function stubRoom(opts: Opts = {}) {
     }
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: opts.inbox ?? [], nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     const claw = url.match(/\/messages\/([^/]+)\/clawback$/);
     if (claw && method === 'POST') {
       const id = claw[1]!;

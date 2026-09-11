@@ -24,10 +24,6 @@ describe('draftKey', () => {
     expect(draftKey('org_2', 'room_a')).toBe('sparrow:draft:org_2:room_a');
     expect(draftKey('org_1', 'room_a')).not.toBe(draftKey('org_2', 'room_a'));
   });
-
-  it('is distinct from the legacy server-draft-queue key', () => {
-    expect(draftKey('org_1', 'room_a').startsWith('sparrow:drafts')).toBe(false);
-  });
 });
 
 describe('load / save / clear', () => {

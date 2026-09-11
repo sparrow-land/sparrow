@@ -33,7 +33,6 @@ vi.mock('../lib/roomStreams.js', () => ({
     },
   },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -102,7 +101,6 @@ function stubRoom(initial: Message[], inbox: InboxItem[] = []) {
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF, BOT], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: state.inbox, nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     const st = url.match(/\/messages\/([^/]+)\/status$/);
     if (st) {
       return json({ id: st[1]!, kind: 'broadcast', createdAt: '2026-08-20T10:05:00Z', recipients: [] });

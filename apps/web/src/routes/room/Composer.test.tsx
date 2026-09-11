@@ -3,8 +3,6 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   Composer,
-  isMac,
-  modKeyLabel,
   nextComposerHeight,
   COMPOSER_MIN_HEIGHT_PX,
   COMPOSER_MAX_HEIGHT_PX,
@@ -29,9 +27,6 @@ function setup(overrides: Partial<React.ComponentProps<typeof Composer>> = {}) {
     value: 'hello',
     onChange: vi.fn(),
     onSend: vi.fn(),
-    onDraft: vi.fn(),
-    onOpenDrafts: vi.fn(),
-    draftCount: 0,
     canCompose: true,
     sending: false,
     sendError: null,
@@ -43,73 +38,25 @@ function setup(overrides: Partial<React.ComponentProps<typeof Composer>> = {}) {
   return props;
 }
 
-describe('platform helpers', () => {
-  it('detects mac from platform/userAgent', () => {
-    expect(isMac({ platform: 'MacIntel', userAgent: '' })).toBe(true);
-    expect(isMac({ platform: 'Win32', userAgent: 'Mozilla' })).toBe(false);
-    expect(isMac({ platform: '', userAgent: 'iPhone' })).toBe(true);
-  });
-  it('labels the modifier per platform', () => {
-    expect(modKeyLabel({ platform: 'MacIntel', userAgent: '' })).toBe('⌘');
-    expect(modKeyLabel({ platform: 'Linux x86_64', userAgent: '' })).toBe('Ctrl');
-  });
-});
-
-describe('Composer drafts', () => {
-  it('has a Draft button that enqueues the current text', async () => {
-    const { onDraft } = setup();
-    await userEvent.click(screen.getByRole('button', { name: 'Draft' }));
-    expect(onDraft).toHaveBeenCalledTimes(1);
-  });
-
-  it('disables the Draft button when the composer is empty', () => {
-    setup({ value: '   ' });
-    expect(screen.getByRole('button', { name: 'Draft' })).toBeDisabled();
-  });
-
-  it('Cmd/Ctrl+Enter enqueues a draft (not a send)', () => {
-    const { onDraft, onSend } = setup();
-    const ta = screen.getByRole('textbox');
-    fireEvent.keyDown(ta, { key: 'Enter', metaKey: true });
-    expect(onDraft).toHaveBeenCalledTimes(1);
-    expect(onSend).not.toHaveBeenCalled();
-
-    fireEvent.keyDown(ta, { key: 'Enter', ctrlKey: true });
-    expect(onDraft).toHaveBeenCalledTimes(2);
-  });
-
-  it('Cmd/Ctrl+Shift+Enter opens the drafts modal', () => {
-    const { onOpenDrafts, onDraft, onSend } = setup();
-    const ta = screen.getByRole('textbox');
-    fireEvent.keyDown(ta, { key: 'Enter', metaKey: true, shiftKey: true });
-    expect(onOpenDrafts).toHaveBeenCalledTimes(1);
-    expect(onDraft).not.toHaveBeenCalled();
-    expect(onSend).not.toHaveBeenCalled();
-  });
-
-  it('plain Enter still sends; Shift+Enter still makes a newline', () => {
-    const { onSend, onDraft } = setup();
+describe('Composer keys', () => {
+  it('plain Enter sends; Shift+Enter makes a newline', () => {
+    const { onSend } = setup();
     const ta = screen.getByRole('textbox');
     fireEvent.keyDown(ta, { key: 'Enter' });
     expect(onSend).toHaveBeenCalledTimes(1);
 
     fireEvent.keyDown(ta, { key: 'Enter', shiftKey: true });
     expect(onSend).toHaveBeenCalledTimes(1); // unchanged
-    expect(onDraft).not.toHaveBeenCalled();
   });
 
-  it('hides the drafts link at 0 and shows a count when > 0', () => {
-    const { rerender } = renderWithRerender({ draftCount: 0 });
-    expect(screen.queryByRole('button', { name: /drafts/i })).toBeNull();
-    rerender({ draftCount: 3 });
-    expect(screen.getByRole('button', { name: /drafts \(3\)/i })).toBeInTheDocument();
-  });
-
-  it('clicking the drafts link opens the modal', async () => {
-    const onOpenDrafts = vi.fn();
-    setup({ draftCount: 2, onOpenDrafts });
-    await userEvent.click(screen.getByRole('button', { name: /drafts \(2\)/i }));
-    expect(onOpenDrafts).toHaveBeenCalledTimes(1);
+  // Cmd/Ctrl+Enter used to queue a draft. With the draft queue gone it is the
+  // conventional "send" chord rather than a dead key.
+  it('Cmd/Ctrl+Enter sends', () => {
+    const { onSend } = setup();
+    const ta = screen.getByRole('textbox');
+    fireEvent.keyDown(ta, { key: 'Enter', metaKey: true });
+    fireEvent.keyDown(ta, { key: 'Enter', ctrlKey: true });
+    expect(onSend).toHaveBeenCalledTimes(2);
   });
 
   // The hotkey hint is decoration that gets hidden at phone widths (it crowds
@@ -127,7 +74,7 @@ describe('Composer drafts', () => {
     setup();
     const hint = screen.getByText(/Enter to send/);
     expect(hint.textContent).toBe(
-      `Enter to send · Shift+Enter for newline · ${modKeyLabel()}+Enter to draft · Esc pulls back your last message`,
+      'Enter to send · Shift+Enter for newline · Esc pulls back your last message',
     );
   });
 });
@@ -160,9 +107,6 @@ describe('Composer autoFocus', () => {
       value: '',
       onChange: vi.fn(),
       onSend: vi.fn(),
-      onDraft: vi.fn(),
-      onOpenDrafts: vi.fn(),
-      draftCount: 0,
       canCompose: false,
       sending: false,
       sendError: null,
@@ -479,9 +423,6 @@ function baseProps(
     value: 'hello',
     onChange: vi.fn(),
     onSend: vi.fn(),
-    onDraft: vi.fn(),
-    onOpenDrafts: vi.fn(),
-    draftCount: 0,
     canCompose: true,
     sending: false,
     sendError: null,
@@ -497,9 +438,6 @@ function renderWithRerender(overrides: Partial<React.ComponentProps<typeof Compo
     value: 'hello',
     onChange: vi.fn(),
     onSend: vi.fn(),
-    onDraft: vi.fn(),
-    onOpenDrafts: vi.fn(),
-    draftCount: 0,
     canCompose: true,
     sending: false,
     sendError: null,

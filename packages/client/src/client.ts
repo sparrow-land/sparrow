@@ -59,8 +59,6 @@ import {
   SetStatusResponseSchema,
   ListStatusesResponseSchema,
   SetPresenceResponseSchema,
-  ListDraftsResponseSchema,
-  CreateDraftResponseSchema,
   MeInboxResponseSchema,
   MeInboxPopResponseSchema,
   InboxEntrySchema,
@@ -168,7 +166,6 @@ import {
   type MemberStatus,
   type ListStatusesResponse,
   type SetPresenceResponse,
-  type Draft,
   type MeInboxResponse,
   type InboxEntry,
   type WorkItem,
@@ -1465,34 +1462,6 @@ export class SparrowClient {
     return this.request('POST', '/me/presence', {
       schema: SetPresenceResponseSchema,
       body: { ttlSeconds },
-    });
-  }
-
-  /* ============================================================ *
-   * Drafts (personal, room-scoped)
-   * ============================================================ */
-
-  /** `GET /rooms/:roomId/drafts` — the caller's own drafts, oldest first. */
-  async listDrafts(roomId: string): Promise<Draft[]> {
-    const res = await this.request('GET', `/rooms/${enc(roomId)}/drafts`, {
-      schema: ListDraftsResponseSchema,
-    });
-    return res.items;
-  }
-
-  /** `POST /rooms/:roomId/drafts` — queue a draft (trimmed server-side); returns it. */
-  async createDraft(roomId: string, text: string): Promise<Draft> {
-    const res = await this.request('POST', `/rooms/${enc(roomId)}/drafts`, {
-      schema: CreateDraftResponseSchema,
-      body: { text },
-    });
-    return res.draft;
-  }
-
-  /** `DELETE /rooms/:roomId/drafts/:draftId` — drop one (unknown/foreign → 404). */
-  deleteDraft(roomId: string, draftId: string): Promise<OkResponse> {
-    return this.request('DELETE', `/rooms/${enc(roomId)}/drafts/${enc(draftId)}`, {
-      schema: OkResponseSchema,
     });
   }
 

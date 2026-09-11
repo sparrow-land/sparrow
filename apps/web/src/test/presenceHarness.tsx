@@ -272,7 +272,6 @@ export function presenceFetch(server: PresenceServer): typeof fetch {
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
     // Room history (`GET /rooms/:id/messages`) — the thread's content source.
     if (url.endsWith('/messages')) return json({ items: [], nextBefore: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     if (url.endsWith('/rooms/room_dm/status')) {
       server.statusCalls += 1;
       return json({ items: [], presence: { online: server.statusOnline } });

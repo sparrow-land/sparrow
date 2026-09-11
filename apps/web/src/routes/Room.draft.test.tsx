@@ -16,7 +16,6 @@ vi.mock('../components/AppShell.js', () => ({
 vi.mock('../lib/roomStreams.js', () => ({
   roomStreams: { subscribe: () => () => {} },
 }));
-vi.mock('../lib/drafts.js', () => ({ migrateLocalDrafts: async () => 0 }));
 
 import { useFetch, restoreFetch, json, errorJson } from '../test/apiStub.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
@@ -80,7 +79,6 @@ function stubRooms(opts: { sendStatus?: number } = {}): { calls: Call[] } {
     if (url.includes('/whoami')) return json(SELF);
     if (url.includes('/members')) return json({ items: [SELF], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
-    if (url.includes('/drafts')) return json({ items: [] });
     if (url.endsWith('/messages/status')) return json({ items: [] });
     if (url.endsWith('/messages') && method === 'GET') return json({ items: [], nextBefore: null });
     if (url.endsWith('/messages') && method === 'POST') {
