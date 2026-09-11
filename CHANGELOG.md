@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.26] — 2026-09-11
+
 ### Added
 
 - **A half-written message now survives leaving the conversation.** Start typing in a
