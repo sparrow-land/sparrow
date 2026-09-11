@@ -241,11 +241,17 @@ describe('sparrow await — termination stamps the heartbeat', () => {
 
     const { code } = await l.ended;
     // Either the signal arrived first (143) or the listener had already noticed
-    // it was superseded and stood down (4) — both must leave the successor's
-    // heartbeat untouched.
+    // it was superseded and stood down (4). Both must leave the successor's
+    // heartbeat free of any DEAD stamp. One thing IS allowed: the old listener's
+    // periodic live touch can land in the window between the successor's publish
+    // and its next ownership check — that claim carries the OLD generation's
+    // nonce, which every reader discards (see await-owner.ts), so it is noise,
+    // not a false-dead. It must never carry the successor's nonce.
     expect([143, 4]).toContain(code);
-    expect(heartbeat(l.stateDir)).toBe('await');
-    expect(heartbeat(l.stateDir)).not.toMatch(/killed|stopped/);
+    const hb = heartbeat(l.stateDir);
+    expect(hb).toMatch(/^await( [0-9a-f]{16})?$/);
+    expect(hb).not.toContain('cafebabecafebabe');
+    expect(hb).not.toMatch(/killed|stopped/);
     expect(l.stdout().trim()).toBe(''); // and never a wake line
   }, 40_000);
 
