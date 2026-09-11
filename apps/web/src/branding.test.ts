@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -51,6 +51,36 @@ describe('web app manifest + icons', () => {
 
   it('favicon.svg exists in public/', () => {
     expect(existsSync(resolve(publicDir, 'favicon.svg'))).toBe(true);
+    expect(readFileSync(resolve(publicDir, 'favicon.svg'))).toEqual(
+      readFileSync(resolve(publicDir, 'brand/favicon.svg')),
+    );
+  });
+
+  it('ships non-empty raster icons for browser and installed-app surfaces', () => {
+    for (const icon of ['icon-180.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png']) {
+      expect(statSync(resolve(publicDir, 'icons', icon)).size, `${icon} looks blank`).toBeGreaterThan(1_000);
+    }
+  });
+
+  it('ships every generated PNG at its declared pixel dimensions', () => {
+    const icons = [16, 32, 48, 128, 180, 192, 256, 512, 1024];
+    for (const size of icons) {
+      const png = readFileSync(resolve(publicDir, 'icons', `icon-${size}.png`));
+      expect(png.subarray(1, 4).toString()).toBe('PNG');
+      expect(png.readUInt32BE(16)).toBe(size);
+      expect(png.readUInt32BE(20)).toBe(size);
+    }
+
+    const maskable = readFileSync(resolve(publicDir, 'icons/icon-maskable-512.png'));
+    expect(maskable.readUInt32BE(16)).toBe(512);
+    expect(maskable.readUInt32BE(20)).toBe(512);
+    expect(maskable).not.toEqual(readFileSync(resolve(publicDir, 'icons/icon-512.png')));
+  });
+
+  it('index.html uses the canonical brand favicon without embedded duplicate geometry', () => {
+    const html = readFileSync(resolve(pkgRoot, 'index.html'), 'utf8');
+    expect(html).toMatch(/rel="icon"\s+type="image\/svg\+xml"\s+href="\/brand\/favicon\.svg"/);
+    expect(html).not.toContain('data:image/svg+xml');
   });
 
   it('index.html links the manifest and an apple-touch-icon', () => {

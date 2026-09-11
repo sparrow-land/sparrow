@@ -15,6 +15,7 @@ import { MySettings } from './routes/MySettings.js';
 import { Login } from './routes/Login.js';
 import { Invite } from './routes/Invite.js';
 import { NotFound } from './routes/NotFound.js';
+import { AvatarGallery } from './routes/AvatarGallery.js';
 import { NotMember } from './routes/NotMember.js';
 import { DocsRedirect } from './routes/docs/DocsRedirect.js';
 import { DOCS_ROOT } from './routes/docs/paths.js';
@@ -185,6 +186,7 @@ function MeLayout({ scope = null }: { scope?: Scope | null }) {
 function ScopedRoutes({ scope }: { scope: Scope }) {
   return (
     <Routes>
+      {import.meta.env.DEV && <Route path="/__dev/avatars" element={<AvatarGallery />} />}
       <Route path="/login" element={<Login />} />
       <Route path="/invite/:token" element={<Invite />} />
       {docsRoutes}
@@ -222,6 +224,7 @@ function AppRoutes({ scope }: { scope: Scope | null }) {
   if (auth.booting) {
     return (
       <Routes>
+        {import.meta.env.DEV && <Route path="/__dev/avatars" element={<AvatarGallery />} />}
         {docsRoutes}
         <Route path="*" element={null} />
       </Routes>
@@ -236,6 +239,7 @@ function AppRoutes({ scope }: { scope: Scope | null }) {
   // remounting the shared docs/route subtree.
   return (
     <Routes>
+      {import.meta.env.DEV && <Route path="/__dev/avatars" element={<AvatarGallery />} />}
       <Route path="/" element={<Home />} />
       <Route path="/welcome" element={<Welcome />} />
       <Route path="/org/:orgId" element={<OrgLayout />}>

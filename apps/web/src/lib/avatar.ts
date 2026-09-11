@@ -1,8 +1,6 @@
 /**
- * Deterministic procedural avatar generation — the owner-approved scheme
- * (agents = scheme A "brand bird recoloured"; humans = scheme 1 "initials on a
- * warm two-stop gradient"). Ported faithfully from the concept page's hash / RNG
- * / colour code.
+ * Deterministic avatar generation (agents = painterly Sparrow base art on a
+ * curated flat field; humans = initials on a warm two-stop gradient).
  *
  * This module is PURE and unit-testable: given an id/name it returns plain data
  * (colour stops, a pose flip, initials, a contrast-safe gradient). The React
@@ -10,8 +8,8 @@
  * the gradient ids per instance with `useId` (SVG gradient-id collisions across
  * instances were a lesson learned previously).
  *
- * Same id/name always yields the same avatar; different ids spread across the
- * full hue wheel (agents) or the warm "dawn" arc, pink → gold (humans).
+ * Same id/name always yields the same avatar. Agent slot catalogs are explicitly
+ * versioned so a future art expansion can preserve this pilot's assignments.
  */
 
 /* ------------------------------------------------------------------ *
@@ -103,27 +101,57 @@ export function initials(name: string): string {
 }
 
 /* ------------------------------------------------------------------ *
- * Agents — scheme A: the brand songbird, recoloured.
+ * Agents — Sparrow v2 pilot: whole-bird art + flat background.
  * ------------------------------------------------------------------ */
 
-/** Three dawn-style stops (warm-shift top, cool-shift bottom) for a base hue. */
-export function dawnStops(baseH: number): [string, string, string] {
-  return [hslToHex(baseH + 16, 84, 64), hslToHex(baseH, 78, 56), hslToHex(baseH - 26, 62, 48)];
+export const AGENT_AVATAR_MANIFEST = {
+  version: 'sparrow-v2',
+  slots: {
+    base: {
+      version: 1,
+      entries: [
+        { id: 'base-1', src: '/avatars/sparrow-v2/base-1.webp' },
+        { id: 'base-2', src: '/avatars/sparrow-v2/base-2.webp' },
+        { id: 'base-3', src: '/avatars/sparrow-v2/base-3.webp' },
+      ],
+    },
+    background: {
+      version: 1,
+      entries: [
+        { id: 'marigold', color: '#E7BF72' },
+        { id: 'sky', color: '#9DC3D0' },
+        { id: 'coral', color: '#DCA18F' },
+        { id: 'leaf', color: '#9DB69B' },
+        { id: 'plum', color: '#B6A2BC' },
+        { id: 'clay', color: '#C8A085' },
+      ],
+    },
+  },
+} as const;
+
+// Entry order and cardinality are frozen within each slot version because the
+// selector uses modulo indexing. Expanding or reordering a catalog requires a
+// new slot version (and an explicit migration decision), never an in-place edit.
+function traitIndex(id: string, slot: 'base' | 'background', slotVersion: number, length: number): number {
+  return xmur3(`${AGENT_AVATAR_MANIFEST.version}:${slot}:v${slotVersion}:${id}`)() % length;
 }
 
 export interface AgentVisual {
-  /** Gradient stops top→bottom. */
-  stops: [string, string, string];
-  /** Subtle left/right pose flip. */
-  flip: boolean;
+  version: typeof AGENT_AVATAR_MANIFEST.version;
+  base: (typeof AGENT_AVATAR_MANIFEST.slots.base.entries)[number];
+  background: (typeof AGENT_AVATAR_MANIFEST.slots.background.entries)[number];
 }
 
-/** Deterministic plumage + pose for an agent id (continuous per-id hue). */
+/** Deterministic whole-bird base + backdrop for a stable agent principal id. */
 export function agentVisual(id: string): AgentVisual {
-  const r = makeRng(id);
-  const baseH = r() * 360; // continuous hue — no bucket collisions
-  const flip = r() < 0.5;
-  return { stops: dawnStops(baseH), flip };
+  const { base, background } = AGENT_AVATAR_MANIFEST.slots;
+  return {
+    version: AGENT_AVATAR_MANIFEST.version,
+    base: base.entries[traitIndex(id, 'base', base.version, base.entries.length)]!,
+    background: background.entries[
+      traitIndex(id, 'background', background.version, background.entries.length)
+    ]!,
+  };
 }
 
 /* ------------------------------------------------------------------ *

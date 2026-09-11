@@ -14,6 +14,13 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Changed
+
+- Agent avatars now use deterministic painterly Sparrow art: three bird bases
+  paired with six backgrounds, stable across rooms. Human avatars are unchanged.
+- The app logo, favicon, and install icons use the approved paper-wing Sparrow
+  mark, with a light tile that remains visible on dark surfaces.
+
 ## [0.1.28] — 2026-09-11
 
 ### Removed

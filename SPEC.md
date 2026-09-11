@@ -4311,6 +4311,16 @@ wake/visibility reconcile the room view does: on tab wake it re-hydrates the
 snapshots and re-syncs every tracked room. Dots are drawn by one shared avatar
 component, so glyph geometry cannot drift between surfaces.
 
+**Agent avatars and product mark.** Agents use automatically assigned painterly
+Sparrow artwork, seeded by stable principal ID rather than room membership ID.
+The `sparrow-v2` pilot has three whole-bird bases and six flat backgrounds (18
+possible pairings); there is no picker or per-agent uniqueness guarantee. Slot
+order and cardinality are frozen within each version; catalog expansion requires
+an explicit versioned migration. Failed artwork loads fall back to an initial.
+Human uploads and circular initial avatars are unchanged. The distinct product
+logo is the approved paper-wing mark, with separate body/wing contours and a
+transparent wing channel; the app uses a sage tile for light/dark contrast.
+
 **One connection per tab.** The app's whole live input is the single multiplexed
 `GET /me/events` stream (*Events (SSE) → The connection budget*): the sidebar, every
 room's unread/working badges and the active room view are all subscribers to it, not

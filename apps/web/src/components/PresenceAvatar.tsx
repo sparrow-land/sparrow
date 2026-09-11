@@ -29,7 +29,7 @@ export function PresenceAvatar({
   /** Stable principal id (`usr_…`/`agt_…`) — seeds the deterministic avatar. */
   id: string;
   displayName: string;
-  /** Human image URL; ignored for agents (they render the procedural bird). */
+  /** Human image URL; ignored for agents (they render assigned Sparrow art). */
   avatarUrl?: string | null;
   /** Avatar pixel size; the dot geometry is size-independent. */
   size?: number;

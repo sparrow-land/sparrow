@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="7" fill="#edf3e7"/>
-  <g transform="translate(2 5.56) scale(.061947)">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Sparrow">
+  <rect width="64" height="64" rx="14" fill="#edf3e7"/>
+  <g transform="translate(4 11.12) scale(.123894)">
     <path fill="#25483f" fill-rule="evenodd" d="M0 323C24 295 69 249 95 226c20 16 47 31 77 36 12-2 35-25 55-42l51-52c18-21 33-44 37-50 1-2 0-3-1-3L180 96C210 55 255 3 307 0c43-3 82 18 99 52 16 5 32 14 46 22v2c-18 9-35 20-50 30 6 27 10 56 8 83-3 47-24 87-60 115-31 25-69 36-119 32-41-3-77-20-106-40h-4C88 308 49 322 0 323ZM330 74a17 17 0 1 0 34 0 17 17 0 1 0-34 0Z"/>
     <path fill="#25483f" d="M4 86 291 128c-27 32-76 83-123 119C100 225 36 168 4 86Z"/>
   </g>

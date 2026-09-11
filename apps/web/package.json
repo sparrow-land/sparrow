@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc -b --noEmit",
+    "generate-icons": "node scripts/generate-icons.mjs",
     "prerender-docs": "node scripts/prerender-docs.mjs"
   },
   "dependencies": {

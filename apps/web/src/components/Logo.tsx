@@ -1,5 +1,3 @@
-import { useId } from 'react';
-
 /**
  * The songbird body outline (beak integrated as the leading point), in the
  * mark's 64×64 space. Exported so other art (see {@link LoopModeArt}) draws the
@@ -20,47 +18,19 @@ interface MarkProps {
 }
 
 /**
- * The sparrow logomark: a gradient songbird (warm gold → orange → magenta) on a
- * dark rounded tile. Colors are baked into the mark, so it reads consistently on
- * any surface and stays crisp from 16px favicons to large hero art. The gradient
- * id is namespaced with `useId` so several instances on one page never collide.
+ * The canonical sparrow logomark. Keeping the geometry in a public brand asset
+ * gives the app, website, and downloadable artwork one source of truth.
  */
 export function Mark({ size = 24, className = '' }: MarkProps) {
-  const gid = `sparrow-mark-${useId().replace(/[:]/g, '')}`;
   return (
-    <svg
+    <img
+      src="/brand/sparrow-icon.svg"
       width={size}
       height={size}
-      viewBox="0 0 64 64"
+      alt=""
       aria-hidden="true"
       className={className}
-    >
-      <defs>
-        <linearGradient id={gid} x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#f2c14e" />
-          <stop offset=".5" stopColor="#e8703a" />
-          <stop offset="1" stopColor="#c8456b" />
-        </linearGradient>
-      </defs>
-      {/* dark rounded tile */}
-      <rect width="64" height="64" rx="15" fill="#16161f" />
-      {/* songbird body (beak integrated as the leading point) */}
-      <path
-        fill={`url(#${gid})`}
-        d={SONGBIRD_PATH}
-      />
-      {/* folded-wing overlay */}
-      <path
-        fill="#12121a"
-        opacity=".18"
-        d="M24 29 C30 26 39 28 44 34 C41 39 33 41 27 38 C25 35 24 32 24 29 Z"
-      />
-      {/* eye */}
-      <circle cx="21" cy="29" r="2.1" fill="#12121a" />
-      {/* legs */}
-      <line x1="24" y1="46" x2="22" y2="55" stroke="#e8703a" strokeWidth="2.2" strokeLinecap="round" />
-      <line x1="31" y1="47" x2="31" y2="56" stroke="#e8703a" strokeWidth="2.2" strokeLinecap="round" />
-    </svg>
+    />
   );
 }
 
@@ -111,7 +81,7 @@ interface LogoProps {
   markOnly?: boolean;
 }
 
-/** sparrow logomark (songbird mark) + lowercase "sparrow" wordmark. */
+/** sparrow logomark + lowercase "sparrow" wordmark. */
 export function Logo({ size = 22, className = '', markOnly = false }: LogoProps) {
   return (
     <span className={`inline-flex items-center gap-2 ${className}`.trim()}>

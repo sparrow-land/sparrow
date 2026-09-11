@@ -27,8 +27,11 @@ describe('avatar generators — determinism', () => {
 });
 
 describe('avatar generators — distinctness', () => {
-  it('two different agent ids get different hues (different stops)', () => {
-    expect(agentVisual('agt_atlas').stops).not.toEqual(agentVisual('agt_nova').stops);
+  it('returns versioned catalog traits', () => {
+    const visual = agentVisual('agt_atlas');
+    expect(visual.version).toBe('sparrow-v2');
+    expect(visual.base.id).toMatch(/^base-[123]$/);
+    expect(visual.background.color).toMatch(/^#[0-9A-F]{6}$/);
   });
 
   it('two different human ids get different gradients', () => {
@@ -39,12 +42,14 @@ describe('avatar generators — distinctness', () => {
     expect([a.top, a.bottom]).not.toEqual([b.top, b.bottom]);
   });
 
-  it('agents spread across the wheel — a sample of ids yields many distinct hues', () => {
-    const tops = new Set(
-      Array.from({ length: 24 }, (_, i) => agentVisual(`agt_${i}`).stops[1]),
+  it('agent ids spread across several honest base/background combinations', () => {
+    const combinations = new Set(
+      Array.from({ length: 24 }, (_, i) => {
+        const visual = agentVisual(`agt_${i}`);
+        return `${visual.base.id}:${visual.background.id}`;
+      }),
     );
-    // No accidental bucketing: nearly all of the 24 are unique.
-    expect(tops.size).toBeGreaterThanOrEqual(22);
+    expect(combinations.size).toBeGreaterThanOrEqual(8);
   });
 });
 
