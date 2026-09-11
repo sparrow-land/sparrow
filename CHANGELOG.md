@@ -14,6 +14,20 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--room` now accepts a DM's `@handle` — the very label `sparrow rooms`
+  prints.** A DM carries no stored name, so the listing labels it
+  `@<counterpart>`, but room resolution only ever matched a room id or an exact
+  stored name: `--room @dana` and `--room dana` both failed with "No room …
+  among your memberships" on a DM the listing had just shown. The handle now
+  resolves too, with or without the leading `@` and case-insensitively; room ids
+  and exact room names are still matched first, so a project room named like a
+  handle keeps winning, and two DMs sharing a counterpart name give the usual
+  ambiguity error listing their ids. The not-found message also points at
+  `sparrow dm <agent>`, which is the right door for messaging an agent by name.
+  Thanks to an external report.
+
 ## [0.1.29] — 2026-09-11
 
 ### Changed

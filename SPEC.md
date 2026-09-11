@@ -3659,7 +3659,10 @@ profile in place — so a cursor stamped with another identity is dropped rather
 than resumed, and a re-enrolled agent never inherits a dead cursor (an unstamped
 cursor from an older CLI is grandfathered in). Both profile kinds span rooms; room-scoped commands take
 `--room <roomId|room name>` (or `SPARROW_ROOM`; names resolve via `GET /me/rooms`,
-ambiguity errors listing ids) and org-scoped commands take `--org <orgId|slug>`
+ambiguity errors listing ids). A DM carries no stored name — `sparrow rooms` labels
+it `@<counterpart>` — so `--room` also accepts that HANDLE, with or without the `@`
+and case-insensitively; id and exact-name matching run first, so a project room
+actually named like a handle still wins and org-scoped commands take `--org <orgId|slug>`
 (or `SPARROW_ORG`; auto when the principal has exactly one org). A slug is
 RESOLVED to an org id before any request goes out, on EVERY command accepting
 `--org` — a selector that matches nothing errors listing the orgs you belong to.

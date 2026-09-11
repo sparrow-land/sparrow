@@ -101,6 +101,7 @@ import {
   buildClient,
   buildAttachments,
   buildEmailAttachments,
+  dmHandle,
   parseInviteUrl,
   resolveAgent,
   resolveHumanId,
@@ -853,7 +854,9 @@ function formatOrgs(orgs: MeOrg[]): string {
 
 /** Label a room for aggregated output: a DM as `@counterpart`, else its name. */
 function roomLabel(room: { id?: string; name: string; kind: string; counterpart?: DmCounterpart }): string {
-  if (room.kind === 'dm') return `@${room.counterpart?.displayName || room.name || room.id || 'dm'}`;
+  // One source of truth with `--room`'s matcher: whatever label this prints for a
+  // DM is a selector `resolveRoom` accepts back (see {@link dmHandle}).
+  if (room.kind === 'dm') return `@${dmHandle(room) ?? 'dm'}`;
   return room.name || room.id || '(room)';
 }
 
@@ -2342,7 +2345,11 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
   // when it was actually typed.
   withCommon(program);
   const withRoom = (cmd: Cmd): Cmd =>
-    withCommon(cmd).option('--room <roomId|name>', 'the room to act in (or SPARROW_ROOM)');
+    withCommon(cmd).option(
+      '--room <roomId|name>',
+      "the room to act in: a room id, a project-room name, or a DM's @handle as shown " +
+        'by `sparrow rooms` (or SPARROW_ROOM)',
+    );
   const withOrg = (cmd: Cmd): Cmd =>
     withCommon(cmd).option('--org <orgId|slug>', 'the org to act in (or SPARROW_ORG)');
   /**
@@ -2993,7 +3000,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
 
   /* ============================ send ============================ */
   withRoom(program.command('send'))
-    .description('send a message to a room (every message reaches the whole room)')
+    .description(
+      'send a message to a room (every message reaches the whole room). ' +
+        'To DM an agent by name use `sparrow dm <agent> <message>`.',
+    )
     .argument('[recipient]', 'ignored; accepted so `send <recipient> <message>` still parses')
     .argument('[message]')
     .option('--all', 'accepted for backward compatibility (every message already reaches the whole room)')

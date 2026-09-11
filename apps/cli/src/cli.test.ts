@@ -2625,6 +2625,122 @@ describe('sparrow CLI — DMs and principal inbox', () => {
 });
 
 /* ================================================================== *
+ * `--room` accepts a DM's @handle — the very label `sparrow rooms` prints
+ * ================================================================== */
+
+describe('sparrow CLI — --room accepts a DM @handle', () => {
+  /**
+   * A stub serving only `GET /me/rooms`, so DM label COLLISIONS can be staged:
+   * the real server keeps agent names unique per org, and the ambiguity rule has
+   * to hold anyway (two orgs, a renamed human, …).
+   */
+  async function roomsStub(items: unknown[]): Promise<{ url: string; close: () => Promise<void> }> {
+    const server = http.createServer((req, res) => {
+      if ((req.url ?? '').startsWith('/api/v1/me/rooms')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ items }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'not_found', message: 'Not found' } }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const addr = server.address() as AddressInfo;
+    return {
+      url: `http://127.0.0.1:${addr.port}`,
+      close: () =>
+        new Promise<void>((r) => {
+          server.closeAllConnections?.();
+          server.close(() => r());
+        }),
+    };
+  }
+
+  const dmRow = (id: string, displayName: string): unknown => ({
+    room: {
+      id,
+      name: '',
+      orgId: 'org_stub',
+      kind: 'dm',
+      archivedAt: null,
+      counterpart: { type: 'agent', id: `agt_${id}`, displayName, avatarUrl: null },
+    },
+    memberId: `mem_${id}`,
+    roomRole: 'member',
+  });
+
+  /** Owner + an agent profile that shares a DM with the owner (displayName `Owner`). */
+  async function dmFixture(prefix: string): Promise<{ owner: Owner; dmRoomId: string; agentId: string }> {
+    const owner = await boot(`${prefix}@x.com`);
+    const agent = await makeAgent(owner, `${prefix}-bot`);
+    const dm = await owner.client.ensureDm({ principal: agent.id });
+    await runCli(['login-agent', agent.key, '--server', url], env, capture().io);
+    return { owner, dmRoomId: dm.room.id, agentId: agent.id };
+  }
+
+  it('resolves a DM by the @handle `sparrow rooms` prints', async () => {
+    const { owner, dmRoomId } = await dmFixture('rh1');
+    await owner.client.sendMessage(dmRoomId, { body: 'in the dm' });
+    const cap = capture();
+    expect(await runCli(['log', '--room', '@Owner', '--json'], env, cap.io)).toBe(0);
+    expect(JSON.parse(cap.out()).items.map((m: any) => m.body)).toContain('in the dm');
+  });
+
+  it('resolves a DM by a bare handle, case-insensitively', async () => {
+    const { owner, dmRoomId } = await dmFixture('rh2');
+    await owner.client.sendMessage(dmRoomId, { body: 'bare handle' });
+    const cap = capture();
+    expect(await runCli(['log', '--room', 'owner', '--json'], env, cap.io)).toBe(0);
+    expect(JSON.parse(cap.out()).items.map((m: any) => m.body)).toContain('bare handle');
+  });
+
+  it('a project room named like a handle still wins by exact name', async () => {
+    // Exact-name resolution runs FIRST: a DM handle never shadows a real room name.
+    const { owner, dmRoomId, agentId } = await dmFixture('rh3');
+    const room = await owner.client.createRoom(owner.orgId, { name: 'Owner' });
+    await owner.client.addMember(room.id, agentId);
+    await owner.client.sendMessage(dmRoomId, { body: 'in the dm' });
+    await owner.client.sendMessage(room.id, { body: 'in the project room' });
+    const cap = capture();
+    expect(await runCli(['log', '--room', 'Owner', '--json'], env, cap.io)).toBe(0);
+    const bodies = JSON.parse(cap.out()).items.map((m: any) => m.body);
+    expect(bodies).toContain('in the project room');
+    expect(bodies).not.toContain('in the dm');
+  });
+
+  it('two DMs with the same counterpart name are ambiguous, listing both room ids', async () => {
+    const stub = await roomsStub([dmRow('room_twinA', 'Twin'), dmRow('room_twinB', 'Twin')]);
+    try {
+      const e = { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub' };
+      const cap = capture();
+      expect(await runCli(['log', '--room', '@Twin'], e, cap.io)).not.toBe(0);
+      expect(cap.err()).toContain('Ambiguous room name "@Twin"');
+      expect(cap.err()).toContain('room_twinA');
+      expect(cap.err()).toContain('room_twinB');
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it('an unknown --room selector points the caller at `sparrow dm`', async () => {
+    await dmFixture('rh5');
+    const cap = capture();
+    expect(await runCli(['log', '--room', '@nobody'], env, cap.io)).not.toBe(0);
+    expect(cap.err()).toContain('No room "@nobody" among your memberships.');
+    expect(cap.err()).toContain('Run `sparrow rooms` to list them');
+    expect(cap.err()).toContain('sparrow dm <agent>');
+  });
+
+  it('`--room` help and `send --help` name the DM handle and `sparrow dm`', async () => {
+    const cap = capture();
+    await runCli(['send', '--help'], env, cap.io);
+    const help = cap.out() + cap.err();
+    expect(help).toContain("a DM's @handle");
+    expect(help).toContain('sparrow dm <agent> <message>');
+  });
+});
+
+/* ================================================================== *
  * send resolution + reply + use + loop  (new ergonomics)
  * ================================================================== */
 

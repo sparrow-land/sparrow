@@ -197,9 +197,33 @@ export function orgSelector(opts: GlobalOpts, env: Env): string | undefined {
 }
 
 /**
- * Resolve a `--room` / `SPARROW_ROOM` / profile-default selector (a room id or a room
- * name) to a room id. Ids (`room_…`) pass through; names resolve via
- * `GET /me/rooms`, and an ambiguous name errors listing the matching ids.
+ * The handle a DM room is KNOWN by — its counterpart's display name, which is
+ * what `sparrow rooms` prints (as `@handle`) for a room that carries no stored
+ * name of its own. `undefined` for anything that is not a DM.
+ *
+ * One source of truth on purpose: the listing's label and {@link resolveRoom}'s
+ * matcher have to agree, or the CLI prints a selector it then refuses.
+ */
+export function dmHandle(room: {
+  id?: string;
+  name?: string;
+  kind?: string;
+  counterpart?: { displayName?: string };
+}): string | undefined {
+  if (room.kind !== 'dm') return undefined;
+  return room.counterpart?.displayName || room.name || room.id || undefined;
+}
+
+/**
+ * Resolve a `--room` / `SPARROW_ROOM` / profile-default selector (a room id, a room
+ * name, or a DM's `@handle`) to a room id. Ids (`room_…`) pass through; names and
+ * handles resolve via `GET /me/rooms`, and an ambiguous one errors listing the
+ * matching ids.
+ *
+ * Handles exist because a DM has no stored name: `sparrow rooms` lists it as
+ * `@<counterpart>`, so `--room @dana` (or plain `dana`, case-insensitively) must
+ * resolve the room the listing just showed. Id and exact-name matching run FIRST,
+ * so a project room actually named `dana` still wins.
  */
 export async function resolveRoom(client: SparrowClient, opts: GlobalOpts, env: Env): Promise<string> {
   const selector = roomSelector(opts, env);
@@ -213,17 +237,27 @@ export async function resolveRoom(client: SparrowClient, opts: GlobalOpts, env: 
   const rooms = await client.meRooms();
   const byId = rooms.find((r) => r.room.id === selector);
   if (byId) return byId.room.id;
-  const byName = rooms.filter((r) => r.room.name === selector);
-  if (byName.length === 1) return byName[0]!.room.id;
-  if (byName.length > 1) {
-    const ids = byName.map((r) => r.room.id).join(', ');
+  const ambiguous = (matches: typeof rooms): never => {
+    const ids = matches.map((r) => r.room.id).join(', ');
     throw new CliError(
-      `Ambiguous room name "${selector}"; matches ${byName.length} rooms: ${ids}. ` +
+      `Ambiguous room name "${selector}"; matches ${matches.length} rooms: ${ids}. ` +
         'Pass the room id instead.',
     );
-  }
+  };
+  const byName = rooms.filter((r) => r.room.name === selector);
+  if (byName.length === 1) return byName[0]!.room.id;
+  if (byName.length > 1) ambiguous(byName);
+  // Nothing named that — try the DM handles `sparrow rooms` prints, with or
+  // without the leading `@` the listing shows.
+  const handle = selector.replace(/^@/, '').toLowerCase();
+  const byHandle = handle
+    ? rooms.filter((r) => dmHandle(r.room)?.toLowerCase() === handle)
+    : [];
+  if (byHandle.length === 1) return byHandle[0]!.room.id;
+  if (byHandle.length > 1) ambiguous(byHandle);
   throw new CliError(
-    `No room "${selector}" among your memberships. Run \`sparrow rooms\` to list them.`,
+    `No room "${selector}" among your memberships. Run \`sparrow rooms\` to list them; ` +
+      'to message an agent by name use `sparrow dm <agent>`.',
   );
 }
 
