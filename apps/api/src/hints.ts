@@ -978,8 +978,15 @@ export function setHintLevel(ctx: AppContext, principal: PrincipalIdent, level: 
  * `control-your-hints`. Hint ids themselves never contain a `:`.
  */
 export function deliveryCount(ctx: AppContext, principal: PrincipalIdent): number {
+  // DISTINCT belongs in the DATABASE here. The ledger is append-only, so one
+  // row per telling accumulates for the life of the agent, while the answer is
+  // bounded by the number of ledger KEYS (a dozen) — de-duplicating in JS would
+  // read the entire history on every pause to arrive at the same small number.
+  // The second de-duplication below is not redundant: a versioned ledger key
+  // (`refresh-your-role:<updatedAt>`) is many keys for one hint, and the count
+  // asks about hints.
   const rows = ctx.db
-    .select({ hintId: hintDeliveries.hintId })
+    .selectDistinct({ hintId: hintDeliveries.hintId })
     .from(hintDeliveries)
     .where(
       and(

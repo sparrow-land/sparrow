@@ -299,6 +299,20 @@ describe('hint-ledger query plans', () => {
         sql.includes('"hint_id" = ?') &&
         sql.includes('order by'),
     );
+    // `control-your-hints` asks how many DISTINCT hints this principal has ever
+    // been told, and it asks on every pause. The ledger is append-only, so that
+    // question must be answered BY THE DATABASE off the index: reading every
+    // historical row back into JS to de-duplicate it there is a read that grows
+    // for the life of the agent.
+    pick(
+      'metaCount',
+      (sql) =>
+        sql.includes('from "hint_deliveries"') &&
+        sql.includes('"hint_id"') &&
+        !sql.includes('"hint_id" = ?') &&
+        !sql.includes('"id" = ?') &&
+        !sql.includes('"resolved_at"'),
+    );
 
     sqlite = new Database(`${ts.dataDir}/sparrow.db`);
   }, 30_000);
@@ -323,5 +337,16 @@ describe('hint-ledger query plans', () => {
     // rowid tail IS the ordering the cooldown asks for, so SQLite reads the index
     // backwards and stops at the first row instead of sorting every telling.
     expect(detail.join('\n')).not.toContain('USE TEMP B-TREE FOR ORDER BY');
+  });
+
+  it('the meta count de-duplicates in SQL — it never materializes the whole ledger', () => {
+    // The regression this guards is the one append-only introduced: the count
+    // used to be bounded by the number of DISTINCT ledger keys (a dozen), and
+    // became one row per TELLING, forever, pulled into JS to be de-duplicated
+    // there. Pushing DISTINCT down restores the original bound.
+    expect(captured.get('metaCount')!.sql.toLowerCase()).toContain('select distinct');
+    const detail = plan('metaCount');
+    expect(detail.join('\n')).toContain('hint_deliveries_principal_hint');
+    expect(detail.some((d) => /^SCAN hint_deliveries\b/.test(d))).toBe(false);
   });
 });
