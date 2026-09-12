@@ -340,10 +340,11 @@ describe('hint-ledger query plans', () => {
   });
 
   it('the meta count de-duplicates in SQL — it never materializes the whole ledger', () => {
-    // The regression this guards is the one append-only introduced: the count
-    // used to be bounded by the number of DISTINCT ledger keys (a dozen), and
-    // became one row per TELLING, forever, pulled into JS to be de-duplicated
-    // there. Pushing DISTINCT down restores the original bound.
+    // The regression this guards is the one append-only introduced: the rows
+    // crossing into JS went from one per DISTINCT ledger key to one per
+    // TELLING, forever. DISTINCT puts that back. It does NOT make the database
+    // side constant — SQLite still walks this principal's entries — so what is
+    // asserted here is the shape of the read, never a cost bound.
     expect(captured.get('metaCount')!.sql.toLowerCase()).toContain('select distinct');
     const detail = plan('metaCount');
     expect(detail.join('\n')).toContain('hint_deliveries_principal_hint');

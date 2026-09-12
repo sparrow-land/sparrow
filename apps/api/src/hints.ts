@@ -978,13 +978,17 @@ export function setHintLevel(ctx: AppContext, principal: PrincipalIdent, level: 
  * `control-your-hints`. Hint ids themselves never contain a `:`.
  */
 export function deliveryCount(ctx: AppContext, principal: PrincipalIdent): number {
-  // DISTINCT belongs in the DATABASE here. The ledger is append-only, so one
-  // row per telling accumulates for the life of the agent, while the answer is
-  // bounded by the number of ledger KEYS (a dozen) — de-duplicating in JS would
-  // read the entire history on every pause to arrive at the same small number.
-  // The second de-duplication below is not redundant: a versioned ledger key
-  // (`refresh-your-role:<updatedAt>`) is many keys for one hint, and the count
-  // asks about hints.
+  // DISTINCT belongs in the DATABASE here. The ledger is append-only, so rows
+  // accumulate for the life of the agent while the ANSWER stays small, and
+  // de-duplicating in JS meant carrying every historical telling across that
+  // boundary on every pause. Be exact about what this buys and what it does
+  // not: SQLite still walks this principal's index entries, so the DATABASE
+  // side still grows with history — bounding that wants the retention and
+  // partial-index work filed in docs/backlog.md. What is fixed here is the rows
+  // materialized into JS, now one per distinct ledger key rather than one per
+  // telling. The second de-duplication below is not redundant: a versioned
+  // ledger key (`refresh-your-role:<updatedAt>`) is many keys for one hint —
+  // and grows with role edits — while the count asks about hints.
   const rows = ctx.db
     .selectDistinct({ hintId: hintDeliveries.hintId })
     .from(hintDeliveries)
