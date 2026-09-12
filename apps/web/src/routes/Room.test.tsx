@@ -18,6 +18,17 @@ vi.mock('../components/AppShell.js', () => ({ useShell: () => ({ reportBroadcast
 // Capture each Room's stream handler so tests can drive live SSE events
 // (e.g. presence.changed) at it. Hoisted so the vi.mock factory can reach it.
 const { streamHandlers } = vi.hoisted(() => ({ streamHandlers: [] as ((ev: unknown) => void)[] }));
+const { messageBodyRender } = vi.hoisted(() => ({ messageBodyRender: vi.fn() }));
+vi.mock('../components/MessageBody.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../components/MessageBody.js')>();
+  return {
+    ...actual,
+    MessageBody: (props: { text: string }) => {
+      messageBodyRender(props.text);
+      return <actual.MessageBody {...props} />;
+    },
+  };
+});
 vi.mock('../lib/roomStreams.js', () => ({
   roomStreams: {
     subscribe: (_roomId: string, cb: (ev: unknown) => void) => {
@@ -380,6 +391,43 @@ describe('Room historical bubbles are never collapsed (always full body, no elli
 
     await waitFor(() => expect(screen.getByText(/FULLBODYONLY_endmarker/)).toBeInTheDocument());
     expect(document.body.textContent).not.toContain('…');
+  });
+});
+
+describe('Room composer render isolation', () => {
+  it('does not rerender transcript markdown while the draft changes', async () => {
+    stubRoom({ outbox: [makeMessage({ body: '**stable transcript**' })] });
+    renderRoom();
+
+    await screen.findByText('stable transcript');
+    messageBodyRender.mockClear();
+
+    await userEvent.type(screen.getByRole('textbox'), 'draft');
+
+    expect(messageBodyRender).not.toHaveBeenCalled();
+  });
+
+  it('rerenders transcript markdown when a message arrives', async () => {
+    const messages = [makeMessage({ body: 'first message' })];
+    stubRoom({ outbox: messages });
+    renderRoom();
+
+    await screen.findByText('first message');
+    messageBodyRender.mockClear();
+    messages.push(
+      makeMessage({
+        id: 'msg_2',
+        body: 'new arrival',
+        createdAt: '2026-08-20T10:06:00Z',
+      }),
+    );
+
+    await act(async () => {
+      for (const handler of streamHandlers) handler({ type: 'message.new', data: { messageId: 'msg_2' } });
+    });
+
+    await screen.findByText('new arrival');
+    expect(messageBodyRender).toHaveBeenCalledWith('new arrival');
   });
 });
 

@@ -12,6 +12,14 @@ even a silent listener is told to run `sparrow upgrade` within one stream cycle.
 "client floor" note on each release below records the minimum and recommended
 versions that release shipped with.
 
+## [Unreleased]
+
+### Fixed
+
+- Typing in a conversation no longer rebuilds and rerenders the unchanged
+  Markdown transcript on each character. New messages, receipts and other
+  transcript updates continue to render normally.
+
 ## [0.1.33] — 2026-09-12
 
 ### Added

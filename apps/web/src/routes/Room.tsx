@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type UIEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Check, Mic, Reply, Settings } from 'lucide-react';
 import type {
@@ -263,9 +263,13 @@ export function Room() {
   // vm9). The server already scopes the list to pairs this human can currently
   // see both of.
   const agentDms = useAgentDmBoxes({ orgId, enabled: activityAgentId !== null });
-  const counterpartDmBoxes = activityAgentId
-    ? agentDms.boxes.filter((b) => b.agents.some((a) => a.id === activityAgentId))
-    : [];
+  const counterpartDmBoxes = useMemo(
+    () =>
+      activityAgentId
+        ? agentDms.boxes.filter((b) => b.agents.some((a) => a.id === activityAgentId))
+        : [],
+    [activityAgentId, agentDms.boxes],
+  );
 
   // Refs so the long-lived stream handler always sees current state.
   const selfRef = useRef<Member | null>(null);
@@ -598,6 +602,11 @@ export function Room() {
     },
     [loadOlder],
   );
+  const onPaneScrollRef = useRef(onPaneScroll);
+  onPaneScrollRef.current = onPaneScroll;
+  const handlePaneScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    onPaneScrollRef.current(event);
+  }, []);
 
   // Wake/reconnect reconciliation. Any event missed while a stream was down (a
   // `status.changed → idle`, presence, a new message, a receipt) leaves the UI
@@ -1066,15 +1075,19 @@ export function Room() {
     return map;
   }, [history]);
 
-  const thread = self
-    ? buildConversation({
-        history,
-        selfId: self.id,
-        selected,
-        dmRoom: isDm,
-        status: statusById(inbox),
-      })
-    : [];
+  const thread = useMemo(
+    () =>
+      self
+        ? buildConversation({
+            history,
+            selfId: self.id,
+            selected,
+            dmRoom: isDm,
+            status: statusById(inbox),
+          })
+        : [],
+    [history, self, selected, isDm, inbox],
+  );
 
 
   const partnerStatus =
@@ -1127,11 +1140,14 @@ export function Room() {
     },
   };
 
-  const quoteFor = (id: string): { who: string; body: string } | undefined => {
-    const full = fullMessages[id];
-    if (full) return { who: self && full.from.id === self.id ? 'You' : full.from.displayName, body: full.body };
-    return undefined;
-  };
+  const quoteFor = useCallback(
+    (id: string): { who: string; body: string } | undefined => {
+      const full = fullMessages[id];
+      if (full) return { who: self && full.from.id === self.id ? 'You' : full.from.displayName, body: full.body };
+      return undefined;
+    },
+    [fullMessages, self],
+  );
 
   const newest = thread.length > 0 ? thread[thread.length - 1] : undefined;
   const newestSuggestions =
@@ -1147,9 +1163,13 @@ export function Room() {
   // RENDERED. Collapsing reads each entry's own type, never a live override, so
   // a resolution mutates its card without re-flowing the column. With no entries
   // this is exactly `thread`, row for row.
-  const rows = interleaveAgentDms(
-    collapseStream(mergeStream(thread, activity.entries)),
-    counterpartDmBoxes,
+  const rows = useMemo(
+    () =>
+      interleaveAgentDms(
+        collapseStream(mergeStream(thread, activity.entries)),
+        counterpartDmBoxes,
+      ),
+    [thread, activity.entries, counterpartDmBoxes],
   );
 
   const canCompose = !archived && self !== null;
@@ -1287,76 +1307,20 @@ export function Room() {
           and makes "older" the upward direction — which also means the browser
           anchors on the newest end, so prepending an earlier page below does not
           move what the reader is looking at. Reaching the top loads that page. */}
-      <div
-        data-testid="message-pane"
-        onScroll={onPaneScroll}
-        className={`flex min-h-0 flex-col-reverse overflow-y-auto px-4 py-3 ${rows.length === 0 ? '' : 'flex-1'}`}
-      >
-        <div className="flex flex-col gap-3">
-          {/* Deliberately not a live region: an earlier page is something the
-              reader asked for by scrolling, not an event to be narrated over
-              whatever they were reading. */}
-          {loadingOlder && (
-            <p
-              data-testid="loading-earlier"
-              className="py-1 text-center text-xs text-[var(--sparrow-faint)]"
-            >
-              Loading earlier messages…
-            </p>
-          )}
-          {rows.map((r, i) => {
-            if (r.kind === 'agent-dm') {
-              // An interleaved oversight box: this agent's DM with another
-              // agent, collapsed, read-only — the DM-pane twin of the org-home
-              // "Agent conversations" card.
-              return <AgentDmCard key={r.key} orgId={orgId} box={r.box} />;
-            }
-            if (r.kind !== 'chat') {
-              // An interleaved card from another medium. It carries none of
-              // chat's conversation behaviors — no receipt, no presence, no
-              // working status behind an address.
-              return (
-                <ActivityRow
-                  key={r.key}
-                  row={r}
-                  orgId={orgId}
-                  agentId={activityAgentId ?? ''}
-                  dispositionOf={activity.dispositionOf}
-                  nowMs={nowMs}
-                />
-              );
-            }
-            const t = r.item;
-            // Run grouping (common chat convention): the avatar shows on the FIRST
-            // message of a consecutive run from the same sender; continuations keep
-            // the indent (a same-width spacer) but drop the repeated avatar. The
-            // per-message header/timestamp already distinguishes rows, so this only
-            // removes avatar repetition, not sender attribution. An interleaved
-            // card breaks the run — the visual continuity is broken with it.
-            const sender = messageSender(t, memberToPrincipal);
-            const prevRow = rows[i - 1];
-            const prev = prevRow?.kind === 'chat' ? prevRow.item : undefined;
-            const prevSender = prev ? messageSender(prev, memberToPrincipal) : null;
-            const runStart =
-              !prev || prev.direction !== t.direction || prevSender?.id !== sender.id;
-            return (
-              <MessageBubble
-                key={r.key}
-                roomId={roomId}
-                direction={t.direction}
-                inbox={t.direction === 'in' ? t.inbox : undefined}
-                full={fullMessages[t.id]}
-                outbox={t.direction === 'out' ? t.outbox : undefined}
-                receipt={t.direction === 'out' ? receipts[t.id] : undefined}
-                quoteFor={quoteFor}
-                sender={sender}
-                showAvatar={runStart}
-                nowMs={nowMs}
-              />
-            );
-          })}
-        </div>
-      </div>
+      <ConversationFeed
+        rows={rows}
+        loadingOlder={loadingOlder}
+        onPaneScroll={handlePaneScroll}
+        orgId={orgId}
+        roomId={roomId}
+        activityAgentId={activityAgentId}
+        dispositionOf={activity.dispositionOf}
+        nowMs={nowMs}
+        memberToPrincipal={memberToPrincipal}
+        fullMessages={fullMessages}
+        receipts={receipts}
+        quoteFor={quoteFor}
+      />
 
       {showAgentOfflineNotice && counterpart && (
         <div className="px-4 pb-1 pt-0.5">
@@ -1536,6 +1500,96 @@ function KindBadge({ kind }: { kind: 'human' | 'agent' }) {
     </span>
   );
 }
+
+type ConversationRow = ReturnType<typeof interleaveAgentDms>[number];
+
+/**
+ * The transcript is deliberately isolated from composer state. Room still owns
+ * the durable draft and send lifecycle, but a keystroke cannot make markdown,
+ * attachments, activity cards, and avatars reconcile again.
+ */
+const ConversationFeed = memo(function ConversationFeed({
+  rows,
+  loadingOlder,
+  onPaneScroll,
+  orgId,
+  roomId,
+  activityAgentId,
+  dispositionOf,
+  nowMs,
+  memberToPrincipal,
+  fullMessages,
+  receipts,
+  quoteFor,
+}: {
+  rows: ConversationRow[];
+  loadingOlder: boolean;
+  onPaneScroll: (event: UIEvent<HTMLDivElement>) => void;
+  orgId: string;
+  roomId: string;
+  activityAgentId: string | null;
+  dispositionOf: ComponentProps<typeof ActivityRow>['dispositionOf'];
+  nowMs: number;
+  memberToPrincipal: ReadonlyMap<string, string>;
+  fullMessages: Record<string, Message>;
+  receipts: Record<string, MessageStatus>;
+  quoteFor: (id: string) => { who: string; body: string } | undefined;
+}) {
+  return (
+    <div
+      data-testid="message-pane"
+      onScroll={onPaneScroll}
+      className={`flex min-h-0 flex-col-reverse overflow-y-auto px-4 py-3 ${rows.length === 0 ? '' : 'flex-1'}`}
+    >
+      <div className="flex flex-col gap-3">
+        {loadingOlder && (
+          <p data-testid="loading-earlier" className="py-1 text-center text-xs text-[var(--sparrow-faint)]">
+            Loading earlier messages…
+          </p>
+        )}
+        {rows.map((row, index) => {
+          if (row.kind === 'agent-dm') {
+            return <AgentDmCard key={row.key} orgId={orgId} box={row.box} />;
+          }
+          if (row.kind !== 'chat') {
+            return (
+              <ActivityRow
+                key={row.key}
+                row={row}
+                orgId={orgId}
+                agentId={activityAgentId ?? ''}
+                dispositionOf={dispositionOf}
+                nowMs={nowMs}
+              />
+            );
+          }
+          const item = row.item;
+          const sender = messageSender(item, memberToPrincipal);
+          const previousRow = rows[index - 1];
+          const previous = previousRow?.kind === 'chat' ? previousRow.item : undefined;
+          const previousSender = previous ? messageSender(previous, memberToPrincipal) : null;
+          const runStart =
+            !previous || previous.direction !== item.direction || previousSender?.id !== sender.id;
+          return (
+            <MessageBubble
+              key={row.key}
+              roomId={roomId}
+              direction={item.direction}
+              inbox={item.direction === 'in' ? item.inbox : undefined}
+              full={fullMessages[item.id]}
+              outbox={item.direction === 'out' ? item.outbox : undefined}
+              receipt={item.direction === 'out' ? receipts[item.id] : undefined}
+              quoteFor={quoteFor}
+              sender={sender}
+              showAvatar={runStart}
+              nowMs={nowMs}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+});
 
 export function MessageBubble({
   roomId,
@@ -1727,4 +1781,3 @@ export function DeliveryReceipt({ receipt, nowMs }: { receipt?: MessageStatus; n
     </div>
   );
 }
-
