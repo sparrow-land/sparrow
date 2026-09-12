@@ -774,21 +774,57 @@ function openDb(dataDir: string): Database.Database {
   return new Database(path.join(dataDir, 'sparrow.db'));
 }
 
-/** The cooldown-ledger row for one (agent, ledger key), straight from SQLite. */
-function deliveryRow(
-  dataDir: string,
-  agentId: string,
-  hintId: string,
-): { id: string | null; payload_key: string; delivered_at: string; resolved_at: string | null } {
+/** One row of the append-only delivery ledger. */
+interface LedgerRow {
+  id: string | null;
+  payload_key: string;
+  delivered_at: string;
+  resolved_at: string | null;
+}
+
+/**
+ * EVERY delivery event for one (agent, ledger key), oldest first. The ledger is
+ * append-only — one row per telling — so a test that asks about "the row" has to
+ * say which one.
+ */
+function deliveryRows(dataDir: string, agentId: string, hintId: string): LedgerRow[] {
   const db = openDb(dataDir);
-  const row = db
+  const rows = db
     .prepare(
       `SELECT id, payload_key, delivered_at, resolved_at FROM hint_deliveries
-        WHERE principal_type='agent' AND principal_id = ? AND hint_id = ?`,
+        WHERE principal_type='agent' AND principal_id = ? AND hint_id = ?
+        ORDER BY delivered_at ASC, rowid ASC`,
     )
-    .get(agentId, hintId) as any;
+    .all(agentId, hintId) as LedgerRow[];
   db.close();
-  return row;
+  return rows;
+}
+
+/** The MOST RECENT delivery event for one (agent, ledger key) — what the cooldown reads. */
+function deliveryRow(dataDir: string, agentId: string, hintId: string): LedgerRow {
+  const rows = deliveryRows(dataDir, agentId, hintId);
+  return rows[rows.length - 1]!;
+}
+
+/**
+ * Rewrite ONE ledger row's `resolved_at` by id. Used to plant a distinctive
+ * historical timestamp so "the old entry still reads its OWN resolution" cannot
+ * be satisfied by a coincidental same-millisecond re-stamp.
+ */
+function setResolvedAt(dataDir: string, deliveryId: string, at: string): void {
+  const db = openDb(dataDir);
+  db.prepare('UPDATE hint_deliveries SET resolved_at = ? WHERE id = ?').run(at, deliveryId);
+  db.close();
+}
+
+/** Force every delivery event for one (agent, ledger key) to the same instant. */
+function collapseDeliveredAt(dataDir: string, agentId: string, hintId: string, at: string): void {
+  const db = openDb(dataDir);
+  db.prepare(
+    `UPDATE hint_deliveries SET delivered_at = ?
+      WHERE principal_type='agent' AND principal_id = ? AND hint_id = ?`,
+  ).run(at, agentId, hintId);
+  db.close();
 }
 
 /** The agent row's presence/version stamps. */
@@ -992,5 +1028,237 @@ describe('hint resolution on the wire — decorated at SERVE time, never stored'
       text: 'you look offline',
       resolution: { state: 'unknown' },
     });
+  });
+});
+
+/* ================================================================== *
+ * The ledger is APPEND-ONLY — one row per delivery EVENT
+ * ================================================================== */
+
+describe('the delivery ledger is append-only — a journaled entry never changes its answer', () => {
+  /**
+   * THE HEADLINE. A timeline is a journal: an entry that was true when it was
+   * written must stay true. The old ledger kept ONE row per (principal, hint)
+   * and rewrote it on every re-fire, so a second telling silently un-resolved
+   * the first entry and then lent it the SECOND telling's resolution — a past,
+   * genuinely-finished event reading first "not yet" and then "done" with a
+   * duration measured from the wrong lesson. A journal whose past entries mutate
+   * is worse than no badge at all.
+   */
+  it('a re-fire neither un-resolves the EARLIER entry nor lends it the later resolution', async () => {
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+
+    // T1 — the hint fires against the 0.1.25 floor.
+    expect((await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'))).hints![0]!.id).toBe(
+      'upgrade-your-cli',
+    );
+    const first = deliveryRows(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli');
+    expect(first).toHaveLength(1);
+    const idA = first[0]!.id!;
+    const entryOf = async (id: string): Promise<any> =>
+      (await hintEntries(fx)).find((e) => e.hint.deliveryId === id)!;
+    expect((await entryOf(idA)).hint.resolution).toEqual({ state: 'unresolved' });
+
+    // T2 — the agent upgrades: it calls in at the floor it was told about. Plant
+    // a distinctive historical stamp, so the assertions below cannot be
+    // satisfied by a coincidental same-millisecond re-stamp.
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.25'));
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').resolved_at).not.toBeNull();
+    const RESOLVED_AT_T2 = '2026-01-01T00:00:00.000Z';
+    setResolvedAt(fx.ts.dataDir, idA, RESOLVED_AT_T2);
+    expect((await entryOf(idA)).hint.resolution).toEqual({
+      state: 'resolved',
+      resolvedAt: RESOLVED_AT_T2,
+    });
+
+    // T3 — the operator raises the floor. The hint now SAYS something new, so it
+    // re-fires — appending a second row with its own id, not rewriting the first.
+    fx.ts.config.clientRecommendedVersion = '0.1.30';
+    expect((await pause(fx.ts.app, fx.agentKey, CLI('0.1.25'))).hints![0]!.id).toBe(
+      'upgrade-your-cli',
+    );
+    const rows = deliveryRows(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli');
+    expect(rows).toHaveLength(2);
+    const idB = rows[1]!.id!;
+    expect(idB).not.toBe(idA);
+    // The EARLIER entry is untouched: still resolved, still at ITS OWN timestamp.
+    expect((await entryOf(idA)).hint.resolution).toEqual({
+      state: 'resolved',
+      resolvedAt: RESOLVED_AT_T2,
+    });
+    // …and the NEW entry answers for itself: the agent is behind the new floor.
+    expect((await entryOf(idB)).hint.resolution).toEqual({ state: 'unresolved' });
+
+    // T4 — the agent upgrades again. Only the SECOND delivery resolves; the
+    // first keeps the resolution it earned instead of borrowing this one.
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.30'));
+    expect((await entryOf(idA)).hint.resolution).toEqual({
+      state: 'resolved',
+      resolvedAt: RESOLVED_AT_T2,
+    });
+    const later = (await entryOf(idB)).hint.resolution;
+    expect(later.state).toBe('resolved');
+    expect(later.resolvedAt).not.toBe(RESOLVED_AT_T2);
+  });
+
+  it('a re-fire APPENDS a row — two delivery events, two distinct ids, one mutated row', async () => {
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    const before = deliveryRows(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli');
+    expect(before).toHaveLength(1);
+
+    fx.ts.config.clientRecommendedVersion = '0.1.30';
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    const after = deliveryRows(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli');
+    expect(after).toHaveLength(2);
+    expect(new Set(after.map((r) => r.id)).size).toBe(2);
+    expect(after.every((r) => typeof r.id === 'string' && r.id.startsWith('hdl_'))).toBe(true);
+    // The first row is exactly as it was written: what it said, and when.
+    expect(after[0]!.payload_key).toBe('0.1.25');
+    expect(after[0]!.delivered_at).toBe(before[0]!.delivered_at);
+    expect(after[1]!.payload_key).toBe('0.1.30');
+  });
+
+  it('the cooldown asks the MOST RECENT row, not the first one ever written', async () => {
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    fx.ts.config.clientRecommendedVersion = '0.1.30';
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    expect(deliveryRows(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli')).toHaveLength(2);
+    // The newest row says '0.1.30', which is still what the hint would say — so
+    // the cooldown mutes. Reading the OLDEST row ('0.1.25') would re-fire forever.
+    expect('hints' in (await pause(fx.ts.app, fx.agentKey, CLI('0.1.20')))).toBe(false);
+    expect(deliveryRows(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli')).toHaveLength(2);
+  });
+
+  it('ties on delivered_at break by insertion order — the newest row still wins', async () => {
+    // Two deliveries can share an ISO millisecond (tests do it routinely, and a
+    // busy instance can too), so "most recent" must not be left to chance.
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    fx.ts.config.clientRecommendedVersion = '0.1.30';
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    collapseDeliveredAt(
+      fx.ts.dataDir,
+      fx.agentId,
+      'upgrade-your-cli',
+      new Date().toISOString(),
+    );
+    // Both rows now carry the same instant. The LAST one inserted is the telling
+    // that happened, so its key ('0.1.30') is the one the cooldown compares.
+    expect('hints' in (await pause(fx.ts.app, fx.agentKey, CLI('0.1.20')))).toBe(false);
+  });
+});
+
+/* ================================================================== *
+ * Resolution is judged against WHAT THE DELIVERY ASKED FOR
+ * ================================================================== */
+
+describe('resolution judges each delivery against its own stored target', () => {
+  it('a delivery resolves when the agent reaches the version IT named, even after the floor moved on', async () => {
+    // The failure this pins: told "upgrade to 0.1.32", the agent does exactly
+    // that — but the operator has since moved the floor to 0.1.33, so comparing
+    // against CURRENT config leaves the entry reading "not yet", possibly
+    // forever, for an agent that obeyed.
+    fx = await setup({ clientRecommendedVersion: '0.1.32' });
+    await quietOnline(fx);
+    expect((await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'))).hints![0]!.id).toBe(
+      'upgrade-your-cli',
+    );
+    const asked = deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli');
+    expect(asked.payload_key).toBe('0.1.32');
+    const id = asked.id!;
+
+    fx.ts.config.clientRecommendedVersion = '0.1.33';
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.32'));
+
+    const entry = (await hintEntries(fx)).find((e) => e.hint.deliveryId === id)!;
+    expect(entry.hint.resolution.state).toBe('resolved');
+  });
+
+  it('each delivery is judged independently — an earlier target met, a later one not yet', async () => {
+    fx = await setup({ clientRecommendedVersion: '0.1.32' });
+    await quietOnline(fx);
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    const idA = deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').id!;
+    // The agent reaches A's target; the floor then moves and the hint re-fires.
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.32'));
+    fx.ts.config.clientRecommendedVersion = '0.1.40';
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.32'));
+    const rows = deliveryRows(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli');
+    expect(rows).toHaveLength(2);
+    const idB = rows[1]!.id!;
+
+    const entries = await hintEntries(fx);
+    expect(entries.find((e) => e.hint.deliveryId === idA)!.hint.resolution.state).toBe('resolved');
+    expect(entries.find((e) => e.hint.deliveryId === idB)!.hint.resolution).toEqual({
+      state: 'unresolved',
+    });
+  });
+});
+
+/* ================================================================== *
+ * Abstention is a STATE, not a verdict
+ * ================================================================== */
+
+describe('a check that cannot judge reads `unknown` — never "not yet"', () => {
+  it('an agent that has never identified its client reads unknown, not unresolved', async () => {
+    // `upgrade-your-cli` fires off the request's X-Sparrow-Client header, so a
+    // delivery can exist while `agents.last_client_version` is still null (the
+    // header-carrying request is not the one that stamped it — e.g. the stamp
+    // was cleared, or the hint came from a differently-identified call). The
+    // server then has NO IDEA whether the agent upgraded; saying "not yet"
+    // would be an accusation it cannot support.
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    const id = deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').id!;
+    const db = openDb(fx.ts.dataDir);
+    db.prepare('UPDATE agents SET last_client_version = NULL WHERE id = ?').run(fx.agentId);
+    db.close();
+    const entry = (await hintEntries(fx)).find((e) => e.hint.deliveryId === id)!;
+    expect(entry.hint.resolution).toEqual({ state: 'unknown' });
+  });
+
+  it('an UNPARSEABLE reported version reads unknown, not unresolved', async () => {
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    const id = deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').id!;
+    const db = openDb(fx.ts.dataDir);
+    db.prepare('UPDATE agents SET last_client_version = ? WHERE id = ?').run('nightly', fx.agentId);
+    db.close();
+    const entry = (await hintEntries(fx)).find((e) => e.hint.deliveryId === id)!;
+    expect(entry.hint.resolution).toEqual({ state: 'unknown' });
+  });
+
+  it('a LEGACY delivery with no stored target abstains rather than falling back to current config', async () => {
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    const id = deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').id!;
+    // A row written before payload keys existed carries ''. There is no target
+    // to judge against, and today's floor is not what that delivery asked for.
+    setPayloadKey(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli', '');
+    const db = openDb(fx.ts.dataDir);
+    db.prepare('UPDATE agents SET last_client_version = ? WHERE id = ?').run('0.9.9', fx.agentId);
+    db.close();
+    const entry = (await hintEntries(fx)).find((e) => e.hint.deliveryId === id)!;
+    expect(entry.hint.resolution).toEqual({ state: 'unknown' });
+  });
+
+  it('an abstention is never STAMPED — the ledger row stays open for a real answer', async () => {
+    fx = await setup({ clientRecommendedVersion: '0.1.25' });
+    await quietOnline(fx);
+    await pause(fx.ts.app, fx.agentKey, CLI('0.1.20'));
+    const db = openDb(fx.ts.dataDir);
+    db.prepare('UPDATE agents SET last_client_version = NULL WHERE id = ?').run(fx.agentId);
+    db.close();
+    await pause(fx.ts.app, fx.agentKey); // the engine runs; nothing to conclude
+    expect(deliveryRow(fx.ts.dataDir, fx.agentId, 'upgrade-your-cli').resolved_at).toBeNull();
   });
 });

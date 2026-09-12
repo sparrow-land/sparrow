@@ -230,18 +230,20 @@ message_recipients message_id, recipient_id (member id),
                   PRIMARY KEY(message_id, recipient_id)
                   INDEX(recipient_id, read_at)  -- every unread surface
 attachments       id, message_id, filename, content_type, size_bytes, created_at
-hint_state        principal_type ('human'|'agent'), principal_id,
-                  level ('off'|'normal'|'aggressive', default 'normal'),
-                  trigger_id (nullable — NULL is the principal's level row,
-                  a set value is one trigger's cooldown row), last_fired_at,
-                  delivered_count, updated_at,
-                  id (nullable — a cooldown row's stable handle, minted on first
-                  delivery and kept across re-fires, so journaled entries point
-                  at it), payload_key (NOT NULL default '' — what the hint says
-                  now; the cooldown mutes only while it matches),
-                  resolved_at (nullable — when the taught condition was first
-                  observed to no longer hold; cleared on every re-fire)
-                  PRIMARY KEY(principal_type, principal_id, trigger_id)
+hint_preferences  principal_type ('human'|'agent'), principal_id,
+                  level ('off'|'normal'|'aggressive', default 'normal')
+                  PRIMARY KEY(principal_type, principal_id)
+hint_deliveries   id (PK — one row per DELIVERY EVENT; the ledger is
+                  APPEND-ONLY, never updated and never cleared),
+                  principal_type ('human'|'agent'), principal_id,
+                  hint_id (the cooldown-ledger key: the trigger id, or a
+                  per-version key for a re-arming hint),
+                  payload_key (NOT NULL default '' — what THIS delivery said),
+                  delivered_at,
+                  resolved_at (nullable — when the condition THIS delivery
+                  taught about was first observed to no longer hold)
+                  INDEX(principal_type, principal_id, hint_id, delivered_at)
+                    -- the cooldown asks for the MOST RECENT row of a key
 config            key (PK), value (JSON text), updated_at
 
 -- the email medium (layer 2)
@@ -308,8 +310,9 @@ activity_entries  id, org_id, agent_id (nullable FK agents — the agent this
                   (all nullable — the typed refs),
                   hint_id, hint_text (nullable — hint.delivered's inline
                   payload, the one entries-are-refs exception),
-                  hint_delivery_id (nullable — the hint_deliveries row this
-                  entry was journaled from; NULL reads as resolution 'unknown'),
+                  hint_delivery_id (nullable — the hint_deliveries row for
+                  THIS delivery, whose resolution never changes afterwards;
+                  NULL reads as resolution 'unknown'),
                   created_at
                   INDEX (agent_id, created_at, id)
                   INDEX (owner_human_id, created_at, id)
@@ -586,6 +589,19 @@ re-fire and the agent sat at the old floor having been told the old number. A
 worth re-teaching — never for a drifting name, count, or address, which would
 defeat the cooldown outright.
 
+**The delivery ledger is APPEND-ONLY: one row per delivery EVENT**, keyed on its
+own `id`, never updated and never cleared. Teaching a hint a second time appends
+a second row with a second id; the cooldown question ("what was this principal
+last told?") is answered by the MOST RECENT row for a `(principal, hint_id)`,
+ordered by `delivered_at` and broken deterministically by insertion order when
+two deliveries share a millisecond. Resolution is recorded ON the row it is about
+and is **never rewritten**. That is what makes the timeline a journal: every
+`hint.delivered` entry names the delivery it was journaled from, so an entry that
+honestly read "done, 10s later" still reads that a month and three re-fires
+later. The one-row-per-`(principal, hint)` ledger this replaces was upserted on
+re-fire, which silently un-resolved past entries and then lent them a later
+telling's resolution — a journal whose past mutates is worse than no badge.
+
 Every other response is silent. **`POST /rooms/:roomId/messages` (send) no longer
 carries hints**: a send is the middle of a task. A pop that HANDS BACK WORK no
 longer carries them either: the agent is about to start. `SendMessageResponse`
@@ -679,18 +695,40 @@ leaves the owner unable to tell IGNORED from DONE, so each delivery carries a
 
 | State | Meaning |
 |---|---|
-| `resolved` | the trigger's own DB/presence predicate says the condition it taught about no longer holds; `resolvedAt` is when the server FIRST observed that |
-| `unresolved` | the trigger defines a predicate and it still says the condition holds |
-| `unknown` | there is nothing honest to check — the trigger defines no predicate, or the entry predates the link to its ledger row |
+| `resolved` | the trigger's own DB/presence predicate says the condition THAT DELIVERY taught about no longer holds; `resolvedAt` is when the server FIRST observed that |
+| `unresolved` | the predicate CHECKED, and the condition still holds |
+| `unknown` | there is nothing honest to check — the trigger defines no predicate, the predicate ABSTAINED on this delivery, or the entry predates the link to its ledger row |
 
-A trigger MAY define `resolved(ctx, principal)`, evaluated for the delivered-to
-principal and derived purely from server-observable state — **the agent never
-self-reports**; it just acts, and the server notices. `start-listening` (online
+**The predicate is tri-state, and abstention is not failure.** `false` means *I
+checked, and the condition still holds* — nothing weaker; a check that cannot
+judge returns nothing at all, and the delivery reads `unknown`. An agent that has
+simply never identified its client has not ignored `upgrade-your-cli`, and "not
+yet" about it would be an accusation the server cannot support — exactly the kind
+of guess this feature exists to remove. An abstention is never STAMPED either, so
+the row stays open for a real answer later.
+
+**A delivery is judged against what THAT delivery asked for**, not against
+current config: the check receives the `payloadKey` stored on its own row, so
+`payloadKey` does coherent double duty — the cooldown identity (what the hint
+said) and the contract resolution is measured against. Told to reach 0.1.32 and
+having reached it, an agent reads as done even after the operator moved the floor
+to 0.1.33; a re-fire against the new floor is a separate delivery with its own
+target and its own answer. A legacy row with no stored target (`''`) abstains
+rather than falling back to today's floor, which is not what it said.
+
+A trigger MAY define `resolved(ctx, principal, deliveredPayloadKey)`, evaluated
+for the delivered-to principal and derived purely from server-observable state —
+**the agent never self-reports**; it just acts, and the server notices. `start-listening` (online
 now), `set-a-status` (a status is advertised), `drain-your-inbox` (unread back
 under the threshold), `you-have-email` (the mailbox has been read from or written
-from), `email-is-held` (nothing of the agent's is still `held`),
+from), `email-is-held` (nothing of the agent's is still `held` — an AGGREGATE check, so
+its badge means "no outstanding holds", not "this specific hold was acted on";
+monotone stamping keeps that honest, but it is not per-email precision),
 `upgrade-your-cli` (`agents.last_client_version`, stamped from `X-Sparrow-Client`
-alongside `last_seen_at`, now parses at or above the floor) and
+alongside `last_seen_at`, now parses at or above **the version that delivery
+named**; it abstains when the principal is not an agent, when the delivery stored
+no target, when the agent has never identified itself, or when either version is
+unparseable) and
 `control-your-hints` (a stored hint preference exists) define one. The prose
 lessons — `refresh-your-role`, both `*-is-a-different-register` hints,
 `markdown-renders` — define **none**, and always read `unknown`: nothing the
@@ -700,7 +738,8 @@ never a failure**; readers render it as silence. Stamping is opportunistic and
 monotone: whenever the engine runs for a principal (a pause or `GET /me/hints`)
 it evaluates the predicates of that principal's unresolved deliveries from the
 last 7 days, and a timeline read evaluates the entries it is about to serve. A
-re-fire clears `resolved_at` — the hint is being taught again.
+re-fire clears nothing: it appends a new delivery row, judged on its own terms,
+while every earlier row keeps the answer it already gave.
 
 The three email triggers are **dormant when the email medium is off** — they cannot
 fire without an address:
@@ -743,8 +782,9 @@ nudged by events and badges, never by a hint.
 
 **Agent-controlled level.** `GET`/`PUT /api/v1/me/hint-preferences` (agents only;
 humans `403`) reads/writes `{ level: "off" | "normal" | "aggressive" }` (default
-`normal`), persisted per principal in `hint_state` (which also holds each
-trigger's per-principal cooldown timestamps). `off` = never DELIVERED (the agent can
+`normal`), persisted per principal in `hint_preferences`; the per-principal
+delivery ledger that the cooldown reads lives separately in `hint_deliveries`.
+`off` = never DELIVERED (the agent can
 still ask, via `GET /me/hints`); `normal` = the 24h cooldown;
 `aggressive` = the ~1h cooldown. The GET response also carries a `choices` menu
 explaining each level — framed around the education angle: hints exist so the agent
@@ -3206,13 +3246,15 @@ such an entry is the trigger's owner-framed `ownerLabel` (*Hints & docs by
 convention*). `hint` is optional even there: rows that predate it render from
 `summary` alone (and are simply not expandable in the web's Hint info box).
 
-`deliveryId` is the hint cooldown-ledger row the entry was journaled from;
+`deliveryId` is the ledger row for THIS delivery — the ledger is append-only, so
+a hint taught twice yields two entries with two independent, permanent answers.
 `resolution` is `{ state: 'resolved' | 'unresolved' | 'unknown', resolvedAt? }`
 and is the one field on a timeline entry **computed at serve time rather than
 stored** — whether a lesson took is a question about the world now, not a fact
 frozen on an append-only row, and the row is never mutated to record it. An entry
 with no `deliveryId` (written before the link existed) is always `unknown`; so is
-a hint whose trigger defines no check. See *Hints & docs by convention → Did the
+a hint whose trigger defines no check, and one whose check ABSTAINED — `unknown`
+is rendered as silence, never as "not yet". See *Hints & docs by convention → Did the
 lesson take?*.
 
 **Who may read a timeline**

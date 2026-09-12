@@ -7,6 +7,7 @@ import {
   ORG_SLUG_MAX,
 } from '@sparrow/common-types';
 import { TRIGGERS } from './hints.js';
+import type { PrincipalIdent } from './context.js';
 import { agents, emails, humans, members, orgs } from './db/schema.js';
 
 /**
@@ -185,13 +186,48 @@ describe('the trigger registry (invariants every trigger must hold)', () => {
     expect(TRIGGERS.filter((t) => t.payloadKey).map((t) => t.id)).toEqual(['upgrade-your-cli']);
   });
 
-  it('resolved (where defined) returns a boolean for a principal with nothing done yet', () => {
+  it('resolved (where defined) answers a boolean or ABSTAINS — never anything else', () => {
     const h = evalCtx() as unknown as BuildArg & { ctx: never; principal: never };
     for (const trigger of TRIGGERS) {
       if (!trigger.resolved) continue; // no honest check → always `unknown`
-      const answer = trigger.resolved(h.ctx, h.principal);
-      expect(answer, trigger.id).toBeTypeOf('boolean');
+      const answer = trigger.resolved(h.ctx, h.principal, '');
+      expect(['boolean', 'undefined'], trigger.id).toContain(typeof answer);
     }
+  });
+
+  it('upgrade-your-cli ABSTAINS (undefined) rather than accusing when it cannot judge', () => {
+    // `false` renders as "not yet" on the owner's timeline — an accusation. It
+    // must mean "I checked, and the agent is still behind", never "I have no
+    // idea". These are the three ways this check has no idea.
+    const trigger = TRIGGERS.find((t) => t.id === 'upgrade-your-cli')!;
+    const agentRow = { id: 'agt_1', lastClientVersion: '0.1.20' };
+    const ctx = {
+      config: {},
+      db: {
+        select: () => ({
+          from: () => ({ where: () => ({ get: () => agentRow, limit: () => ({ get: () => agentRow }) }) }),
+        }),
+      },
+    } as unknown as Parameters<NonNullable<typeof trigger.resolved>>[0];
+    const principal = { type: 'agent', id: 'agt_1' } as PrincipalIdent;
+
+    // No stored target: a legacy row predating payload keys. Today's floor is
+    // not what THAT delivery asked for, so there is nothing to compare.
+    expect(trigger.resolved!(ctx, principal, '')).toBeUndefined();
+    // An unparseable stored target, and an unparseable reported version.
+    expect(trigger.resolved!(ctx, principal, 'nightly')).toBeUndefined();
+    agentRow.lastClientVersion = 'nightly';
+    expect(trigger.resolved!(ctx, principal, '0.1.25')).toBeUndefined();
+    // Never identified at all.
+    (agentRow as { lastClientVersion: string | null }).lastClientVersion = null;
+    expect(trigger.resolved!(ctx, principal, '0.1.25')).toBeUndefined();
+    // A human principal is not something this check can speak to.
+    expect(trigger.resolved!(ctx, { type: 'human', id: 'usr_1' }, '0.1.25')).toBeUndefined();
+    // …and a genuine comparison still answers.
+    (agentRow as { lastClientVersion: string | null }).lastClientVersion = '0.1.30';
+    expect(trigger.resolved!(ctx, principal, '0.1.25')).toBe(true);
+    (agentRow as { lastClientVersion: string | null }).lastClientVersion = '0.1.20';
+    expect(trigger.resolved!(ctx, principal, '0.1.25')).toBe(false);
   });
 
   it('the prose lessons define NO resolution check — `unknown` is the honest answer', () => {

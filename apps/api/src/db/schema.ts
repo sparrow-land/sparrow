@@ -645,9 +645,10 @@ export const activityEntries = sqliteTable(
     hintId: text('hint_id'),
     hintText: text('hint_text'),
     /**
-     * The `hint_deliveries` row this entry was journaled from, so a reader can
-     * ask whether the lesson ever took. Null on entries written before the link
-     * existed — those can only ever report `unknown`.
+     * The `hint_deliveries` row this entry was journaled from — THIS telling,
+     * not the (principal, hint) pair — so a reader can ask whether that lesson
+     * took and get an answer that never changes afterwards. Null on entries
+     * written before the link existed; those can only ever report `unknown`.
      */
     hintDeliveryId: text('hint_delivery_id'),
     createdAt: text('created_at').notNull(),
@@ -710,41 +711,59 @@ export const meEventJournalMarks = sqliteTable(
  * ------------------------------------------------------------------ */
 
 /**
- * Per-(principal, hint) delivery ledger. One row per hint id ever delivered to a
- * principal; `delivered_at` is the LAST delivery (upserted). Drives the re-fire
- * cooldown and — by row count — the `control-your-hints` meta-hint threshold.
+ * The hint delivery ledger — **APPEND-ONLY: one row per delivery EVENT**, keyed
+ * on `id`. It drives the re-fire cooldown (which asks about the MOST RECENT row
+ * for a `(principal, hint_id)`), carries each delivery's resolution, and — by
+ * distinct `hint_id` — the `control-your-hints` meta-hint threshold.
+ *
+ * It used to hold ONE row per `(principal, hint_id)`, upserted on every re-fire.
+ * That made the ledger MUTABLE under the journal: every `hint.delivered`
+ * activity entry stores a delivery id, so re-teaching a hint silently
+ * un-resolved the entry written for the previous telling — and the next
+ * resolution then attached that later observation to the earlier entry, which
+ * read "done, 4 days later" about a lesson taken in ten seconds. A journal whose
+ * past entries mutate is worse than no badge, so a telling is now a row.
  */
 export const hintDeliveries = sqliteTable(
   'hint_deliveries',
   {
+    /**
+     * This DELIVERY's handle, minted fresh for every telling and never reused.
+     * The `hint.delivered` activity entry journaled from it stores exactly this,
+     * so an entry always reads the resolution of ITS OWN telling.
+     */
+    id: text('id').primaryKey(),
     principalType: text('principal_type').notNull(),
     principalId: text('principal_id').notNull(),
     hintId: text('hint_id').notNull(),
     /**
-     * A stable handle for this ledger row, minted on first delivery and PRESERVED
-     * across re-fires, so every `hint.delivered` entry for this (principal, hint)
-     * points at the one row whose resolution state is asked about. Nullable only
-     * for rows written before the column existed.
-     */
-    id: text('id'),
-    /**
-     * The identity of WHAT THE HINT CURRENTLY SAYS (see `Trigger.payloadKey`);
-     * `''` for the id-only cooldown every trigger had before it existed. A
-     * delivery inside the cooldown window suppresses only when this matches —
-     * otherwise the hint is saying something new and must re-teach.
+     * The identity of WHAT THIS DELIVERY SAID (see `Trigger.payloadKey`); `''`
+     * for the id-only cooldown every trigger had before it existed. It does
+     * double duty: the cooldown mutes a re-fire only while the most recent row's
+     * key still matches, and the resolution check is judged against THIS key —
+     * "did the agent do what this telling asked?", not "does it satisfy whatever
+     * the config says today".
      */
     payloadKey: text('payload_key').notNull().default(''),
     deliveredAt: text('delivered_at').notNull(),
     /**
-     * When the server first OBSERVED that the condition this hint taught about
-     * no longer holds (see `Trigger.resolved`). Null while unresolved, while the
-     * trigger defines no honest check, and again after every re-fire.
+     * When the server first OBSERVED that the condition THIS delivery taught
+     * about no longer holds (see `Trigger.resolved`). Null while unresolved and
+     * while the check cannot judge; once written it is NEVER cleared — a later
+     * telling gets its own row rather than rewriting this one.
      */
     resolvedAt: text('resolved_at'),
   },
   (t) => ({
-    pk: primaryKey({ columns: [t.principalType, t.principalId, t.hintId] }),
-    principalIdx: index('hint_deliveries_principal').on(t.principalType, t.principalId),
+    // The cooldown seek: the principal's tellings of one hint, newest last. The
+    // index's implicit rowid tail is the deterministic tiebreak for two
+    // deliveries that share an ISO millisecond.
+    principalHintIdx: index('hint_deliveries_principal_hint').on(
+      t.principalType,
+      t.principalId,
+      t.hintId,
+      t.deliveredAt,
+    ),
   }),
 );
 

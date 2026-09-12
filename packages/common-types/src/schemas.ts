@@ -2690,11 +2690,17 @@ export type ActivityRefs = z.infer<typeof ActivityRefsSchema>;
  * Did the thing a hint taught about actually get done? Server-derived, never
  * self-reported: `resolved` means the trigger's own DB predicate says the
  * condition it taught about no longer holds (with `resolvedAt` the moment the
- * server first observed that), `unresolved` means the predicate still says it
- * does, and `unknown` means there is nothing honest to check — the trigger
- * defines no predicate (a prose lesson leaves no server trace), or the entry
- * predates the delivery-row link. A reader MUST render `unknown` as silence,
- * never as a failure.
+ * server first observed that), `unresolved` means the predicate CHECKED and the
+ * condition still holds, and `unknown` means there is nothing honest to check —
+ * the trigger defines no predicate (a prose lesson leaves no server trace), the
+ * predicate ABSTAINED on this particular delivery (it had no evidence either
+ * way), or the entry predates the delivery-row link. A reader MUST render
+ * `unknown` as silence, never as a failure — `unresolved` is the only state
+ * that may be shown as "not yet", and it is never a guess.
+ *
+ * Each state is about ONE DELIVERY. The ledger is append-only, so a hint taught
+ * twice produces two entries with two independent answers, and an answer once
+ * given never changes.
  */
 export const ActivityHintResolutionSchema = z.object({
   state: z.enum(['resolved', 'unresolved', 'unknown']),
@@ -2707,8 +2713,9 @@ export const ActivityHintSchema = z.object({
   id: z.string(),
   text: z.string().max(HINT_TEXT_MAX),
   /**
-   * The cooldown-ledger delivery row this entry was journaled from. Absent on
-   * entries written before the link existed — such an entry can only ever be
+   * The ledger row for THIS DELIVERY — one row per telling, never reused — so
+   * the entry's resolution is about the lesson it actually recorded. Absent on
+   * entries written before the link existed; such an entry can only ever be
    * `unknown`.
    */
   deliveryId: z.string().optional(),

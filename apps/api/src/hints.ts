@@ -32,7 +32,7 @@
  * for "just now". That is what makes the pause a legitimate teaching moment: the
  * lesson still has a referent the agent remembers.
  */
-import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray, sql } from 'drizzle-orm';
 import type { FastifyRequest } from 'fastify';
 import {
   HINT_COOLDOWN_MS,
@@ -196,6 +196,11 @@ export interface Trigger {
    * `upgrade-your-cli` delivery, and the 24h cooldown swallowed every re-fire,
    * so the agent sat at the old floor having been told the old number.
    *
+   * It does DOUBLE DUTY: the stored key is also the contract {@link
+   * Trigger.resolved} judges that delivery against (it is handed back as
+   * `deliveredPayloadKey`), so "what the hint said" and "what the agent was
+   * asked to do" are one value rather than two that can drift apart.
+   *
    * Define it ONLY where the message genuinely varies with server state and the
    * change is worth re-teaching — a name, a count, or an address drifting is
    * not a new lesson, and keying on a count would defeat the cooldown outright.
@@ -204,21 +209,37 @@ export interface Trigger {
   applies(h: HintEvalCtx): boolean;
   build(h: HintEvalCtx): { text: string; action?: HintAction };
   /**
-   * Whether the condition this hint taught about NO LONGER HOLDS — a purely
+   * Whether the condition THIS DELIVERY taught about no longer holds — a purely
    * db/presence-derived predicate, evaluated for the delivered-to principal.
    * The agent never self-reports; it just acts, and the server notices.
    *
-   * A trigger that has no HONEST check must leave this undefined: its
+   * **Tri-state on purpose.** `true` = the lesson took. `false` = *I checked,
+   * and the condition still holds* — nothing weaker. `undefined` = **I cannot
+   * judge**, which reads as `unknown` and renders as silence. Returning `false`
+   * for an abstention would put an accusation ("not yet") on an owner's
+   * timeline that the server cannot support, which is the exact dishonesty this
+   * whole feature exists to remove.
+   *
+   * A trigger that has no HONEST check at all must leave this undefined: its
    * deliveries then report `unknown` forever, which is the truthful answer for
    * a lesson about PROSE (how to write an email, a voice reply, a long chat
    * message) or about re-reading something that leaves no server trace. Never
-   * approximate one — "probably done" on an owner's timeline is worse than
-   * silence. Deliberately given only `(ctx, principal)`: a resolution is a
-   * statement about the principal's world NOW, not about the request that is
-   * asking, and it must read identically from the pause and from a timeline
-   * read.
+   * approximate one — "probably done" is worse than silence.
+   *
+   * `deliveredPayloadKey` is the {@link Trigger.payloadKey} STORED ON THE
+   * DELIVERY BEING JUDGED — what that telling actually asked for. The question
+   * is "did the agent do what THIS delivery told it to do?", never "does it
+   * satisfy whatever the config says today": told to reach 0.1.32 and having
+   * reached it, an agent must read as done even after the operator moved the
+   * floor to 0.1.33. Triggers with no `payloadKey` receive `''` and ignore it.
+   * Deliberately given nothing about the REQUEST that is asking: a resolution
+   * must read identically from the pause and from a timeline read.
    */
-  resolved?(ctx: AppContext, principal: PrincipalIdent): boolean;
+  resolved?(
+    ctx: AppContext,
+    principal: PrincipalIdent,
+    deliveredPayloadKey: string,
+  ): boolean | undefined;
 }
 
 /**
@@ -476,7 +497,8 @@ export const TRIGGERS: Trigger[] = [
     // Honest and exact: the negation of `applies`. The agent is reachable now,
     // by the very predicate the lesson was issued on. Presence is transient, so
     // this can flip back — but the STAMP is monotone, and "it did come online
-    // after being told" stays true forever.
+    // after being told" stays true forever. Never abstains: presence is always
+    // knowable, so `false` here genuinely means "still not reachable".
     resolved(ctx, principal) {
       return ctx.rooms.isPrincipalOnline(principal.type, principal.id);
     },
@@ -517,7 +539,8 @@ export const TRIGGERS: Trigger[] = [
     // NOT the negation of `applies` — that also goes false when the agent
     // merely stops being recently active or drops offline, which teaches
     // nothing. The honest signal is the POSITIVE one: a status is advertised
-    // somewhere, which is exactly the act the hint asked for.
+    // somewhere, which is exactly the act the hint asked for. Never abstains:
+    // "no status anywhere" is an observation, not an absence of evidence.
     resolved(ctx, principal) {
       return ctx.statuses.anyForMembers(principalMemberIds(ctx, principal));
     },
@@ -550,7 +573,8 @@ export const TRIGGERS: Trigger[] = [
       return unreadInboxCount(h) >= DRAIN_UNREAD_THRESHOLD;
     },
     // The backlog is back under the threshold: the pile-up the hint named is
-    // gone. Exactly the trigger's own condition, negated.
+    // gone. Exactly the trigger's own condition, negated. Never abstains — the
+    // unread count is a count, always answerable.
     resolved(ctx, principal) {
       return unreadCountFor(ctx, principalMemberIds(ctx, principal)) < DRAIN_UNREAD_THRESHOLD;
     },
@@ -701,8 +725,12 @@ export const TRIGGERS: Trigger[] = [
     // that merely disappeared (reaped, moved to quarantine) does not count, so
     // this never reads as done because the evidence vanished.
     resolved(ctx, principal) {
+      // No mailbox to look at any more (the medium was switched off, the
+      // address went away, or this is not an agent): the traces this check
+      // reads simply are not observable, so it abstains rather than reporting
+      // "never opened it" about an inbox it cannot see.
       const agent = emailAgentFor(ctx, principal);
-      if (!agent) return false;
+      if (!agent) return undefined;
       return agentEmailsFor(ctx, agent.id).some(
         (e) => e.direction === 'out' || e.readAt !== null,
       );
@@ -741,9 +769,16 @@ export const TRIGGERS: Trigger[] = [
     // denial both move the row off `held`. This one resolves by the OWNER
     // acting, not the agent; the state means "this hint is moot now", which is
     // what the owner's timeline is asking.
+    //
+    // Deliberately AGGREGATE, not per-email: it says "no outstanding holds",
+    // not "the specific mail this delivery named was acted on". Stamping is
+    // monotone, so an approval that clears the queue marks the delivery done
+    // and stays done — honest for the lesson, which is about the queue.
     resolved(ctx, principal) {
+      // Same abstention as `you-have-email`: with no mailbox in view there is
+      // no hold queue to judge, and "still waiting" would be invented.
       const agent = emailAgentFor(ctx, principal);
-      if (!agent) return false;
+      if (!agent) return undefined;
       return !agentEmailsFor(ctx, agent.id).some(
         (e) => e.direction === 'out' && e.disposition === 'held',
       );
@@ -823,19 +858,28 @@ export const TRIGGERS: Trigger[] = [
     payloadKey(h) {
       return h.ctx.config.clientRecommendedVersion ?? '';
     },
-    // The agent CALLED IN at or above the floor (`agents.lastClientVersion`,
-    // stamped from `X-Sparrow-Client` on every authenticated request). Three
-    // honest abstentions: no floor configured, never identified, or a version
-    // string we cannot parse — `clientVersionBelow` reads an unparseable
-    // version as "not below", which must not be mistaken for an upgrade.
-    resolved(ctx, principal) {
-      if (principal.type !== 'agent') return false;
-      const recommended = ctx.config.clientRecommendedVersion;
-      if (!recommended) return false;
+    // Did the agent CALL IN at or above the version THIS DELIVERY named? The
+    // target comes from the delivery's stored payload key, not from today's
+    // config: the floor moves on its own schedule, and an agent told to reach
+    // 0.1.32 that reached 0.1.32 did exactly what it was asked — comparing
+    // against a floor raised afterwards would leave it reading "not yet"
+    // forever, for obedience.
+    //
+    // FOUR abstentions, all `undefined` (→ `unknown` → no badge), because a
+    // `false` here means "I checked, it is still behind" and nothing weaker:
+    // not an agent; no stored target (a legacy row predating payload keys —
+    // today's floor is not what that delivery asked for); never identified
+    // itself (`lastClientVersion` null); or either version unparseable —
+    // `clientVersionBelow` reads an unparseable version as "not below", which
+    // must never be mistaken for an upgrade.
+    resolved(ctx, principal, deliveredPayloadKey) {
+      if (principal.type !== 'agent') return undefined;
+      const target = deliveredPayloadKey;
+      if (!target || !parseClientVersion(target)) return undefined;
       const agent = ctx.db.select().from(agents).where(eq(agents.id, principal.id)).get();
       const seen = agent?.lastClientVersion;
-      if (!seen || !parseClientVersion(seen)) return false;
-      return !clientVersionBelow(seen, recommended);
+      if (!seen || !parseClientVersion(seen)) return undefined;
+      return !clientVersionBelow(seen, target);
     },
     applies(h) {
       const recommended = h.ctx.config.clientRecommendedVersion;
@@ -869,7 +913,8 @@ export const TRIGGERS: Trigger[] = [
     },
     // A stored preference row exists only if someone PUT one — the exact act
     // this hint taught. `getHintLevel` can't answer it (it invents the default
-    // for a principal that never chose), so ask for the row itself.
+    // for a principal that never chose), so ask for the row itself. Never
+    // abstains: the row is either there or it is not.
     resolved(ctx, principal) {
       return (
         ctx.db
@@ -946,8 +991,20 @@ export function deliveryCount(ctx: AppContext, principal: PrincipalIdent): numbe
   return new Set(rows.map((r) => r.hintId.split(':')[0])).size;
 }
 
-/** The ledger row for `(principal, ledgerKey)`, or undefined if never delivered. */
-function deliveryRow(
+/**
+ * The MOST RECENT delivery event for `(principal, ledgerKey)`, or undefined if
+ * this key was never delivered. The ledger is append-only — one row per telling
+ * — so "the cooldown row" is by definition the newest one.
+ *
+ * Ties on `delivered_at` are broken by `rowid` DESC, which is insertion order:
+ * two deliveries CAN share an ISO millisecond (tests do it routinely, and a busy
+ * instance can too), and "which telling is current?" must not be left to
+ * whatever order the b-tree happens to hand back. The
+ * `hint_deliveries_principal_hint` index ends in `delivered_at` and, like every
+ * SQLite index, carries the rowid as its final key column, so this ordering is
+ * the index read backwards rather than a sort.
+ */
+function latestDeliveryRow(
   ctx: AppContext,
   principal: PrincipalIdent,
   hintId: string,
@@ -962,18 +1019,23 @@ function deliveryRow(
         eq(hintDeliveries.hintId, hintId),
       ),
     )
+    .orderBy(desc(hintDeliveries.deliveredAt), desc(sql`${hintDeliveries}.rowid`))
+    .limit(1)
     .get();
 }
 
 /**
- * Record (or refresh) a hint delivery, returning the ledger row's STABLE id so
- * the journaled activity entry can point at it.
+ * APPEND one delivery event, returning the new row's id so the journaled
+ * activity entry can point at THIS telling.
  *
- * The row id is minted once and preserved across every re-fire (a legacy row
- * with no id gets one here), because "was this lesson ever taken?" is a question
- * about the (principal, hint) pair, not about one telling of it. `resolvedAt` is
- * cleared: the hint is being taught again, so whatever we had observed about the
- * previous telling no longer describes it.
+ * Always an INSERT: the ledger never updates and never clears anything. A row is
+ * the record of one telling, and "did the lesson take?" is a question about that
+ * telling — so re-teaching a hint gets a fresh row and a fresh id, leaving every
+ * entry journaled from an earlier one reading exactly what it always read. The
+ * ledger used to hold one upserted row per (principal, hint), which meant a
+ * re-fire silently un-resolved a past entry and the next resolution then
+ * attached itself to that older entry; a journal whose past mutates is worse
+ * than no badge.
  */
 function recordDelivery(
   ctx: AppContext,
@@ -981,22 +1043,17 @@ function recordDelivery(
   hintId: string,
   payloadKey: string,
 ): string {
-  const at = nowIso();
-  const id = deliveryRow(ctx, principal, hintId)?.id ?? newHintDeliveryId();
+  const id = newHintDeliveryId();
   ctx.db
     .insert(hintDeliveries)
     .values({
+      id,
       principalType: principal.type,
       principalId: principal.id,
       hintId,
-      id,
       payloadKey,
-      deliveredAt: at,
+      deliveredAt: nowIso(),
       resolvedAt: null,
-    })
-    .onConflictDoUpdate({
-      target: [hintDeliveries.principalType, hintDeliveries.principalId, hintDeliveries.hintId],
-      set: { id, payloadKey, deliveredAt: at, resolvedAt: null },
     })
     .run();
   return id;
@@ -1015,6 +1072,10 @@ function recordDelivery(
  * `permanent` trigger, on the same reasoning that re-arms `refresh-your-role`.
  * Triggers with no `payloadKey` compare `'' === ''` and behave exactly as they
  * always did, legacy rows (written before the column) included.
+ *
+ * "The stored key" is the MOST RECENT telling's: the ledger is append-only, and
+ * the question a cooldown asks is about the last thing this principal was told,
+ * never about the first.
  */
 function offCooldown(
   ctx: AppContext,
@@ -1025,7 +1086,7 @@ function offCooldown(
   windowMs: number,
   now: number,
 ): boolean {
-  const last = deliveryRow(ctx, principal, ledgerKey);
+  const last = latestDeliveryRow(ctx, principal, ledgerKey);
   if (last === undefined) return true; // never delivered (this key)
   if (last.payloadKey !== payloadKey) return true; // it says something new now
   if (trigger.permanent) return false; // fire once per key
@@ -1054,18 +1115,16 @@ function triggerForLedgerKey(ledgerKey: string): Trigger | undefined {
   return TRIGGERS.find((t) => t.id === id);
 }
 
-/** Write the observation down. Monotone: a stamped row is never un-stamped. */
+/**
+ * Write the observation down on THIS delivery, by id. Monotone and permanent: a
+ * stamped row is never un-stamped and never rewritten — a later telling of the
+ * same hint appends its own row to be judged on its own terms.
+ */
 function stampResolved(ctx: AppContext, row: HintDeliveryRow, at: string): void {
   ctx.db
     .update(hintDeliveries)
     .set({ resolvedAt: at })
-    .where(
-      and(
-        eq(hintDeliveries.principalType, row.principalType),
-        eq(hintDeliveries.principalId, row.principalId),
-        eq(hintDeliveries.hintId, row.hintId),
-      ),
-    )
+    .where(eq(hintDeliveries.id, row.id))
     .run();
 }
 
@@ -1097,15 +1156,23 @@ export function stampResolutions(ctx: AppContext, principal: PrincipalIdent): vo
   for (const row of rows) {
     const resolved = triggerForLedgerKey(row.hintId)?.resolved;
     if (!resolved) continue;
-    if (resolved(ctx, principal)) stampResolved(ctx, row, at);
+    // `=== true` on purpose: the predicate is tri-state, and an abstention
+    // (`undefined`) must be as inert as a `false` — we conclude nothing and
+    // leave the row open for a later, real answer.
+    if (resolved(ctx, principal, row.payloadKey) === true) stampResolved(ctx, row, at);
   }
 }
 
 /**
  * The resolution state of ONE delivery, evaluated (and stamped) on read. Three
  * answers, and `unknown` is a first-class one: an entry that predates the
- * delivery link, a ledger row that no longer exists, and a trigger with no
- * honest check all report it rather than implying the agent ignored the lesson.
+ * delivery link, a ledger row that no longer exists, a trigger with no honest
+ * check, and a check that ABSTAINS on this particular delivery all report it
+ * rather than implying the agent ignored the lesson.
+ *
+ * The lookup is by `id` — the primary key — so it is a seek, and the row it
+ * finds is the one telling this entry was journaled from. The predicate is
+ * judged against THAT row's payload key: what this delivery asked for.
  */
 function resolutionOf(ctx: AppContext, deliveryId: string): ActivityHintResolution {
   const row = ctx.db
@@ -1121,7 +1188,12 @@ function resolutionOf(ctx: AppContext, deliveryId: string): ActivityHintResoluti
     type: row.principalType as PrincipalIdent['type'],
     id: row.principalId,
   };
-  if (!resolved(ctx, principal)) return { state: 'unresolved' };
+  const answer = resolved(ctx, principal, row.payloadKey);
+  // Abstention is NOT failure: `undefined` means the server cannot judge this
+  // delivery, and "not yet" on an owner's timeline would be an accusation it
+  // has no evidence for.
+  if (answer === undefined) return { state: 'unknown' };
+  if (!answer) return { state: 'unresolved' };
   const at = nowIso();
   stampResolved(ctx, row, at);
   return { state: 'resolved', resolvedAt: at };

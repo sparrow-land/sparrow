@@ -20,6 +20,7 @@ import {
   firstOrgId,
   joinOrg,
   createRoom,
+  makeAgent,
   recordStatements,
   type StatementLog,
   type TestServer,
@@ -219,5 +220,108 @@ describe('room-open query plans', () => {
     expect(detail.join('\n')).toContain('USING INDEX message_recipients_recipient_read');
     expect(detail.some((d) => /^SCAN messages\b/.test(d))).toBe(false);
     expect(detail.some((d) => /^SCAN message_recipients\b/.test(d))).toBe(false);
+  });
+});
+
+/**
+ * The hint delivery ledger is append-only — one row per delivery EVENT — so it
+ * only grows, and both of its lookups are asked on hot paths: the cooldown
+ * question on every pause, and the by-id resolution question once per distinct
+ * delivery on every timeline page. Before the primary key moved onto `id`, the
+ * by-id lookup had no index at all and SQLite scanned the whole ledger for each
+ * one. Same idiom as the room-open guards above: drive the real routes, capture
+ * the SQL they issued, and assert the plan.
+ */
+describe('hint-ledger query plans', () => {
+  let ts: TestServer;
+  let log: StatementLog;
+  let sqlite: Database.Database;
+  const captured = new Map<string, { sql: string; params: unknown[] }>();
+
+  function plan(name: string): string[] {
+    const stmt = captured.get(name);
+    if (!stmt) throw new Error(`no captured statement named ${name}`);
+    return (
+      sqlite.prepare(`EXPLAIN QUERY PLAN ${stmt.sql}`).all(...(stmt.params as never[])) as {
+        detail: string;
+      }[]
+    ).map((r) => r.detail);
+  }
+
+  function pick(name: string, match: (sql: string) => boolean): void {
+    const hit = [...log.statements].reverse().find((e) => match(e.sql.toLowerCase()));
+    if (!hit) throw new Error(`no executed statement matched ${name}`);
+    captured.set(name, hit);
+  }
+
+  beforeAll(async () => {
+    log = recordStatements();
+    ts = await makeTestServer();
+    const owner = await signup(ts.app, { email: 'owner@example.com', displayName: 'Owner' });
+    const orgId = await firstOrgId(ts.app, owner.token);
+    const agent = await makeAgent(ts.app, owner.token, orgId, 'deploy-bot');
+
+    // A pause delivers a hint (the agent is offline, so `start-listening` fires),
+    // which writes the ledger row the timeline then asks about.
+    const paused = await ts.app.inject({
+      method: 'POST',
+      url: '/api/v1/me/inbox/pop',
+      headers: auth(agent.key),
+      payload: {},
+    });
+    expect(paused.statusCode).toBe(200);
+    expect(paused.json().hints?.[0]?.id).toBe('start-listening');
+
+    log.reset();
+    const timeline = await ts.app.inject({
+      method: 'GET',
+      url: `/api/v1/orgs/${orgId}/agents/${agent.id}/activity`,
+      headers: auth(owner.token),
+    });
+    expect(timeline.statusCode).toBe(200);
+    pick(
+      'resolutionById',
+      (sql) => sql.includes('from "hint_deliveries"') && sql.includes('"id" = ?'),
+    );
+
+    log.reset();
+    const second = await ts.app.inject({
+      method: 'POST',
+      url: '/api/v1/me/inbox/pop',
+      headers: auth(agent.key),
+      payload: {},
+    });
+    expect(second.statusCode).toBe(200);
+    pick(
+      'cooldownLookup',
+      (sql) =>
+        sql.includes('from "hint_deliveries"') &&
+        sql.includes('"hint_id" = ?') &&
+        sql.includes('order by'),
+    );
+
+    sqlite = new Database(`${ts.dataDir}/sparrow.db`);
+  }, 30_000);
+
+  afterAll(async () => {
+    sqlite?.close();
+    log?.restore();
+    await ts?.close();
+  });
+
+  it('the by-id resolution lookup SEEKS the primary key — never a ledger scan', () => {
+    const detail = plan('resolutionById');
+    expect(detail.some((d) => /^SEARCH hint_deliveries\b/.test(d))).toBe(true);
+    expect(detail.some((d) => /^SCAN hint_deliveries\b/.test(d))).toBe(false);
+  });
+
+  it('the cooldown lookup walks hint_deliveries_principal_hint to the newest row', () => {
+    const detail = plan('cooldownLookup');
+    expect(detail.join('\n')).toContain('USING INDEX hint_deliveries_principal_hint');
+    expect(detail.some((d) => /^SCAN hint_deliveries\b/.test(d))).toBe(false);
+    // (principal_type, principal_id, hint_id, delivered_at) + the index's implicit
+    // rowid tail IS the ordering the cooldown asks for, so SQLite reads the index
+    // backwards and stops at the first row instead of sorting every telling.
+    expect(detail.join('\n')).not.toContain('USE TEMP B-TREE FOR ORDER BY');
   });
 });

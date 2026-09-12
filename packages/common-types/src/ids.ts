@@ -71,10 +71,11 @@ export const newExternalContactId = (): string => `ext_${nano12()}`;
 export const newActivityEntryId = (): string => `act_${nano12()}`;
 
 /**
- * `hdl_` + 12-char base62 nanoid (one hint cooldown-ledger row). Minted on the
- * first delivery of a hint to a principal and kept across every re-fire, so the
- * `hint.delivered` entries journaled from that row all point at the one place
- * its resolution is recorded.
+ * `hdl_` + 12-char base62 nanoid (one hint DELIVERY). The ledger is append-only
+ * — one row per telling — so this is minted fresh on every delivery and never
+ * reused: the `hint.delivered` entry journaled from it reads the resolution of
+ * that telling, and a later re-fire gets its own row rather than rewriting one
+ * a past entry already points at.
  */
 export const newHintDeliveryId = (): string => `hdl_${nano12()}`;
 

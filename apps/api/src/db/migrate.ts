@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { newHintDeliveryId } from '@sparrow/common-types';
 
 /**
  * Fresh v3 schema creation. **There is no migration path** (SPEC v3): a v3 server
@@ -393,15 +394,19 @@ export function migrate(sqlite: Database.Database): void {
       PRIMARY KEY (principal_type, principal_id)
     );
 
+    -- APPEND-ONLY: one row per delivery EVENT, keyed on its own id (see
+    -- schema.ts). The composite-key form this replaces is rebuilt below.
     CREATE TABLE IF NOT EXISTS hint_deliveries (
+      id             TEXT PRIMARY KEY NOT NULL,
       principal_type TEXT NOT NULL,
       principal_id   TEXT NOT NULL,
       hint_id        TEXT NOT NULL,
+      payload_key    TEXT NOT NULL DEFAULT '',
       delivered_at   TEXT NOT NULL,
-      PRIMARY KEY (principal_type, principal_id, hint_id)
+      resolved_at    TEXT
     );
-    CREATE INDEX IF NOT EXISTS hint_deliveries_principal
-      ON hint_deliveries(principal_type, principal_id);
+    CREATE INDEX IF NOT EXISTS hint_deliveries_principal_hint
+      ON hint_deliveries(principal_type, principal_id, hint_id, delivered_at);
 
     CREATE TABLE IF NOT EXISTS hint_preferences (
       principal_type TEXT NOT NULL,
@@ -464,6 +469,7 @@ export function migrate(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, 'hint_deliveries', 'payload_key', "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing(sqlite, 'hint_deliveries', 'resolved_at', 'TEXT');
   addColumnIfMissing(sqlite, 'activity_entries', 'hint_delivery_id', 'TEXT');
+  rebuildHintDeliveries(sqlite);
   addColumnIfMissing(sqlite, 'agents', 'last_client_version', 'TEXT');
   // The email_quarantine split postdates databases whose pre-split build wrote
   // quarantined/rejected inbound rows into `emails`. Move them across — safe on
@@ -486,6 +492,102 @@ export function migrate(sqlite: Database.Database): void {
      WHERE direction = 'in' AND disposition IN ('quarantined', 'rejected');
     COMMIT;
   `);
+}
+
+/**
+ * Rebuild `hint_deliveries` from the old ONE-ROW-PER-(principal, hint) shape
+ * into the APPEND-ONLY one-row-per-delivery shape keyed on `id`.
+ *
+ * The old table was upserted on every re-fire, which rewrote the row a past
+ * `hint.delivered` activity entry points at: re-teaching a hint silently
+ * un-resolved an entry that had honestly read "done", and the next resolution
+ * then attached itself to that older entry. SQLite cannot drop a composite
+ * primary key in place, so this is a boot-time table rebuild.
+ *
+ * DETECTION is the old primary key itself: `principal_type` carries a nonzero
+ * `pk` flag only in the old shape. A fresh database is created new above and
+ * skips this entirely, and a database already rebuilt skips it on every
+ * subsequent boot — the migration is a no-op the second time.
+ *
+ * The copy is TOTAL and ATOMIC (one transaction: a crash rolls the whole thing
+ * back and the old table is still there to try again). Existing ids are
+ * PRESERVED — journaled entries point at them — and only id-less legacy rows
+ * get one minted, which is safe because those rows predate the link and nothing
+ * references them.
+ */
+function rebuildHintDeliveries(sqlite: Database.Database): void {
+  const cols = sqlite.prepare('PRAGMA table_info(hint_deliveries)').all() as {
+    name: string;
+    pk: number;
+  }[];
+  if (!cols.some((c) => c.name === 'principal_type' && c.pk !== 0)) return;
+
+  interface LegacyRow {
+    id: string | null;
+    principal_type: string;
+    principal_id: string;
+    hint_id: string;
+    payload_key: string;
+    delivered_at: string;
+    resolved_at: string | null;
+  }
+  // No ORDER BY: rowid order is insertion order, and carrying it across keeps
+  // the newest telling of a hint the newest row in the rebuilt table too.
+  const rows = sqlite
+    .prepare(
+      `SELECT id, principal_type, principal_id, hint_id, payload_key, delivered_at, resolved_at
+         FROM hint_deliveries`,
+    )
+    .all() as LegacyRow[];
+
+  const taken = new Set(rows.map((r) => r.id).filter((id): id is string => id !== null));
+  const idFor = (existing: string | null): string => {
+    if (existing) return existing;
+    let id = newHintDeliveryId();
+    while (taken.has(id)) id = newHintDeliveryId();
+    taken.add(id);
+    return id;
+  };
+
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE hint_deliveries_rebuilt (
+        id             TEXT PRIMARY KEY NOT NULL,
+        principal_type TEXT NOT NULL,
+        principal_id   TEXT NOT NULL,
+        hint_id        TEXT NOT NULL,
+        payload_key    TEXT NOT NULL DEFAULT '',
+        delivered_at   TEXT NOT NULL,
+        resolved_at    TEXT
+      );
+    `);
+    const insert = sqlite.prepare(
+      `INSERT INTO hint_deliveries_rebuilt
+         (id, principal_type, principal_id, hint_id, payload_key, delivered_at, resolved_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const r of rows) {
+      insert.run(
+        idFor(r.id),
+        r.principal_type,
+        r.principal_id,
+        r.hint_id,
+        r.payload_key ?? '',
+        r.delivered_at,
+        r.resolved_at,
+      );
+    }
+    // DROP takes the old `hint_deliveries_principal` index with it: the cooldown
+    // now asks a (principal, hint, delivered_at) question, and no other reader
+    // of this table wants a principal-only prefix that the new index doesn't
+    // already serve.
+    sqlite.exec(`
+      DROP TABLE hint_deliveries;
+      ALTER TABLE hint_deliveries_rebuilt RENAME TO hint_deliveries;
+      CREATE INDEX IF NOT EXISTS hint_deliveries_principal_hint
+        ON hint_deliveries(principal_type, principal_id, hint_id, delivered_at);
+    `);
+  })();
 }
 
 /**

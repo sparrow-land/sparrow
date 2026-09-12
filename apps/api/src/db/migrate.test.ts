@@ -353,6 +353,114 @@ describe('migrate: idempotent column adds', () => {
     sqlite.close();
   });
 
+  it('rebuilds hint_deliveries into the APPEND-ONLY shape (PK on id), preserving every row', () => {
+    // The ledger used to hold ONE row per (principal, hint), upserted on every
+    // re-fire — which silently rewrote the resolution of past, already-journaled
+    // deliveries. It is now one row per delivery EVENT, keyed on `id`. SQLite
+    // cannot drop a composite primary key in place, so the boot rebuilds the
+    // table; live instances have rows in it, and the copy must be total.
+    const sqlite = new Database(path.join(dir, 'old-hint-ledger.db'));
+    sqlite.exec(`
+      CREATE TABLE hint_deliveries (
+        principal_type TEXT NOT NULL,
+        principal_id   TEXT NOT NULL,
+        hint_id        TEXT NOT NULL,
+        delivered_at   TEXT NOT NULL,
+        id             TEXT,
+        payload_key    TEXT NOT NULL DEFAULT '',
+        resolved_at    TEXT,
+        PRIMARY KEY (principal_type, principal_id, hint_id)
+      );
+      CREATE INDEX hint_deliveries_principal ON hint_deliveries(principal_type, principal_id);
+      INSERT INTO hint_deliveries
+        (principal_type, principal_id, hint_id, delivered_at, id, payload_key, resolved_at)
+      VALUES
+        ('agent', 'agt_1', 'upgrade-your-cli', '2026-09-01T00:00:00.000Z',
+         'hdl_keepthisone0', '0.1.25', '2026-09-01T00:05:00.000Z'),
+        ('agent', 'agt_1', 'start-listening', '2026-09-02T00:00:00.000Z', NULL, '', NULL),
+        ('agent', 'agt_2', 'start-listening', '2026-09-03T00:00:00.000Z', NULL, '', NULL);
+    `);
+    const pkFlags = (): Record<string, number> =>
+      Object.fromEntries(
+        (sqlite.prepare('PRAGMA table_info(hint_deliveries)').all() as {
+          name: string;
+          pk: number;
+          notnull: number;
+        }[]).map((c) => [c.name, c.pk]),
+      );
+    expect(pkFlags().principal_type).toBe(1); // the OLD composite key
+
+    migrate(sqlite);
+
+    // The new shape: `id` alone is the primary key, and it is NOT NULL.
+    const info = sqlite.prepare('PRAGMA table_info(hint_deliveries)').all() as {
+      name: string;
+      pk: number;
+      notnull: number;
+    }[];
+    expect(info.find((c) => c.name === 'id')).toMatchObject({ pk: 1, notnull: 1 });
+    expect(info.find((c) => c.name === 'principal_type')!.pk).toBe(0);
+    expect(info.find((c) => c.name === 'hint_id')!.pk).toBe(0);
+
+    // Every row came across, with what it said and when it said it intact.
+    const rows = () =>
+      sqlite
+        .prepare(
+          `SELECT principal_type, principal_id, hint_id, id, payload_key, delivered_at, resolved_at
+             FROM hint_deliveries ORDER BY delivered_at`,
+        )
+        .all() as {
+        principal_id: string;
+        hint_id: string;
+        id: string;
+        payload_key: string;
+        delivered_at: string;
+        resolved_at: string | null;
+      }[];
+    const after = rows();
+    expect(after).toHaveLength(3);
+    expect(after[0]).toMatchObject({
+      principal_id: 'agt_1',
+      hint_id: 'upgrade-your-cli',
+      id: 'hdl_keepthisone0', // an existing id is PRESERVED, never re-minted
+      payload_key: '0.1.25',
+      delivered_at: '2026-09-01T00:00:00.000Z',
+      resolved_at: '2026-09-01T00:05:00.000Z',
+    });
+    // The legacy id-less rows got one synthesized — non-null, and unique.
+    expect(after.every((r) => typeof r.id === 'string' && r.id.length > 0)).toBe(true);
+    expect(new Set(after.map((r) => r.id)).size).toBe(3);
+
+    // The cooldown lookup keeps an index of its own.
+    const indexes = (): string[] =>
+      (sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as {
+        name: string;
+      }[]).map((r) => r.name);
+    expect(indexes()).toContain('hint_deliveries_principal_hint');
+
+    // Safe on every subsequent boot: the shape is already new, so nothing is
+    // rebuilt and no id is re-minted under a journaled activity entry.
+    const ids = after.map((r) => r.id);
+    migrate(sqlite);
+    migrate(sqlite);
+    expect(rows().map((r) => r.id)).toEqual(ids);
+    expect(rows()).toHaveLength(3);
+    sqlite.close();
+  });
+
+  it('creates hint_deliveries in the append-only shape on a FRESH database', () => {
+    const sqlite = new Database(path.join(dir, 'fresh-hint-ledger.db'));
+    migrate(sqlite);
+    const info = sqlite.prepare('PRAGMA table_info(hint_deliveries)').all() as {
+      name: string;
+      pk: number;
+      notnull: number;
+    }[];
+    expect(info.find((c) => c.name === 'id')).toMatchObject({ pk: 1, notnull: 1 });
+    expect(info.find((c) => c.name === 'principal_type')!.pk).toBe(0);
+    sqlite.close();
+  });
+
   it('is idempotent — a second migrate does not error or duplicate the column', () => {
     const sqlite = new Database(path.join(dir, 'fresh.db'));
     migrate(sqlite);

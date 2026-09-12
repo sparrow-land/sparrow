@@ -18,10 +18,16 @@ versions that release shipped with.
 
 - **Hint outcomes are visible.** The owner's timeline no longer stops at
   "Sparrow hinted the agent to X": every `hint.delivered` entry now answers
-  whether the lesson took — *done* (with when), *not yet*, or nothing when the
-  server cannot honestly judge. Resolution is computed from the same
-  database-derived conditions that fired the hint (never stored, never
-  guessed), stamped opportunistically as the engine runs, and served on read.
+  whether the lesson took — *done* (with when), *not yet*, or nothing at all
+  when the server cannot honestly judge. Each entry answers for **itself**:
+  the delivery ledger is append-only, one row per telling, so an outcome
+  recorded once is never rewritten by a later re-fire, and each delivery is
+  judged against **what that telling actually asked for** — an agent told to
+  reach 0.1.32 and having reached it reads *done* even after the operator
+  moves the floor to 0.1.33. Where the server cannot tell (an agent that has
+  never reported its version, a condition that leaves no server-side trace,
+  a lesson about prose), it says nothing rather than guessing: silence is the
+  honest answer, and *not yet* is only ever printed after a real check.
 
 ### Fixed
 
