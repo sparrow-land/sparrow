@@ -12,7 +12,7 @@ even a silent listener is told to run `sparrow upgrade` within one stream cycle.
 "client floor" note on each release below records the minimum and recommended
 versions that release shipped with.
 
-## [Unreleased]
+## [0.1.35] — 2026-09-14
 
 ### Fixed
 
