@@ -12,6 +12,14 @@ even a silent listener is told to run `sparrow upgrade` within one stream cycle.
 "client floor" note on each release below records the minimum and recommended
 versions that release shipped with.
 
+## [Unreleased]
+
+### Fixed
+
+- `sparrow await` heals replay gaps without waking an idle agent when its inbox
+  check succeeds and finds no work. A failed gap check still wakes conservatively
+  for reconciliation; pending work and terminal upgrade handling are unchanged.
+
 ## [0.1.34] — 2026-09-12
 
 ### Fixed

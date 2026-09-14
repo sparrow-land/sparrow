@@ -4716,11 +4716,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     }
     if (firstDeferMs !== undefined) armBatch(firstDeferMs);
 
-    // A gap means events were missed, so work MAY be waiting and the stream can
-    // no longer prove otherwise. Heal the cursor, then WAKE regardless — naming
-    // the item when the inbox still shows one, and the drain instruction when it
-    // does not. Sitting on a gap is exactly the deafness this command exists to
-    // end.
+    // A gap means events were missed, so heal the cursor and reconcile against
+    // the queue. A successful empty listing is authoritative: keep listening
+    // instead of spending a turn on `{ item: null }`. If the listing fails we
+    // retain the conservative wake, because emptiness was not proved.
     const onGap = (since?: string | number, latest?: string | number): void => {
       if (emitted || controller.signal.aborted) return;
       cursor.gap(latest);
@@ -4730,11 +4729,19 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           item = await oldestWaiting();
         } catch (e) {
           if (terminateForUpgrade(e)) return;
-          /* the gap itself is the news */
+          // A transient failure leaves the gap unresolved; wake so the turn can
+          // drain/retry rather than silently assuming there was no missed work.
+          wake('replay.gap', null, {
+            matched: 'gap',
+            since: since ?? null,
+            latest: latest ?? null,
+            cursor: cursor.current() ?? null,
+          });
+          controller.abort();
+          return;
         }
+        if (item === null) return;
         wake('replay.gap', item, {
-          // A gap is missed events: `--wake-on` cannot rule anything out from
-          // here, and sitting on it is the deafness this command exists to end.
           matched: 'gap',
           since: since ?? null,
           latest: latest ?? null,

@@ -4978,23 +4978,46 @@ describe('sparrow CLI — watch/loop stream health', () => {
     }
   });
 
-  it('await: a replay.gap heals the cursor AND wakes (a gap means work may exist)', async () => {
-    // The cursor is beyond retention, so the server can only say "you missed
-    // things". `await` cannot know whether a work item is among them, and the
-    // whole point of the command is to not sit deaf: it wakes, names the gap,
-    // and tells the caller to drain.
+  it('await: an empty replay.gap heals the cursor, keeps listening, then wakes for real work', async () => {
+    let inboxChecks = 0;
+    let waiting: unknown = null;
+    let eventConnections = 0;
+    const sinceSeen: Array<string | null> = [];
     const stub = await listen((req, res) => {
       const u = req.url!;
       if (u.startsWith('/api/v1/me/inbox')) {
+        inboxChecks += 1;
         req.resume();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ items: [], nextCursor: null })); // nothing VISIBLE — the gap is the news
+        res.end(JSON.stringify({ items: waiting ? [waiting] : [], nextCursor: null }));
         return;
       }
       if (u.startsWith('/api/v1/me/events')) {
+        eventConnections += 1;
+        sinceSeen.push(new URL(u, 'http://x').searchParams.get('since'));
         res.writeHead(200, SSE_HEAD);
         res.write(': open\n\n');
-        res.write('event: replay.gap\ndata: {"since":2634,"latest":115}\n\n');
+        if (eventConnections === 1) {
+          res.write('event: replay.gap\ndata: {"since":2634,"latest":115}\n\n');
+          setTimeout(() => res.end(), 50);
+          return;
+        }
+        setTimeout(() => {
+          waiting = {
+            type: 'chat.message',
+            id: 'msg_after_gap',
+            from: sampleMessage.from,
+            kind: 'dm',
+            subject: null,
+            preview: 'real work after the empty gap',
+            truncated: false,
+            attachmentCount: 0,
+            status: 'received',
+            createdAt: sampleMessage.createdAt,
+            room: sampleRoom,
+          };
+          res.write(`id: 116\nevent: message.new\ndata: ${JSON.stringify(messageNewData('real work'))}\n\n`);
+        }, 50);
         return;
       }
       res.writeHead(404).end();
@@ -5017,20 +5040,120 @@ describe('sparrow CLI — watch/loop stream health', () => {
       expect(code).toBe(0);
       const wake = JSON.parse(cap.out().trim());
       expect(wake.type).toBe('await.item');
-      expect(wake.reason).toBe('replay.gap');
-      expect(wake.item).toBeNull(); // nothing to preview — the instruction is the payload
+      expect(wake.reason).toBe('message.new');
+      expect(wake.item.preview).toBe('real work after the empty gap');
       expect(wake.drain).toBe('sparrow pop');
-      // The gap is reported honestly, and the cursor went through the shared
-      // heal: the server named its newest id, so even a profile with NO stored
-      // cursor adopts it — holding an empty cursor would re-gap on every
-      // reconnect (the 2026-09-09 phantom-wake loop after the domain cutover).
-      expect(wake.since).toBe(2634);
-      expect(wake.latest).toBe(115);
-      expect(wake.cursor).toBe('115');
+      expect(inboxChecks).toBeGreaterThanOrEqual(3); // preflight, gap reconcile, real event
       expect(calls).toHaveLength(1);
       expect(calls[0]![0]).toBe('thread-gap');
-      expect(calls[0]![1]).toContain('replay gap');
+      expect(calls[0]![1]).toContain('work is waiting');
       expect(calls[0]![1]).toContain('sparrow await`');
+      expect(eventConnections).toBeGreaterThanOrEqual(2);
+      expect(sinceSeen.slice(0, 2)).toEqual([null, '115']); // gap heal survives reconnect
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it('await: a replay.gap wakes conservatively when its inbox reconcile fails', async () => {
+    let inboxChecks = 0;
+    const stub = await listen((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/inbox')) {
+        inboxChecks += 1;
+        req.resume();
+        if (inboxChecks === 1) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ items: [], nextCursor: null }));
+        } else {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 'unavailable', message: 'retry later' } }));
+        }
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        res.writeHead(200, SSE_HEAD);
+        res.write(': open\n\n');
+        res.write('event: replay.gap\ndata: {"since":9,"latest":12}\n\n');
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const e = {
+        ...env,
+        SPARROW_SERVER: stub.url,
+        SPARROW_TOKEN: 'agk_stub',
+        CODEX_THREAD_ID: 'thread-gap-failure',
+      };
+      const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+
+      expect(
+        await runCli(
+          ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+          e,
+          cap.io,
+        ),
+      ).toBe(0);
+      const wake = JSON.parse(cap.out().trim());
+      expect(wake.reason).toBe('replay.gap');
+      expect(wake.item).toBeNull();
+      expect(wake.cursor).toBe('12');
+      expect(calls).toHaveLength(1);
+      expect(calls[0]![1]).toContain('replay gap');
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it('await: a replay.gap with visible work retains the gap wake', async () => {
+    let inboxChecks = 0;
+    const item = {
+      type: 'chat.message',
+      id: 'msg_in_gap',
+      from: sampleMessage.from,
+      kind: 'dm',
+      subject: null,
+      preview: 'work found while reconciling the gap',
+      truncated: false,
+      attachmentCount: 0,
+      status: 'received',
+      createdAt: sampleMessage.createdAt,
+      room: sampleRoom,
+    };
+    const stub = await listen((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/inbox')) {
+        inboxChecks += 1;
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ items: inboxChecks === 1 ? [] : [item], nextCursor: null }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        res.writeHead(200, SSE_HEAD);
+        res.write(': open\n\n');
+        res.write('event: replay.gap\ndata: {"since":20,"latest":25}\n\n');
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const cap = capture();
+      expect(
+        await runCli(
+          ['await', '--timeout', '10', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+          { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub' },
+          cap.io,
+        ),
+      ).toBe(0);
+      const wake = JSON.parse(cap.out().trim());
+      expect(wake.reason).toBe('replay.gap');
+      expect(wake.matched).toBe('gap');
+      expect(wake.item.id).toBe('msg_in_gap');
+      expect(wake.cursor).toBe('25');
     } finally {
       await stub.close();
     }
@@ -5430,7 +5553,7 @@ describe('sparrow CLI — client versioning', () => {
     }
   });
 
-  it('await: a 426 from an event-triggered inbox check queues one Codex repair wake', async () => {
+  it('await: a 426 from replay.gap reconciliation queues one Codex repair wake', async () => {
     let inboxReads = 0;
     const stub = await listenVersionStub((req, res) => {
       const u = req.url!;
@@ -5449,7 +5572,7 @@ describe('sparrow CLI — client versioning', () => {
       if (u.startsWith('/api/v1/me/events')) {
         res.writeHead(200, VERSION_SSE_HEAD);
         res.write(': open\n\n');
-        setTimeout(() => res.write('event: message.new\ndata: {"id":1}\n\n'), 25);
+        setTimeout(() => res.write('event: replay.gap\ndata: {"since":1,"latest":2}\n\n'), 25);
         return;
       }
       res.writeHead(404).end();

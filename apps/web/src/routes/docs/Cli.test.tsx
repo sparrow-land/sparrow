@@ -79,6 +79,9 @@ describe('CLI reference — the listener trio and the skill', () => {
     // The exit codes a harness re-arms on.
     expect(text).toMatch(/\b0\b/);
     expect(text).toMatch(/re-arm/i);
+    expect(text).toContain('a successful empty check keeps waiting');
+    expect(text).toContain('inbox check fails');
+    expect(text).toContain('item:null');
     const flags = [...section.querySelectorAll('td code')].map((c) => c.textContent ?? '');
     expect(flags).toContain('--timeout S');
     // It sits with the other listeners, right after `sparrow watch`.

@@ -462,22 +462,19 @@ describe('sparrow CLI — persisted cursor self-heals across a journal wipe', ()
     const serverUrl = `http://127.0.0.1:${upstream.port}`;
     seedProfile(serverUrl, { lastEventId: String(PRUNED) });
 
-    // First arm: the gap wakes (events WERE missed — the inbox is the truth now)…
+    // First arm: the gap reconciles an authoritatively empty inbox, heals, and
+    // keeps listening instead of spending a turn on `{ item: null }`.
     const first = capture();
     expect(
       await runCli(
-        ['await', '--timeout', '5', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        ['await', '--timeout', '1', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
         baseEnv(),
         first.io,
       ),
       first.err(),
-    ).toBe(0);
-    const wake = JSON.parse(first.out().trim().split('\n').filter(Boolean)[0]!);
-    expect(wake.type).toBe('await.item');
-    expect(wake.reason).toBe('replay.gap');
-    expect(wake.item).toBeNull();
-    // …and HEALS the persisted cursor to the server's `latest`, not the dead 31079.
-    expect(wake.cursor).toBe(String(LATEST));
+    ).toBe(2);
+    expect(first.out()).not.toContain('replay.gap');
+    // It still HEALS the persisted cursor to the server's `latest`, not the dead 31079.
     expect(persistedCursor()).toBe(String(LATEST));
 
     // Second arm: resumes from the healed cursor, sees NO gap, and holds until

@@ -3882,8 +3882,7 @@ sparrow watch [--room R] [--no-reconnect] [--retry-max S] [-v] [--with-presence]
           # asked for, so nothing was missed): the retained page is delivered
           # and the server's `latest` is adopted silently as the starting
           # cursor, so the next tick never asks from 0 again (a journal that
-          # has ever pruned answers that with a gap on every tick; for `await`
-          # a gap is a wake), and
+          # has ever pruned answers that with a gap on every tick), and
           # prints ONE actionable line per gap ("events were missed … drain your
           # inbox: `sparrow pop`"), not one per poll tick
 sparrow await [--timeout S] [--stale-seconds S] [--max-stream-age S] [--poll-seconds S]
@@ -3901,9 +3900,12 @@ sparrow await [--timeout S] [--stale-seconds S] [--max-stream-age S] [--poll-sec
           # or `replay.gap`. AVAILABILITY IS THE QUEUE, NOT THE STREAM: an event
           # only re-asks `/me/inbox`, so a `message.new` implying no work (the
           # caller's own send, something already read elsewhere) never wakes it.
-          # `replay.gap` heals the cursor exactly as `watch` does AND wakes with
-          # `item` possibly null (a gap means work may exist and the stream can no
-          # longer prove otherwise). `426` is terminal, as everywhere.
+          # `replay.gap` heals the cursor exactly as `watch` does and checks the
+          # inbox. A successful empty check keeps waiting; a waiting item wakes.
+          # If that check fails, it conservatively wakes with `item: null`:
+          # availability is unknown, not confirmed empty. `426` retains its
+          # terminal upgrade handling. This does not add non-inbox wake reasons
+          # such as `role.updated` or `email.resolved`.
           # THE WAKE HEARTBEATS PRESENCE: exiting is how it wakes you, so from
           # that instant you hold no stream while you PROCESS the item — and a
           # turn runs minutes, well past the presence grace. On every exit-0 wake
