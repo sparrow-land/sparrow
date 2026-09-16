@@ -246,76 +246,121 @@ listener_arming() {
   return 0
 }
 
-dead_listener_pid() {
-  pid=$(owner_pid)
-  [ -n "${pid:-}" ] || return 0
-  [ "$pid" -gt 0 ] 2>/dev/null || return 0
-  pid_absent "$pid" || return 0
-
-  # Nothing is arming: this listener is simply gone.
-  listener_arming || { printf '%s' "$pid"; return 0; }
-
-  # Something IS arming. Wait for it to publish ownership -- up to 2 seconds, in
-  # 100ms steps (a shell whose `sleep` rejects fractions waits in 1s steps).
-  _start_nonce=$(json_nonce "$STATE_DIR/await-owner.json")
+# Poll for a REPLACEMENT owner record: a different generation whose process
+# exists. Returns 0 the moment one appears, 1 when the window expires. Prints
+# nothing. (A shell whose `sleep` rejects fractions waits in 1s steps instead.)
+wait_for_new_owner() {
+  _start_nonce="$1"
   _waited=0
   while [ "$_waited" -lt 2000 ]; do
     if sleep 0.1 2>/dev/null; then _waited=$((_waited + 100)); else sleep 1; _waited=$((_waited + 1000)); fi
     _n=$(json_nonce "$STATE_DIR/await-owner.json")
     _p=$(owner_pid)
     if [ -n "$_n" ] && [ "$_n" != "$_start_nonce" ] && [ -n "${_p:-}" ] && [ "$_p" -gt 0 ] 2>/dev/null; then
-      pid_absent "$_p" || return 0    # published, and its process exists: allow
+      pid_absent "$_p" || return 0
     fi
   done
-  printf '%s' "$pid"
-  return 0
+  return 1
 }
 
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
-now=$(date +%s 2>/dev/null || echo 0)
-if [ -f "$HEARTBEAT_FILE" ]; then
+
+# ONE JUDGEMENT, RUN AGAINST WHICHEVER LISTENER IS CURRENT.
+#
+# classify() reads the heartbeat and the owner record and sets `cls` to exactly
+# one verdict; everything below only turns that into words. It is a FUNCTION
+# because the arming path RE-RUNS it. When the listener that owned this state dir
+# has died and a replacement is coming up, the question "may this turn end?" has
+# to be answered about the REPLACEMENT -- its kind, its freshness, its generation,
+# its own liveness -- never inherited from the corpse. (Reviewer case,
+# 2026-09-16: an `await:codex` heartbeat left by the dead listener would
+# otherwise wave through a replacement that comes up as a PASSIVE plain `await`.)
+#
+#   alive        fresh wake path whose process exists (or nobody claims one)
+#   unjudgeable  fresh heartbeat we cannot read (legacy, third-party, superseded)
+#   dead         a killed:/stopped: stamp from the live generation
+#   passive      fresh plain `await` under Codex: no verified queue bridge
+#   hold         fresh `watch`/`loop`: online, but it can never wake a turn
+#   gone         fresh wake-path heartbeat whose listener process is absent
+#   arming       ...and a candidate listener is starting right now
+#   drift        no heartbeat, or a stale one
+cls=""
+arming_pid=""
+classify() {
+  cls=""; dead_word=""; dead_signal=""; hold_kind=""; passive_await=""; gone_pid=""; arming_pid=""
+  now=$(date +%s 2>/dev/null || echo 0)
+
+  [ -f "$HEARTBEAT_FILE" ] || { cls="drift"; return 0; }
   content=$(sparrow_heartbeat_read)
+
   # A TERMINAL stamp is not subject to the freshness window: the listener told us
   # it is gone, and it is freshest exactly when it just died.
   case "$content" in
     killed | killed:*) dead_word="killed" ;;
     stopped | stopped:*) dead_word="stopped" ;;
   esac
-  if [ -n "$gone_pid" ]; then
-  reason="Sparrow loop is engaged and the heartbeat is fresh, but the listener process (pid $gone_pid) is gone${suffix} -- a killed listener cannot stamp anything, so a fresh heartbeat outlives it by up to $FRESH_SECONDS seconds and nothing can wake $runtime. Re-arm it: run $await_command as a tracked background task, then drain with $pop_command when work wakes you. If it keeps dying instantly, whatever started it is being torn down with the command (a sandboxed shell) -- start it somewhere that outlives the turn. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
-elif [ -n "$dead_word" ]; then
+  if [ -n "$dead_word" ]; then
     case "$content" in
       *:*) dead_signal=$(printf '%s' "${content#*:}" | tr -cd 'A-Za-z0-9_') ;;
     esac
+    cls="dead"
+    return 0
+  fi
+
+  hb=$(mtime "$HEARTBEAT_FILE")
+  [ -n "${hb:-}" ] || { cls="drift"; return 0; }
+  [ "$now" -gt 0 ] 2>/dev/null || { cls="drift"; return 0; }
+  age=$((now - hb))
+  { [ "$age" -ge 0 ] && [ "$age" -lt "$FRESH_SECONDS" ]; } || { cls="drift"; return 0; }
+
+  # Fresh -> a listener is alive. WHICH one decides: `await` can wake this
+  # session, `watch`/`loop` can only hold it online, anything else is unjudgeable.
+  case "$content" in
+    watch | loop) hold_kind="$content"; cls="hold"; return 0 ;;
+    await)
+      if [ -n "$is_codex" ]; then passive_await="yes"; cls="passive"; return 0; fi
+      ;;
+    await:codex) ;;
+    *) cls="unjudgeable"; return 0 ;;
+  esac
+
+  # A wake path -- IF the process behind it still exists.
+  _opid=$(owner_pid)
+  cls="alive"
+  [ -n "${_opid:-}" ] || return 0
+  [ "$_opid" -gt 0 ] 2>/dev/null || return 0
+  pid_absent "$_opid" || return 0
+  if listener_arming; then
+    cls="arming"; arming_pid="$_opid"
   else
-    hb=$(mtime "$HEARTBEAT_FILE")
-    if [ -n "${hb:-}" ] && [ "$now" -gt 0 ] 2>/dev/null; then
-      age=$((now - hb))
-      if [ "$age" -ge 0 ] && [ "$age" -lt "$FRESH_SECONDS" ]; then
-        case "$content" in
-          watch | loop) hold_kind="$content" ;;
-          await)
-            if [ -n "$is_codex" ]; then
-              passive_await="yes"
-            else
-              # A wake path -- IF the process behind it still exists.
-              gone_pid=$(dead_listener_pid)
-              [ -n "$gone_pid" ] || allow_stop
-            fi
-            ;;
-          await:codex)
-            gone_pid=$(dead_listener_pid)
-            [ -n "$gone_pid" ] || allow_stop
-            ;;
-          # Empty/unknown (legacy or third-party heartbeat) is unjudgeable. Note
-          # the pid check deliberately does NOT run here: we have no claim to
-          # cross-check, and a stranger's heartbeat is none of our business.
-          *) allow_stop ;;
-        esac
-      fi
-    fi
+    cls="gone"; gone_pid="$_opid"
+  fi
+  return 0
+}
+
+classify
+if [ "$cls" = arming ]; then
+  # Something is starting. Wait for it to publish ownership, then JUDGE IT --
+  # once. No second poll: if the replacement is itself already gone, that is the
+  # answer.
+  _dead_owner="$arming_pid"
+  if wait_for_new_owner "$(json_nonce "$STATE_DIR/await-owner.json")"; then
+    classify
+    case "$cls" in
+      # Another candidate queued behind the first is not a third chance.
+      arming) cls="gone"; gone_pid="$arming_pid" ;;
+      # The benefit of the doubt is spent: we are on this path precisely because
+      # the previous owner died, so a heartbeat we cannot read is not good enough
+      # to end the turn on. Fall back to the drift nudge, which says exactly that.
+      unjudgeable) cls="drift" ;;
+    esac
+  else
+    cls="gone"; gone_pid="$_dead_owner"
   fi
 fi
+case "$cls" in
+  alive | unjudgeable) allow_stop ;;
+esac
 
 # Engaged, and either drifted or held online by a deaf listener. Best-effort
 # unread count to enrich the nudge (never required; skip silently if we can't).

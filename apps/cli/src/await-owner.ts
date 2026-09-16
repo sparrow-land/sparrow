@@ -147,6 +147,17 @@ export const AWAIT_CANDIDATE_TTL_SECONDS = 120;
  * {@link AWAIT_CANDIDATE_TTL_SECONDS} — costs one pointless wait that still ends
  * in a block, never a turn that ends uncovered. (Reviewed 2026-09-16: a pending
  * candidate is not a wake path; a false ALLOW here is the incident itself.)
+ *
+ * ONE SLOT, AND THAT IS THE DESIGN. Listener A starts and announces itself; B
+ * starts and overwrites the slot; B then fails (a bad token, an unreachable
+ * server) and retires its own marker — and now nothing on disk says that A,
+ * still opening its stream, is arming. A Stop hook firing in that window is
+ * impatient and blocks a turn that was about to be covered. That is exactly the
+ * pre-marker behaviour, over a narrower window, and it is where this stops: the
+ * marker only ever OPTIMISES PATIENCE, so its failures must cost patience.
+ * Keeping a SET of live candidates would turn the slot into a second ownership
+ * record — its own staleness, its own races, its own way to talk a hook out of
+ * blocking — which is the thing publish-late exists to avoid.
  */
 function clearAwaitCandidate(env: Env, nonce: string): void {
   try {
@@ -167,14 +178,27 @@ function writeAwaitCandidate(env: Env, nonce: string): void {
     pid: process.pid,
     startedAt: new Date().toISOString(),
   };
+  let tmp: string | undefined;
   try {
     const file = awaitCandidatePath(env);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.${nonce}.tmp`;
+    tmp = `${file}.${process.pid}.${nonce}.tmp`;
     fs.writeFileSync(tmp, `${JSON.stringify(record)}\n`);
     fs.renameSync(tmp, file); // atomic: no reader ever sees half a record
+    tmp = undefined; // renamed away; there is nothing left to clean up
   } catch {
-    /* best-effort: a marker that cannot be written must not stop the listener */
+    /* best-effort: a marker that cannot be written must not stop the listener.
+     * A rename that failed (the target path occupied, a state dir gone
+     * read-only) would otherwise leave litter in the state dir on EVERY arm, so
+     * take the temp file with us — its name carries our own pid and nonce, so
+     * this can only ever remove ours. */
+    if (tmp !== undefined) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* nothing further to try; a stray temp file is inert either way */
+      }
+    }
   }
 }
 

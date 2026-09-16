@@ -72,8 +72,14 @@ input=$(cat 2>/dev/null || true)
 # only see a `session_id` while it is still at the top level, i.e. the first
 # top-level key BEFORE any nested object. Anything else yields no thread at all:
 # unverified is the safe answer.
+#
+# THE PAYLOAD GOES TO NODE ON STDIN, never in its environment or argv: a
+# PostToolUse `tool_response` can run to hundreds of KB, and a single env string
+# that big blows the per-string exec limit -- node then fails to launch, its
+# stderr is swallowed here, and the stamp quietly loses its thread (measured at
+# 150 KB in review, 2026-09-16).
 if command -v node >/dev/null 2>&1; then
-  thread=$(SPARROW_HOOK_PAYLOAD="$input" node -e 'try{const j=JSON.parse(process.env.SPARROW_HOOK_PAYLOAD||"");if(j&&typeof j==="object"&&typeof j.session_id==="string")process.stdout.write(j.session_id)}catch(e){}' 2>/dev/null || true)
+  thread=$(printf '%s' "$input" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(j&&typeof j==="object"&&typeof j.session_id==="string")process.stdout.write(j.session_id)}catch(e){}})' 2>/dev/null || true)
 else
   thread=$(printf '%s' "$input" \
     | tr '\n' ' ' \

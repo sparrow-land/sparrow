@@ -695,6 +695,86 @@ describe('sparrow-stop-check.sh', () => {
       expect(r.stdout.trim()).toBe('');
     });
 
+    /* ------------- the replacement is JUDGED, never inherited ------------- *
+     * Reviewer case (2026-09-16): the old listener was `await:codex` (a proper
+     * wake path) and the replacement comes up as a passive plain `await`. If the
+     * wait path just answered "somebody is alive again", the turn would end on
+     * the DEAD listener's good name. So when a replacement publishes, the whole
+     * judgement is re-run against it: its kind, its freshness, its generation,
+     * its own liveness.
+     * ---------------------------------------------------------------------- */
+    /** Publish a replacement owner (+ optional heartbeat) from a separate process. */
+    const publishLater = (owner: Record<string, unknown>, heartbeat?: string, delay = 0.3): void => {
+      const ownerPath = path.join(stateDir, 'await-owner.json');
+      const hbPath = path.join(stateDir, 'heartbeat');
+      const json = JSON.stringify({ version: 1, kind: 'await', ...owner });
+      const hb = heartbeat === undefined ? '' : `printf '%s\n' '${heartbeat}' > '${hbPath}'; `;
+      const w = spawn('sh', ['-c', `sleep ${delay}; ${hb}printf '%s' '${json}' > '${ownerPath}'`], {
+        stdio: 'ignore',
+        detached: true,
+      });
+      w.unref();
+    };
+
+    it('BLOCKS when the replacement comes up PASSIVE under Codex', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex aaaa');
+      writeOwner({ nonce: 'aaaa', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: 'bbbb' });
+      publishLater({ nonce: 'bbbb', pid: process.pid }, 'await bbbb');
+      const json = JSON.parse(runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' }).stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('passive');
+    });
+
+    it('BLOCKS when the replacement stamps itself killed while we wait', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex aaaa');
+      writeOwner({ nonce: 'aaaa', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: 'bbbb' });
+      publishLater({ nonce: 'bbbb', pid: process.pid }, 'killed:SIGTERM bbbb');
+      const json = JSON.parse(runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' }).stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toMatch(/was killed/);
+      expect(json.reason).toContain('SIGTERM');
+    });
+
+    it('ALLOWS when the replacement is a real bridged wake path', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex aaaa');
+      writeOwner({ nonce: 'aaaa', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: 'bbbb' });
+      publishLater({ nonce: 'bbbb', pid: process.pid }, 'await:codex bbbb');
+      const r = runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('BLOCKS when the replacement publishes but the heartbeat names a THIRD generation', () => {
+      // Unjudgeable does not become "allow" here: we are on this path precisely
+      // because the previous owner died, so nothing is left to give the benefit
+      // of the doubt to.
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex aaaa');
+      writeOwner({ nonce: 'aaaa', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: 'bbbb' });
+      publishLater({ nonce: 'bbbb', pid: process.pid }, 'await:codex cccc');
+      const json = JSON.parse(runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' }).stdout);
+      expect(json.decision).toBe('block');
+    });
+
+    it('BLOCKS when the replacement itself is already gone', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex aaaa');
+      writeOwner({ nonce: 'aaaa', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: 'bbbb' });
+      const replacement = deadPid();
+      publishLater({ nonce: 'bbbb', pid: replacement }, 'await:codex bbbb');
+      const json = JSON.parse(runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' }).stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('is gone');
+    });
+
     it('BLOCKS when the candidate never publishes, after waiting out the window', () => {
       // A candidate is a reason to be PATIENT, never evidence of a wake path.
       writeLoopState('engaged');

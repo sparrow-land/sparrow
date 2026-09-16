@@ -87,6 +87,32 @@ describe('prepareAwaitGeneration — the candidate marker', () => {
     expect(fs.existsSync(awaitCandidatePath(env()))).toBe(false);
   });
 
+  /* ONE SLOT, BY DESIGN — the accepted cost, pinned here so a future reader
+   * meets it as a decision rather than a surprise. */
+  it('a failed newer candidate leaves the older one arming unannounced', () => {
+    const slow = prepareAwaitGeneration({ env: env(), kind: 'await' });
+    const doomed = prepareAwaitGeneration({ env: env(), kind: 'await' }); // overwrites the slot
+    doomed.clearCandidate(); // it gave up (bad token, unreachable server)
+
+    // Nothing on disk now says "a listener is arming", though `slow` still is:
+    // a Stop hook firing in this window falls back to blocking. Bounded and
+    // one-sided — the marker only ever optimises patience, never ownership.
+    expect(fs.existsSync(awaitCandidatePath(env()))).toBe(false);
+
+    // And `slow` is otherwise untouched: it publishes and fences as always.
+    expect(slow.publish()).toBe('published');
+    expect(readAwaitOwner(env())!.nonce).toBe(slow.nonce());
+  });
+
+  it('leaves no temp file behind when the write cannot be renamed into place', () => {
+    // The target path is a DIRECTORY: the temp write succeeds, the rename does
+    // not — the path a plain `existsSync` check would never reach.
+    fs.mkdirSync(awaitCandidatePath(env()));
+
+    expect(() => prepareAwaitGeneration({ env: env(), kind: 'await' })).not.toThrow();
+    expect(fs.readdirSync(stateDir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+
   it('clearing is idempotent and safe with no marker on disk at all', () => {
     const gen = prepareAwaitGeneration({ env: env(), kind: 'await' });
     gen.clearCandidate();

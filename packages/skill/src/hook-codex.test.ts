@@ -481,6 +481,24 @@ describe('sparrow-codex-hook.sh — the thread on the stamp', () => {
   });
 
   /**
+   * THE 128 KiB CLIFF (review, 2026-09-16). Handing the payload to node through
+   * an environment variable dies on a big PostToolUse `tool_response`: the
+   * per-string exec limit is hit, node never launches, its stderr is swallowed,
+   * and the stamp silently loses its thread. stdin has no such limit.
+   */
+  it('finds the thread in a payload far past the exec limit, and passes it all on', () => {
+    const big = JSON.stringify({
+      hook_event_name: 'PostToolUse',
+      session_id: 'abc-123',
+      tool_response: 'x'.repeat(150_000),
+    });
+    expect(big.length).toBeGreaterThan(128 * 1024);
+    const bytes = run(WRAPPER, ['PostToolUse', innerHook('wc -c')], { stdin: big }).trim();
+    expect(read('PostToolUse')).toBe('runtime abc-123');
+    expect(Number(bytes)).toBe(Buffer.byteLength(big));
+  });
+
+  /**
    * NO NODE, NO PROBLEM. `node` is the structural parser, but a hook must work
    * on a box where it is not on PATH — the fallback is an ANCHORED sed that
    * matches a `session_id` only while it is still at the top level (before any
