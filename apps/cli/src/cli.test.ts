@@ -87,6 +87,13 @@ beforeEach(async () => {
     SPARROW_STATE_DIR: stateDir,
     PATH: process.env.PATH,
     SPARROW_POLL_INTERVAL_MS: '15',
+    // `await`'s Codex sandbox preflight reads the REAL procfs by default, so a
+    // suite run from inside a bubblewrap/unshare sandbox (or a nested-namespace
+    // CI container) would refuse to arm in every Codex test below, for reasons
+    // that have nothing to do with the code under test. The escape hatch pins
+    // the answer; the preflight itself is driven deliberately — with an injected
+    // probe — in its own tests (await-preflight.test.ts, and the block below).
+    SPARROW_AWAIT_SANDBOX_CHECK: '0',
   };
 });
 
@@ -3940,6 +3947,158 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     expect(stdoutLines(a, b)).toHaveLength(1);
   });
 
+  /* ================================================================== *
+   * THE CODEX ARMING PREFLIGHT (await-preflight.ts)
+   *
+   * A Codex per-command sandbox SIGKILLs the listener the instant the shell
+   * command returns, and hooks that never fire leave nothing to re-arm it at
+   * turn end. Both are detected here, before a socket is opened or a byte is
+   * written to the state dir — and a non-Codex run must not notice at all.
+   * ================================================================== */
+  describe('Codex arming preflight', () => {
+    const firedDir = path.join(stateDir, 'hooks-fired');
+    afterEach(() => fs.rmSync(firedDir, { recursive: true, force: true }));
+
+    /** A hook stamp exactly as the wrapper writes it. */
+    function stampHook(body: string, event = 'Stop'): void {
+      fs.mkdirSync(firedDir, { recursive: true });
+      fs.writeFileSync(path.join(firedDir, event), `${body}\n`);
+    }
+
+    /** An in-memory /proc, recording what was asked for. */
+    function probe(files: Record<string, string>): CliIO['sandboxProbe'] & { reads: string[] } {
+      const reads: string[] = [];
+      return { reads, readFile: (p: string) => { reads.push(p); return files[p]; } } as any;
+    }
+    const HOST = { '/proc/self/status': 'NSpid:\t4242\n', '/proc/1/comm': 'systemd\n' };
+    const SANDBOX = { '/proc/self/status': 'NSpid:\t4242\n', '/proc/1/comm': 'codex-linux-sandbox\n' };
+
+    /** The base env with the suite's sandbox escape hatch lifted. */
+    const unpinned = (extra: Record<string, string | undefined>) => ({
+      ...env,
+      SPARROW_AWAIT_SANDBOX_CHECK: undefined,
+      ...extra,
+    });
+
+    it('refuses to arm inside the Codex sandbox, before touching anything', async () => {
+      await awaitFixture('awtpfsand');
+      stampHook('runtime thread-sand'); // hooks are fine; the sandbox still wins
+      const cap = capture();
+      cap.io.sandboxProbe = probe(SANDBOX);
+      const heartbeat = (): string | undefined => {
+        try {
+          return fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8');
+        } catch {
+          return undefined;
+        }
+      };
+      const before = heartbeat();
+
+      expect(
+        await runCli(['await', '--timeout', '10'], unpinned({ CODEX_THREAD_ID: 'thread-sand' }), cap.io),
+      ).toBe(1);
+      expect(cap.err()).toContain('pid 1 is codex-linux-sandbox');
+      expect(cap.err()).toContain('sparrow skill verify');
+      expect(cap.out()).toBe(''); // no wake line, and…
+      // …no side effect: the previous listener's claim is untouched.
+      expect(heartbeat()).toBe(before);
+    });
+
+    it('CODEX_SESSION_ID alone identifies the thread (Codex exports both names)', async () => {
+      await awaitFixture('awtpfsess');
+      const cap = capture();
+      cap.io.sandboxProbe = probe(SANDBOX);
+
+      expect(
+        await runCli(['await', '--timeout', '10'], unpinned({ CODEX_SESSION_ID: 'thread-sess' }), cap.io),
+      ).toBe(1);
+      expect(cap.err()).toContain('sandbox PID namespace');
+    });
+
+    it('warns — but still arms — when no hook has been observed firing', async () => {
+      await awaitFixture('awtpfnohook');
+      const cap = capture();
+      cap.io.sandboxProbe = probe(HOST);
+
+      // Exit 2 = the timeout elapsed, i.e. it really did hold the stream.
+      expect(
+        await runCli(['await', '--timeout', '1'], unpinned({ CODEX_THREAD_ID: 'thread-nohook' }), cap.io),
+      ).toBe(2);
+      expect(cap.err()).toContain('have not been observed firing for this thread (thread-nohook)');
+      expect(cap.err()).toContain('restart Codex after trusting them');
+      expect(JSON.parse(cap.out().trim()).type).toBe('await.timeout');
+    });
+
+    it('SPARROW_AWAIT_REQUIRE_HOOKS=1 turns that warning into exit 1', async () => {
+      await awaitFixture('awtpfstrict');
+      const cap = capture();
+      cap.io.sandboxProbe = probe(HOST);
+
+      expect(
+        await runCli(
+          ['await', '--timeout', '10'],
+          unpinned({ CODEX_THREAD_ID: 'thread-strict', SPARROW_AWAIT_REQUIRE_HOOKS: '1' }),
+          cap.io,
+        ),
+      ).toBe(1);
+      expect(cap.err()).toContain('have not been observed firing for this thread (thread-strict)');
+      expect(cap.out()).toBe('');
+    });
+
+    it('says nothing at all when this thread’s hooks have been seen firing', async () => {
+      await awaitFixture('awtpfok');
+      stampHook('runtime thread-ok');
+      const cap = capture();
+      cap.io.sandboxProbe = probe(HOST);
+
+      expect(
+        await runCli(['await', '--timeout', '1'], unpinned({ CODEX_THREAD_ID: 'thread-ok' }), cap.io),
+      ).toBe(2);
+      expect(cap.err()).toBe('');
+    });
+
+    it('notes the upgrade once when the wrapper predates thread stamps', async () => {
+      await awaitFixture('awtpflegacy');
+      stampHook('runtime');
+      const cap = capture();
+      cap.io.sandboxProbe = probe(HOST);
+
+      expect(
+        await runCli(['await', '--timeout', '1'], unpinned({ CODEX_THREAD_ID: 'thread-legacy' }), cap.io),
+      ).toBe(2);
+      expect(cap.err()).toContain('sparrow upgrade');
+    });
+
+    it('a hand run and another thread’s stamps each warn for their own reason', async () => {
+      await awaitFixture('awtpfmanual');
+      stampHook('manual');
+      const manual = capture();
+      manual.io.sandboxProbe = probe(HOST);
+      expect(
+        await runCli(['await', '--timeout', '1'], unpinned({ CODEX_THREAD_ID: 'thread-manual' }), manual.io),
+      ).toBe(2);
+      expect(manual.err()).toContain('hand run');
+
+      stampHook('runtime thread-someone-else');
+      const other = capture();
+      other.io.sandboxProbe = probe(HOST);
+      expect(
+        await runCli(['await', '--timeout', '1'], unpinned({ CODEX_THREAD_ID: 'thread-mine' }), other.io),
+      ).toBe(2);
+      expect(other.err()).toContain('different Codex thread');
+    });
+
+    it('a NON-Codex run never probes and never reads a stamp', async () => {
+      await awaitFixture('awtpfplain');
+      const cap = capture();
+      const p = probe(SANDBOX); // would refuse — if it were ever consulted
+      cap.io.sandboxProbe = p;
+
+      expect(await runCli(['await', '--timeout', '1'], unpinned({}), cap.io)).toBe(2);
+      expect(p.reads).toEqual([]);
+      expect(cap.err()).toBe('');
+    });
+  });
 });
 
 /* ================================================================== *

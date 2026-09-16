@@ -12,6 +12,32 @@ even a silent listener is told to run `sparrow upgrade` within one stream cycle.
 "client floor" note on each release below records the minimum and recommended
 versions that release shipped with.
 
+## [Unreleased]
+
+### Added
+
+- `sparrow await` preflights a Codex run before it arms. It refuses (exit 1)
+  when the command is running inside a sandbox PID namespace — Codex's
+  per-command sandbox SIGKILLs the listener the instant the command returns, so
+  the agent believed it was armed while it was deaf — naming the evidence and
+  the way out; `SPARROW_AWAIT_SANDBOX_CHECK=0` is the operator override. It also
+  warns in one line when Codex's hooks have not been observed firing for this
+  thread (nothing would re-arm the listener at turn end), and still arms, since
+  an unfired hook is unverified rather than broken; `SPARROW_AWAIT_REQUIRE_HOOKS=1`
+  makes that fatal too. Both checks run only on a Codex run — the thread is now
+  read from `CODEX_SESSION_ID` as well as `CODEX_THREAD_ID` — and neither adds a
+  flag or a step to an agent's loop.
+- The Codex hook wrapper stamps `hooks-fired/<Event>` with the thread that
+  fired it (lifted from the payload's `session_id`; the hook environment carries
+  no thread variable) and exports `SPARROW_CODEX_THREAD` and
+  `SPARROW_HOOK_RUNTIME=codex` to the inner hook, so the Stop hook judges a
+  Codex session by Codex rules again. `sparrow skill verify` prints the thread
+  next to each observed event.
+- The Stop hook blocks when the heartbeat is fresh but the listener process in
+  `await-owner.json` is demonstrably gone — a SIGKILLed listener stamps nothing,
+  and its heartbeat stayed fresh for the whole window (permission-denied counts
+  as alive, never absence).
+
 ## [0.1.35] — 2026-09-14
 
 ### Fixed

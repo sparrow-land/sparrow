@@ -480,6 +480,26 @@ describe('verify --codex', () => {
     expect(out).toMatch(/nothing here has been observed running/i);
   });
 
+  /**
+   * A stamp now names the Codex thread that fired it (the payload's
+   * `session_id`), and verify prints it: "fired Stop: yes, 3s ago (thread abc)"
+   * is the difference between "hooks work here" and "hooks work for the session
+   * reading this report".
+   */
+  it('names the thread beside each observed event, when the stamp carries one', async () => {
+    await run(['install', '--codex']);
+    fs.mkdirSync(path.join(stateDir, 'hooks-fired'), { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'hooks-fired', 'Stop'), 'runtime abc-123\n');
+    fs.writeFileSync(path.join(stateDir, 'hooks-fired', 'PostToolUse'), 'runtime\n');
+    fs.writeFileSync(path.join(stateDir, 'hooks-fired', 'SessionStart'), 'manual xyz-9\n');
+    logs.length = 0;
+    await run(['verify', '--codex']);
+    const out = logs.join('\n');
+    expect(out).toMatch(/fired Stop: yes, .*\(thread abc-123\)/);
+    expect(out).toMatch(/fired PostToolUse: yes, [^(\n]*$/m); // no thread, no parenthetical
+    expect(out).toMatch(/fired SessionStart: NOT by Codex[^\n]*\(thread xyz-9\)/);
+  });
+
   it('reports registration and the playbook separately from firing', async () => {
     await run(['install', '--codex']);
     logs.length = 0;

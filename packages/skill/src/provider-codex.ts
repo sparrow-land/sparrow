@@ -397,12 +397,28 @@ function firedDir(r: Resolved): string {
  * stamp (written by any CLI before this) reads as `runtime`, exactly as before.
  */
 export interface FiredStamp {
-  ageSeconds: number;
   kind: 'runtime' | 'manual';
+  /**
+   * The Codex thread (`session_id` from the hook payload) that fired it, when
+   * the wrapper could find one. Absent for a stamp written by an older wrapper,
+   * or by a hook invocation whose payload carried no session id.
+   */
+  thread?: string;
+  ageSeconds: number;
 }
 
-export function hookFiredStamp(r: Resolved, event: string, now = Date.now()): FiredStamp | undefined {
-  const file = path.join(firedDir(r), event);
+/** The stamp file's own directory, given a bare state dir. */
+function firedDirOf(stateDir: string): string {
+  return path.join(stateDir, 'hooks-fired');
+}
+
+/** The wrapper's sanitiser, mirrored so a caller can pass a RAW thread id. */
+function sanitizeThread(raw: string): string {
+  return raw.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+}
+
+function readStampFile(dir: string, event: string, now: number): FiredStamp | undefined {
+  const file = path.join(dir, event);
   let ageSeconds: number;
   try {
     const st = fs.statSync(file);
@@ -411,12 +427,74 @@ export function hookFiredStamp(r: Resolved, event: string, now = Date.now()): Fi
     return undefined;
   }
   let kind: FiredStamp['kind'] = 'runtime';
+  let thread: string | undefined;
   try {
-    if (fs.readFileSync(file, 'utf8').trim() === 'manual') kind = 'manual';
+    // `<kind> [thread]` — the wrapper writes at most two fields, and an EMPTY
+    // stamp (any CLI before the kind was recorded) still reads as `runtime`.
+    const [word, rest] = fs.readFileSync(file, 'utf8').trim().split(/\s+/, 2);
+    if (word === 'manual') kind = 'manual';
+    if (rest) thread = rest;
   } catch {
     /* unreadable stamp: judged by its mtime alone, as before */
   }
-  return { ageSeconds, kind };
+  return thread === undefined ? { kind, ageSeconds } : { kind, thread, ageSeconds };
+}
+
+/**
+ * Read one firing stamp out of a bare state dir — the shape the CLI's arming
+ * path wants, where there is no `Resolved` install context to hand around.
+ */
+export function readFiredStamp(stateDir: string, event: string): FiredStamp | undefined {
+  return readStampFile(firedDirOf(stateDir), event, Date.now());
+}
+
+/**
+ * Have Codex's hooks been observed firing FOR THIS THREAD?
+ *
+ * `verified: true` with `legacy: false` is the strong answer: a runtime stamp
+ * naming this very thread, so the trust gates are demonstrably open for the
+ * session asking. `legacy: true` is the compatibility answer — a runtime stamp
+ * with no thread on it at all, written by a wrapper from before stamps carried
+ * one. That still counts; refusing to arm on it would break every install that
+ * has not re-run `sparrow skill install`.
+ *
+ * NOT VERIFIED IS NOT "BROKEN". `no-stamps` is the state of a fresh install
+ * whose Codex has not restarted yet, and `other-thread` is also what a brand-new
+ * thread looks like before any of its hooks has fired once (or what a concurrent
+ * thread's stamps look like, since there is one stamp file per EVENT, not per
+ * thread — a second session overwrites the first's). None of that proves the
+ * hooks will never fire, which is why the CLI treats it as a warning by default
+ * rather than a hard refusal.
+ */
+export type HookVerification =
+  | { verified: true; events: string[]; legacy: boolean }
+  | { verified: false; events: string[]; reason: 'no-stamps' | 'manual-only' | 'other-thread' };
+
+export function hooksVerifiedForThread(stateDir: string, thread: string): HookVerification {
+  const dir = firedDirOf(stateDir);
+  const now = Date.now();
+  const want = sanitizeThread(thread);
+
+  const seen: Array<{ event: string; stamp: FiredStamp }> = [];
+  for (const event of CODEX_EVENTS) {
+    const stamp = readStampFile(dir, event, now);
+    if (stamp) seen.push({ event, stamp });
+  }
+  if (seen.length === 0) return { verified: false, events: [], reason: 'no-stamps' };
+
+  const runtime = seen.filter((s) => s.stamp.kind === 'runtime');
+  const mine = runtime.filter((s) => s.stamp.thread !== undefined && s.stamp.thread === want && want !== '');
+  if (mine.length > 0) return { verified: true, events: mine.map((s) => s.event), legacy: false };
+
+  const threadless = runtime.filter((s) => s.stamp.thread === undefined);
+  if (threadless.length > 0) return { verified: true, events: threadless.map((s) => s.event), legacy: true };
+
+  if (runtime.length > 0) return { verified: false, events: runtime.map((s) => s.event), reason: 'other-thread' };
+  return { verified: false, events: seen.map((s) => s.event), reason: 'manual-only' };
+}
+
+export function hookFiredStamp(r: Resolved, event: string, now = Date.now()): FiredStamp | undefined {
+  return readStampFile(firedDir(r), event, now);
 }
 
 /**
@@ -641,15 +719,18 @@ export const CODEX_ADAPTER: ProviderAdapter = {
     for (const event of CODEX_EVENTS) {
       const stamp = hookFiredStamp(r, event);
       const note = event === 'SessionStart' ? ' (fires on the next new session)' : '';
+      // Which THREAD fired it, when the stamp knows: hooks firing for somebody
+      // else's session is a different fact from hooks firing for yours.
+      const who = stamp?.thread ? ` (thread ${stamp.thread})` : '';
       if (stamp?.kind === 'runtime') {
-        lines.push({ level: 'ok', text: `fired ${event}: yes, ${fmtAge(stamp.ageSeconds)}` });
+        lines.push({ level: 'ok', text: `fired ${event}: yes, ${fmtAge(stamp.ageSeconds)}${who}` });
       } else if (stamp?.kind === 'manual') {
         lines.push({
           level: 'warn',
           text:
             `fired ${event}: NOT by Codex — a manual script check stamped it ` +
             `${fmtAge(stamp.ageSeconds)} (UNVERIFIED: that run proves the script works, ` +
-            `not that Codex invoked it)`,
+            `not that Codex invoked it)${who}`,
         });
       } else {
         lines.push({ level: 'warn', text: `fired ${event}: NEVER — UNVERIFIED${note}` });

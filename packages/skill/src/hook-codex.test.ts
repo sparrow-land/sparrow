@@ -345,3 +345,81 @@ describe('sparrow-codex-hook.sh — the firing stamp', () => {
     expect(run(WRAPPER)).toBe('');
   });
 });
+
+/* ------------------------- the stamp names the THREAD ----------------------- *
+ * MEASURED, not assumed (2026-09-16): inside a Codex hook `CODEX_THREAD_ID` and
+ * `CODEX_SESSION_ID` are both UNSET — only `CODEX_MANAGED_BY_NPM` survives into
+ * the hook's environment. So the thread identity has to come from the hook
+ * PAYLOAD on stdin, whose keys are snake_case (`hook_event_name`, `session_id`,
+ * `cwd`, `turn_id`). The wrapper lifts `session_id` out of it, records it beside
+ * the kind, and hands it to the inner hook as `SPARROW_CODEX_THREAD` — which is
+ * what lets `sparrow await` ask "have hooks fired FOR THIS THREAD?" rather than
+ * the far weaker "have hooks ever fired here?".
+ * -------------------------------------------------------------------------- */
+describe('sparrow-codex-hook.sh — the thread on the stamp', () => {
+  function innerHook(body: string): string {
+    const p = path.join(tmp, 'inner.sh');
+    fs.writeFileSync(p, `#!/bin/sh\n${body}\n`);
+    fs.chmodSync(p, 0o755);
+    return p;
+  }
+  const stamp = (event: string) => path.join(stateDir, 'hooks-fired', event);
+  const read = (event: string) => fs.readFileSync(stamp(event), 'utf8').trim();
+  const payload = (extra: Record<string, string> = {}) =>
+    JSON.stringify({ hook_event_name: 'Stop', turn_id: 't1', ...extra });
+
+  it('writes `<kind> <thread>` from the payload session_id', () => {
+    run(WRAPPER, ['Stop', innerHook('exit 0')], { stdin: payload({ session_id: 'abc-123' }) });
+    expect(read('Stop')).toBe('runtime abc-123');
+  });
+
+  it('writes a bare kind when the payload carries no session_id', () => {
+    run(WRAPPER, ['Stop', innerHook('exit 0')], { stdin: payload() });
+    expect(read('Stop')).toBe('runtime');
+  });
+
+  it('keeps the manual/runtime distinction alongside the thread', () => {
+    const inner = innerHook('exit 0');
+    run(WRAPPER, ['Stop', inner], { stdin: payload({ session_id: 'abc-123' }), env: { SPARROW_HOOK_SELFTEST: '1' } });
+    expect(read('Stop')).toBe('manual abc-123');
+    run(WRAPPER, ['Stop', inner], { stdin: payload({ session_id: 'abc-123' }) });
+    expect(read('Stop')).toBe('runtime abc-123');
+  });
+
+  it('sanitises a hostile session_id down to [A-Za-z0-9_-]', () => {
+    run(WRAPPER, ['Stop', innerHook('exit 0')], {
+      stdin: payload({ session_id: '../../evil id!$(touch /tmp/x)' }),
+    });
+    expect(read('Stop')).toBe('runtime evilidtouchtmpx');
+  });
+
+  it('caps the thread at 128 characters', () => {
+    const long = 'a'.repeat(200);
+    run(WRAPPER, ['Stop', innerHook('exit 0')], { stdin: payload({ session_id: long }) });
+    expect(read('Stop')).toBe(`runtime ${'a'.repeat(128)}`);
+  });
+
+  it('hands the inner hook the thread and the runtime in its environment', () => {
+    const inner = innerHook('printf "%s|%s" "${SPARROW_CODEX_THREAD:-}" "${SPARROW_HOOK_RUNTIME:-}"');
+    const out = run(WRAPPER, ['Stop', inner], { stdin: payload({ session_id: 'abc-123' }) });
+    expect(out).toBe('abc-123|codex');
+  });
+
+  it('still re-feeds the payload to the inner hook on stdin, byte for byte', () => {
+    const body = payload({ session_id: 'abc-123' });
+    expect(run(WRAPPER, ['Stop', innerHook('cat')], { stdin: body })).toBe(body);
+  });
+
+  it('keeps the decision channel and exit status intact while doing all that', () => {
+    const decide = innerHook(`printf '{"decision":"block","reason":"x"}\\n'`);
+    expect(run(WRAPPER, ['Stop', decide], { stdin: payload({ session_id: 'abc-123' }) })).toBe(
+      '{"decision":"block","reason":"x"}\n',
+    );
+    expect(() => run(WRAPPER, ['Stop', innerHook('exit 3')], { stdin: payload() })).toThrow();
+  });
+
+  it('survives a payload that is not JSON at all', () => {
+    run(WRAPPER, ['PostToolUse', innerHook('exit 0')], { stdin: 'not json{{' });
+    expect(read('PostToolUse')).toBe('runtime');
+  });
+});

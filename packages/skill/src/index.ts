@@ -42,6 +42,22 @@ export {
   type TurnBasedRuntime,
 } from './listener.js';
 
+/**
+ * Codex firing stamps — the CLI's arming path asks these before it starts a
+ * listener: hooks that are not firing for THIS thread mean nothing can catch a
+ * listener that dies.
+ */
+export {
+  readFiredStamp,
+  hooksVerifiedForThread,
+  CODEX_EVENTS,
+  type FiredStamp,
+  type HookVerification,
+} from './provider-codex.js';
+
+/** Sandbox detection — a listener armed inside a PID namespace is already dead. */
+export { detectPidNamespace, type PidNamespaceProbe, type PidNamespaceReport } from './sandbox.js';
+
 export {
   adapterFor,
   detectProvider,

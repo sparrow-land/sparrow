@@ -530,6 +530,179 @@ describe('sparrow-stop-check.sh', () => {
     });
   });
 
+  /* ------------------- the listener process itself is gone ------------------- *
+   * THE HOLE THIS CLOSES (incident, 2026-09-16). A Codex agent armed `sparrow
+   * await` from a model-run shell command. That command runs inside a PID
+   * namespace, so the listener was SIGKILLed the instant the command returned —
+   * and SIGKILL is uncatchable, so it stamped NOTHING: no `killed:`, no
+   * `stopped:`. The heartbeat it had already written stayed FRESH for the full
+   * 120 s window, and this hook read "fresh await:codex" and allowed the stop.
+   * The agent went deaf with a green light.
+   *
+   * So when the heartbeat is fresh AND we would allow, we check whether the
+   * process that wrote it still exists — `await-owner.json` records its pid.
+   * Only a DEMONSTRABLY absent process blocks: a permission error (the owner may
+   * belong to another unix user) is unknown, and unknown always allows.
+   * ------------------------------------------------------------------------- */
+  describe('a fresh heartbeat whose listener process is gone', () => {
+    const writeOwner = (fields: Record<string, unknown>): void =>
+      fs.writeFileSync(
+        path.join(stateDir, 'await-owner.json'),
+        `${JSON.stringify({ version: 1, startedAt: '2026-09-16T00:00:00.000Z', kind: 'await', ...fields })}\n`,
+      );
+
+    /** A pid that is certainly free: spawn `true` and reap it. */
+    const deadPid = (): number => {
+      const p = execFileSync('sh', ['-c', 'sh -c "exit 0" & p=$!; wait $!; printf %s "$p"'], {
+        encoding: 'utf8',
+      });
+      return Number(p);
+    };
+
+    it('BLOCKS a fresh await:codex heartbeat when the owner pid is gone', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      const pid = deadPid();
+      writeOwner({ nonce: 'f00d', pid });
+      const r = runHook('{}', { CODEX_THREAD_ID: 'thr_1' });
+      const json = JSON.parse(r.stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain(`pid ${pid}`);
+      expect(json.reason).toMatch(/is gone/);
+      expect(json.reason).toMatch(/heartbeat is (still )?fresh/i);
+      expect(json.reason).toContain(`run ${awaitCommand()} as a tracked background task`);
+      expect(json.reason).toContain('sparrow pop');
+      expect(json.reason).toContain('sparrow skill pause');
+    });
+
+    it('BLOCKS a fresh plain await (Claude) whose owner pid is gone too', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await');
+      const pid = deadPid();
+      writeOwner({ nonce: 'f00d', pid });
+      expect(JSON.parse(runHook().stdout).decision).toBe('block');
+    });
+
+    it('allows when the owner pid is ALIVE (this very test process)', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      writeOwner({ nonce: 'f00d', pid: process.pid });
+      const r = runHook('{}', { CODEX_THREAD_ID: 'thr_1' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('allows when the owner record names no pid at all (unchanged)', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      writeOwner({ nonce: 'f00d' });
+      const r = runHook('{}', { CODEX_THREAD_ID: 'thr_1' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('allows when there is no owner record at all (unchanged)', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      const r = runHook('{}', { CODEX_THREAD_ID: 'thr_1' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('allows a NONCE MISMATCH even with a dead pid (unjudgeable, unchanged)', () => {
+      // The heartbeat belongs to a superseded generation; the owner record's pid
+      // describes a different listener entirely, so neither can judge the other.
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex 4f2c9a01bb33cd10');
+      writeOwner({ nonce: 'b0b0b0b0b0b0b0b0', pid: deadPid() });
+      const r = runHook('{}', { CODEX_THREAD_ID: 'thr_1' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('applies the check when the heartbeat nonce MATCHES the owner', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex 4f2c9a01bb33cd10');
+      writeOwner({ nonce: '4f2c9a01bb33cd10', pid: deadPid() });
+      const json = JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).not.toContain('4f2c9a01bb33cd10'); // the nonce never leaks
+    });
+
+    it('does not touch a heartbeat it could not judge anyway (empty kind)', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, '');
+      writeOwner({ nonce: 'f00d', pid: deadPid() });
+      const r = runHook();
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('still never wedges: stop_hook_active allows even a dead-pid heartbeat', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      writeOwner({ nonce: 'f00d', pid: deadPid() });
+      const r = runHook('{"stop_hook_active":true}', { CODEX_THREAD_ID: 'thr_1' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('ignores a non-numeric pid rather than guessing', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      fs.writeFileSync(
+        path.join(stateDir, 'await-owner.json'),
+        JSON.stringify({ version: 1, nonce: 'f00d', pid: 'nope' }),
+      );
+      const r = runHook('{}', { CODEX_THREAD_ID: 'thr_1' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+  });
+
+  /* ------------- the runtime the hook thinks it is running under ------------- *
+   * MEASURED 2026-09-16: a Codex hook's environment has NO CODEX_THREAD_ID and
+   * no CODEX_SESSION_ID. Keying Codex behaviour on that variable therefore made
+   * this hook behave like Claude's inside Codex — a passive `await` heartbeat,
+   * the exact thing it exists to catch, sailed through. The wrapper now exports
+   * SPARROW_HOOK_RUNTIME=codex (and SPARROW_CODEX_THREAD when the payload names
+   * a session), and the hook keys on those.
+   * ------------------------------------------------------------------------- */
+  describe('runtime detection without CODEX_THREAD_ID', () => {
+    it('judges a passive await heartbeat as Codex on SPARROW_HOOK_RUNTIME alone', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(5, 'await');
+      const json = JSON.parse(runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' }).stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('passive');
+      expect(json.reason).toContain('await:codex');
+      expect(json.reason).toContain('Codex');
+    });
+
+    it('judges it as Codex on SPARROW_CODEX_THREAD alone too', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(5, 'await');
+      const json = JSON.parse(runHook('{}', { SPARROW_CODEX_THREAD: 'abc-123' }).stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('passive');
+    });
+
+    it('names Codex as the runtime it cannot wake, on the wrapper var alone', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(5, 'watch'); // online-but-deaf: the reason names the runtime
+      const json = JSON.parse(runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' }).stdout);
+      expect(json.reason).toContain('can never wake Codex');
+    });
+
+    it('is unchanged for Claude: a fresh plain await still allows', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(5, 'await');
+      const r = runHook();
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+  });
+
   it('does NOT set idle on a blocked stop (loop drift)', () => {
     writeLoopState('engaged'); // stale/no heartbeat → block
     const curlLog = stubRecordingCurl();

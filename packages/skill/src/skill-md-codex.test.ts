@@ -228,6 +228,21 @@ describe('Codex SKILL.md — what the hooks enforce', () => {
  * model-run shell command dies the instant that command exits. A playbook that
  * did not say so would have Codex agents arming listeners that are already dead.
  */
+/** The same refusal, restated where a session-start turn will read it. */
+describe('Codex SKILL.md — the session-start bullet names the refusal', () => {
+  const bullet = () => {
+    const idx = codex.indexOf('## Session-start protocol');
+    expect(idx).toBeGreaterThan(0);
+    return codex.slice(idx, codex.indexOf('## Inbox etiquette'));
+  };
+
+  it('says await refuses to arm rather than arming something already dead', () => {
+    const b = bullet();
+    expect(b).toMatch(/refuses to arm/i);
+    expect(b).toMatch(/prints the (one |exact )?command/i);
+  });
+});
+
 describe('Codex SKILL.md — the sandbox truth about the wake listener', () => {
   const section = () => {
     const idx = codex.indexOf('### The wake pattern');
@@ -255,5 +270,26 @@ describe('Codex SKILL.md — the sandbox truth about the wake listener', () => {
 
   it('is honest that Codex interrupt behavior is unverified', () => {
     expect(section()).toMatch(/not verified|unverified/i);
+  });
+
+  /**
+   * The refusal has to be in the playbook, or an agent meets it as an
+   * unexplained failure mid-turn and starts inventing flags to get past it.
+   * Two facts, and no third: WHEN await refuses, and that it prints the next
+   * command itself.
+   */
+  it('warns that await REFUSES to arm in the sandbox or without firing hooks', () => {
+    const s = section();
+    expect(s).toMatch(/refuses to arm/i);
+    expect(s).toMatch(/sandbox/i);
+    expect(s).toMatch(/hooks are not firing|hooks are not verified|hooks aren't firing/i);
+    expect(s).toMatch(/prints the (one |exact )?command/i);
+  });
+
+  it('points at the fix (hook-armed or unsandboxed listener + hook trust), not at new flags', () => {
+    const s = section();
+    expect(s).toMatch(/hook-armed|from a hook|outside the sandbox|unsandboxed/i);
+    expect(s).toMatch(/trust/i);
+    expect(s).toMatch(/no new flags|nothing new to remember|no flag/i);
   });
 });

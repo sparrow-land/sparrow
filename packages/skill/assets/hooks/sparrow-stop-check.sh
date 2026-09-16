@@ -15,6 +15,15 @@
 #      green while nothing can ever re-enter a turn-based session. Only
 #      `sparrow await` is a WAKE PATH -- it exits when work arrives, and that
 #      exit is what gets a turn-based agent re-invoked.
+#   4. FRESH HEARTBEAT, DEAD PROCESS -- the listener was SIGKILLed, so it stamped
+#      NOTHING on its way out (SIGKILL is uncatchable) and the heartbeat it had
+#      already written stays fresh for the whole window. This is what a Codex
+#      sandbox does to a listener armed from a model-run command: the PID
+#      namespace is torn down the instant the command returns. So a fresh
+#      `await`/`await:codex` heartbeat is cross-checked against the owner pid in
+#      <state dir>/await-owner.json, and a DEMONSTRABLY absent process blocks.
+#      Permission-denied is not absence (the owner may be another unix user), a
+#      missing pid is not absence, and neither of those blocks anything.
 # If the loop switch is absent or paused, stay silent.
 #
 # HOW IT TELLS THEM APART: every CLI listener writes its own kind (`await`,
@@ -74,13 +83,13 @@ hold_kind=""
 passive_await=""
 dead_word=""
 dead_signal=""
+gone_pid=""
 # BOTH runtimes now re-arm the same way: plain, unbounded `sparrow await`. The
 # CLI owns its own liveness (stale-stream detection, periodic re-establish,
 # resuming reconnects), so nothing here hands back a bounded command whose only
-# effect would be to burn a turn re-arming on a timer. Only the WORDING forks:
-# Codex runs hooks as children of the session process, so they inherit its
-# CODEX_THREAD_ID; if a future runner strips it we simply name the runtime
-# generically and treat plain `await` as unjudgeable.
+# effect would be to burn a turn re-arming on a timer. Only the WORDING forks,
+# on the runtime resolved just below; when we cannot tell which runtime we are
+# in, we name it generically and treat plain `await` as a wake path.
 # ONE PRESCRIPTION, TWO LANGUAGES. A machine hosting several agents under one
 # unix user shares ONE credentials.json, so a bare `sparrow await` typed into a
 # fresh shell acts as whichever neighbour owns defaultProfile. A project-scope
@@ -97,10 +106,21 @@ sparrow_cmd() {
 }
 await_command=$(sparrow_cmd await)
 pop_command=$(sparrow_cmd pop)
-if [ -n "${CODEX_THREAD_ID:-}" ]; then
+# WHICH RUNTIME IS THIS? Measured 2026-09-16: a Codex hook's environment carries
+# NEITHER CODEX_THREAD_ID nor CODEX_SESSION_ID (only CODEX_MANAGED_BY_NPM
+# survives), so keying Codex behaviour on CODEX_THREAD_ID alone made this hook
+# quietly judge a Codex session by Claude's rules -- passing exactly the passive
+# `await` heartbeat it exists to catch. The wrapper every Codex hook runs through
+# now exports SPARROW_HOOK_RUNTIME=codex, plus SPARROW_CODEX_THREAD when the hook
+# payload named a session; CODEX_THREAD_ID is still honored for any runner that
+# does export it.
+codex_thread="${CODEX_THREAD_ID:-${SPARROW_CODEX_THREAD:-}}"
+if [ -n "$codex_thread" ] || [ "${SPARROW_HOOK_RUNTIME:-}" = codex ]; then
   runtime="Codex"
+  is_codex="yes"
 else
   runtime="this turn-based session"
+  is_codex=""
 fi
 # Read the heartbeat's two tokens: the stamp/kind, and the `await` GENERATION
 # nonce a dead stamp may carry (`killed:SIGTERM 4f2c...`).
@@ -126,6 +146,38 @@ sparrow_heartbeat_read() {
   printf '%s' "$sparrow_hb_word"
 }
 
+# IS THE PROCESS THAT WROTE THIS HEARTBEAT STILL THERE?
+#
+# Prints the pid when the owner record names a numeric one that is DEMONSTRABLY
+# GONE; prints nothing in every other case -- no record, no pid, a live process,
+# or a pid we are not allowed to signal. That last one matters: several agents
+# share a host under different unix users, and `kill -0` on a stranger's process
+# fails with EPERM, which is proof the process EXISTS. Treating it as absence
+# would block every one of those turns. Unknown always allows.
+dead_listener_pid() {
+  owner="$STATE_DIR/await-owner.json"
+  [ -r "$owner" ] || return 0
+  pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$owner" 2>/dev/null | head -n 1)
+  [ -n "$pid" ] || return 0
+  [ "$pid" -gt 0 ] 2>/dev/null || return 0
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0                      # alive, and ours
+  fi
+  # It failed. Absence or permission? procfs answers without needing either.
+  if [ -d /proc/1 ]; then
+    [ -e "/proc/$pid" ] && return 0   # alive, somebody else's
+    printf '%s' "$pid"
+    return 0
+  fi
+  # No procfs (macOS): fall back to the error text, and keep the benefit of the
+  # doubt for anything we cannot read as "no such process".
+  err=$(kill -0 "$pid" 2>&1 >/dev/null || true)
+  case "$err" in
+    *o\ such\ process* | *ESRCH*) printf '%s' "$pid" ;;
+  esac
+  return 0
+}
+
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 now=$(date +%s 2>/dev/null || echo 0)
 if [ -f "$HEARTBEAT_FILE" ]; then
@@ -136,7 +188,9 @@ if [ -f "$HEARTBEAT_FILE" ]; then
     killed | killed:*) dead_word="killed" ;;
     stopped | stopped:*) dead_word="stopped" ;;
   esac
-  if [ -n "$dead_word" ]; then
+  if [ -n "$gone_pid" ]; then
+  reason="Sparrow loop is engaged and the heartbeat is fresh, but the listener process (pid $gone_pid) is gone${suffix} -- a killed listener cannot stamp anything, so a fresh heartbeat outlives it by up to $FRESH_SECONDS seconds and nothing can wake $runtime. Re-arm it: run $await_command as a tracked background task, then drain with $pop_command when work wakes you. If it keeps dying instantly, whatever started it is being torn down with the command (a sandboxed shell) -- start it somewhere that outlives the turn. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+elif [ -n "$dead_word" ]; then
     case "$content" in
       *:*) dead_signal=$(printf '%s' "${content#*:}" | tr -cd 'A-Za-z0-9_') ;;
     esac
@@ -148,10 +202,21 @@ if [ -f "$HEARTBEAT_FILE" ]; then
         case "$content" in
           watch | loop) hold_kind="$content" ;;
           await)
-            if [ -n "${CODEX_THREAD_ID:-}" ]; then passive_await="yes"; else allow_stop; fi
+            if [ -n "$is_codex" ]; then
+              passive_await="yes"
+            else
+              # A wake path -- IF the process behind it still exists.
+              gone_pid=$(dead_listener_pid)
+              [ -n "$gone_pid" ] || allow_stop
+            fi
             ;;
-          await:codex) allow_stop ;;
-          # Empty/unknown (legacy or third-party heartbeat) is unjudgeable.
+          await:codex)
+            gone_pid=$(dead_listener_pid)
+            [ -n "$gone_pid" ] || allow_stop
+            ;;
+          # Empty/unknown (legacy or third-party heartbeat) is unjudgeable. Note
+          # the pid check deliberately does NOT run here: we have no claim to
+          # cross-check, and a stranger's heartbeat is none of our business.
           *) allow_stop ;;
         esac
       fi
@@ -208,7 +273,9 @@ suffix=""
 if [ -n "$unread" ] && [ "$unread" -gt 0 ] 2>/dev/null; then
   suffix=" (+ $unread unread)"
 fi
-if [ -n "$dead_word" ]; then
+if [ -n "$gone_pid" ]; then
+  reason="Sparrow loop is engaged and the heartbeat is fresh, but the listener process (pid $gone_pid) is gone${suffix} -- a killed listener cannot stamp anything, so a fresh heartbeat outlives it by up to $FRESH_SECONDS seconds and nothing can wake $runtime. Re-arm it: run $await_command as a tracked background task, then drain with $pop_command when work wakes you. If it keeps dying instantly, whatever started it is being torn down with the command (a sandboxed shell) -- start it somewhere that outlives the turn. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+elif [ -n "$dead_word" ]; then
   if [ "$dead_word" = killed ]; then
     if [ -n "$dead_signal" ]; then
       cause="was killed ($dead_signal -- usually a session interrupt)"

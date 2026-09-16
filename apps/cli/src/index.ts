@@ -81,8 +81,10 @@ import {
   sparrowCommand,
   PROVIDER_LABEL,
   type ListenerScope,
+  type PidNamespaceProbe,
   type TurnBasedRuntime,
 } from '@sparrow/skill';
+import { codexAwaitPreflight } from './await-preflight.js';
 import {
   clearPending,
   loadPending,
@@ -145,6 +147,12 @@ export interface CliIO {
   err(s: string): void;
   /** Injected Codex turn delivery for tests and embedded clients. */
   notifyCodex?(threadId: string, message: string): Promise<void>;
+  /**
+   * Injected /proc reader for the Codex arming preflight (await-preflight.ts).
+   * Tests describe a sandbox without being in one; real runs read the real
+   * procfs.
+   */
+  sandboxProbe?: PidNamespaceProbe;
   /** Injected stdin body (for `--stdin`). */
   stdin?: string;
   /** Prompt the user (login). `opts.hidden` masks input (passwords). */
@@ -4305,15 +4313,36 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           '--room (and `sparrow use --clear` if a sticky default set it).',
       );
     }
-    const { client, server, token } = buildClient(opts, env);
-    const { staleMs, maxStreamAgeMs } = streamHealthOpts(opts);
-    const timeoutSeconds = (opts.timeout as number | undefined) ?? 0;
     const explicitCodexThread = (opts.codexThread as string | undefined)?.trim();
     if (opts.codexThread !== undefined && !explicitCodexThread) {
       throw new CliError('--codex-thread requires a non-empty Codex thread id.');
     }
-    const codexThread = explicitCodexThread || env.CODEX_THREAD_ID?.trim();
+    // A model-run Codex shell exports BOTH names with the same value, and which
+    // one is present has varied across Codex builds — so either identifies the
+    // thread, for the queue bridge and for the preflight below alike.
+    const codexThread =
+      explicitCodexThread || env.CODEX_THREAD_ID?.trim() || env.CODEX_SESSION_ID?.trim();
     const awaitHeartbeatKind = codexThread ? 'await:codex' : 'await';
+
+    /* ------------------------ CODEX ARMING PREFLIGHT ------------------------
+     * BEFORE the network and before anything is written to the state dir: a
+     * Codex per-command sandbox kills this listener the moment the command
+     * returns, and hooks that never fire mean nothing re-arms it at turn end.
+     * Only a Codex run is affected — a plain run never probes and never reads a
+     * stamp. See await-preflight.ts for why exactly one of the two is fatal.
+     * ---------------------------------------------------------------------- */
+    if (codexThread) {
+      codexAwaitPreflight({
+        env,
+        thread: codexThread,
+        err: (s) => io.err(s),
+        probe: io.sandboxProbe,
+      });
+    }
+
+    const { client, server, token } = buildClient(opts, env);
+    const { staleMs, maxStreamAgeMs } = streamHealthOpts(opts);
+    const timeoutSeconds = (opts.timeout as number | undefined) ?? 0;
 
     /* -------------------- ONE LISTENER PER STATE DIR --------------------
      * The skill tells a turn-based agent to re-arm `await` as the last action
@@ -4927,11 +4956,16 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     .description(
       'WAKE primitive for turn-based agents: hold the events stream (presence rides it) until a ' +
         'work item is waiting, print it as one JSON line WITHOUT consuming it, and exit 0 for an external ' +
-        'wake bridge to handle — then drain with `sparrow pop`. When CODEX_THREAD_ID is present, it ' +
-        'automatically queues that bridge into the current Codex thread. On wake it heartbeats presence ' +
+        'wake bridge to handle — then drain with `sparrow pop`. When CODEX_THREAD_ID (or ' +
+        'CODEX_SESSION_ID) is present, it automatically queues that bridge into the current Codex ' +
+        'thread. On wake it heartbeats presence ' +
         '(--turn-seconds) so you stay online while you work. Exit 2 = --timeout elapsed (re-arm); ' +
         'exit 4 = a newer `sparrow await` took over this state dir (arming is idempotent — newest ' +
         'wins — so re-arming blindly is always safe). ' +
+        'On a Codex run it also refuses to arm (exit 1) inside the per-command sandbox, which would ' +
+        'SIGKILL the listener the instant this command returns (operators may set ' +
+        'SPARROW_AWAIT_SANDBOX_CHECK=0), and warns when Codex hooks have not been observed firing — ' +
+        'SPARROW_AWAIT_REQUIRE_HOOKS=1 makes that warning fatal (exit 1) too. ' +
         'Use --wake-on to wake urgently for DMs/mentions/email and batch the rest (--batch-after).',
     )
     .option('--timeout <seconds>', 'give up (exit 2) after this long with nothing waiting', (v) =>
