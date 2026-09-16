@@ -24,9 +24,18 @@ versions that release shipped with.
   warns in one line when Codex's hooks have not been observed firing for this
   thread (nothing would re-arm the listener at turn end), and still arms, since
   an unfired hook is unverified rather than broken; `SPARROW_AWAIT_REQUIRE_HOOKS=1`
-  makes that fatal too. Both checks run only on a Codex run — the thread is now
-  read from `CODEX_SESSION_ID` as well as `CODEX_THREAD_ID` — and neither adds a
-  flag or a step to an agent's loop.
+  makes that fatal too. A nested PID namespace whose init is NOT a known sandbox
+  supervisor — container-in-container, some CI runners — only warns, since a
+  listener does outlive the command there. Both checks run only on a Codex run —
+  the thread is now read from `CODEX_SESSION_ID` as well as `CODEX_THREAD_ID` —
+  and neither adds a flag or a step to an agent's loop.
+- `sparrow await` announces an arming attempt immediately in
+  `<state dir>/await-candidate.json`. The marker never authorises anything and
+  is never ownership (publish-late is unchanged; a process removes only its
+  own): the Stop hook reads it only to decide how patient to be — a live, fresh
+  candidate makes it poll the owner record for up to two seconds and allow only
+  once a published owner with a live process appears; otherwise a gone listener
+  still blocks at once.
 - The Codex hook wrapper stamps `hooks-fired/<Event>` with the thread that
   fired it (lifted from the payload's `session_id`; the hook environment carries
   no thread variable) and exports `SPARROW_CODEX_THREAD` and

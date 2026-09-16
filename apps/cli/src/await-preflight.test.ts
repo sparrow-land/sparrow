@@ -38,9 +38,18 @@ function fakeProbe(files: Record<string, string>): PidNamespaceProbe & { reads: 
 const hostProbe = (): PidNamespaceProbe & { reads: string[] } =>
   fakeProbe({ '/proc/self/status': 'Name:\tnode\nNSpid:\t4242\n', '/proc/1/comm': 'systemd\n' });
 
-/** A Codex per-command sandbox: pid 1 is the sandbox supervisor. */
+/** A Codex per-command sandbox: pid 1 is the sandbox supervisor (signal `init`). */
 const sandboxProbe = (): PidNamespaceProbe & { reads: string[] } =>
   fakeProbe({ '/proc/self/status': 'Name:\tnode\nNSpid:\t4242\n', '/proc/1/comm': 'codex-linux-sandbox\n' });
+
+/**
+ * A NESTED namespace with an unremarkable init (signal `nspid`): the shape of a
+ * per-command sandbox without a mount-proc, but ALSO the shape of
+ * container-in-container and several CI runners — where a listener does outlive
+ * the command. Weak evidence, so it may only warn.
+ */
+const nestedProbe = (): PidNamespaceProbe & { reads: string[] } =>
+  fakeProbe({ '/proc/self/status': 'Name:\tnode\nNSpid:\t3125325\t5\n', '/proc/1/comm': 'systemd\n' });
 
 function stamp(event: string, body: string): void {
   fs.mkdirSync(path.join(stateDir, 'hooks-fired'), { recursive: true });
@@ -78,7 +87,28 @@ describe('codexAwaitPreflight — sandbox check (FATAL: provable from the inside
     expect(message).toContain('pid 1 is codex-linux-sandbox');
     expect(message).toContain('killed the moment the command returns');
     expect(message).toContain('SPARROW_AWAIT_SANDBOX_CHECK=0');
-    expect(message).toContain('sparrow skill verify');
+    // The way out is a place the listener OUTLIVES this command. No hook starts
+    // `sparrow await` — the installed hooks instruct, block and heartbeat — so
+    // the line must never send the reader to one.
+    expect(message).toContain('re-run it unsandboxed');
+    expect(message).toContain('sparrow harness --codex');
+    expect(message).not.toContain('Arm it from a hook');
+  });
+
+  it('only WARNS for a nested namespace whose init is not a known supervisor', () => {
+    stamp('Stop', `runtime ${THREAD}`);
+    const lines = run({ probe: nestedProbe() });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('nested PID namespace');
+    expect(lines[0]).toContain('NSpid lists 2 pids');
+    expect(lines[0]).toContain('a persistent container is fine');
+    expect(lines[0]).toContain('sparrow harness');
+    expect(lines[0]!.trimEnd().split('\n')).toHaveLength(1);
+  });
+
+  it('SPARROW_AWAIT_SANDBOX_CHECK=0 silences the nested-namespace warning too', () => {
+    stamp('Stop', `runtime ${THREAD}`);
+    expect(run({ env: { SPARROW_AWAIT_SANDBOX_CHECK: '0' }, probe: nestedProbe() })).toEqual([]);
   });
 
   it('arms on an ordinary host (no namespace) without a word', () => {
@@ -101,6 +131,9 @@ describe('codexAwaitPreflight — hook verification (ADVISORY: absence is not pr
     expect(lines[0]).toContain(THREAD);
     expect(lines[0]).toContain('have not been observed firing');
     expect(lines[0]).toContain('sparrow skill verify');
+    // UNVERIFIED, not broken: the note may not assert that the hooks are dead.
+    expect(lines[0]).toContain('no verified Stop-hook safety net');
+    expect(lines[0]).toContain('if they are not running');
     expect(lines[0]!.endsWith('\n')).toBe(true);
     expect(lines[0]!.trimEnd().split('\n')).toHaveLength(1);
   });
@@ -135,6 +168,7 @@ describe('codexAwaitPreflight — hook verification (ADVISORY: absence is not pr
     const lines = run();
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('hand run');
+    expect(lines[0]).toContain('not evidence Codex runs them');
     expect(lines[0]).toContain(THREAD);
   });
 
@@ -143,6 +177,10 @@ describe('codexAwaitPreflight — hook verification (ADVISORY: absence is not pr
     const lines = run();
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('different Codex thread');
+    // One stamp file per EVENT, not per thread: a sibling session simply wrote
+    // last. The note says so instead of claiming the hooks are not running.
+    expect(lines[0]).toContain('a sibling session may simply have written last');
+    expect(lines[0]).toContain('nothing proves they fire for this one');
     expect(lines[0]).toContain(THREAD);
   });
 

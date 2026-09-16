@@ -2,7 +2,7 @@
  * Behavioral test for the shipped Stop-hook shell script, exercised through a
  * real POSIX `sh` in an isolated HOME/state dir with a stub `curl` on PATH.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -645,6 +645,119 @@ describe('sparrow-stop-check.sh', () => {
       const r = runHook('{"stop_hook_active":true}', { CODEX_THREAD_ID: 'thr_1' });
       expect(r.code).toBe(0);
       expect(r.stdout.trim()).toBe('');
+    });
+
+    /* ------------------ the listener that is still STARTING ------------------ *
+     * THE RACE (found in review, 2026-09-16). A listener exits on work, the
+     * agent re-arms as the last act of the turn, and the new listener publishes
+     * its owner record LATE — deliberately: it loads credentials and completes
+     * one HTTP round trip before claiming ownership. A Stop hook firing inside
+     * that window reads the OLD owner pid, finds it gone, and blocks a turn that
+     * is doing exactly the right thing.
+     *
+     * So the listener drops `<state dir>/await-candidate.json` the instant its
+     * process starts, before any network. It is not ownership and it is never
+     * unlinked — it is the honest "something is arming" signal. It is NOT
+     * evidence of a wake path, only a reason to be PATIENT: the hook then polls
+     * for a published owner whose process exists, and blocks if the window
+     * expires. That asymmetry is deliberate — a false block costs one
+     * self-correcting turn, while a false allow ends the turn with no proven
+     * wake path, which is the 11-hour incident itself. The sandbox case cannot
+     * fake any of it: there the process is dead, so the candidate names a
+     * corpse and the hook blocks at once.
+     * ------------------------------------------------------------------------ */
+    const writeCandidate = (fields: Record<string, unknown>, ageSeconds = 0): void => {
+      const f = path.join(stateDir, 'await-candidate.json');
+      fs.writeFileSync(
+        f,
+        `${JSON.stringify({ version: 1, nonce: 'cand', startedAt: new Date().toISOString(), ...fields })}\n`,
+      );
+      const when = new Date(Date.now() - ageSeconds * 1000);
+      fs.utimesSync(f, when, when);
+    };
+
+    it('ALLOWS once the arming listener PUBLISHES ownership within the window', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      writeOwner({ nonce: 'f00d', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: 'cand' });
+      // The real thing: credentials, one round trip, then the owner record. The
+      // writer must be its own process — execFileSync below blocks node's loop.
+      const owner = path.join(stateDir, 'await-owner.json');
+      const published = JSON.stringify({ version: 1, nonce: 'newgen', pid: process.pid, kind: 'await' });
+      const writer = spawn('sh', ['-c', `sleep 0.3; printf '%s' '${published}' > '${owner}'`], {
+        stdio: 'ignore',
+        detached: true,
+      });
+      writer.unref();
+      const r = runHook('{}', { CODEX_THREAD_ID: 'thr_1' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('BLOCKS when the candidate never publishes, after waiting out the window', () => {
+      // A candidate is a reason to be PATIENT, never evidence of a wake path.
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      writeOwner({ nonce: 'f00d', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: 'cand' });
+      const started = Date.now();
+      expect(JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout).decision).toBe('block');
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThan(1_800);
+      expect(elapsed).toBeLessThan(3_000);
+    });
+
+    it('BLOCKS immediately when the candidate names the generation that already published', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      writeOwner({ nonce: 'f00d', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: 'f00d' }); // == the owner nonce
+      const started = Date.now();
+      expect(JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout).decision).toBe('block');
+      expect(Date.now() - started).toBeLessThan(500);
+    });
+
+    it('BLOCKS immediately when the candidate names the heartbeat generation', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex 4f2c9a01bb33cd10');
+      writeOwner({ nonce: '4f2c9a01bb33cd10', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: '4f2c9a01bb33cd10' });
+      const started = Date.now();
+      expect(JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout).decision).toBe('block');
+      expect(Date.now() - started).toBeLessThan(500);
+    });
+
+    it('BLOCKS when the candidate names a dead pid too', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      const pid = deadPid();
+      writeOwner({ nonce: 'f00d', pid });
+      writeCandidate({ pid: deadPid() });
+      const started = Date.now();
+      const json = JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain(`pid ${pid}`);
+      expect(Date.now() - started).toBeLessThan(500); // a corpse is not worth waiting for
+    });
+
+    it('BLOCKS when the candidate is STALE, live pid or not', () => {
+      // A months-old marker from a listener whose pid has since been recycled is
+      // not evidence that anything is starting now.
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      writeOwner({ nonce: 'f00d', pid: deadPid() });
+      writeCandidate({ pid: process.pid }, 600);
+      expect(JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout).decision).toBe('block');
+    });
+
+    it('BLOCKS with no candidate at all, without waiting at all', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex');
+      writeOwner({ nonce: 'f00d', pid: deadPid() });
+      const started = Date.now();
+      expect(JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout).decision).toBe('block');
+      expect(Date.now() - started).toBeLessThan(500);
     });
 
     it('ignores a non-numeric pid rather than guessing', () => {

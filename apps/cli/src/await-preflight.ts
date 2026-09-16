@@ -68,39 +68,71 @@ function switchedOn(value: string | undefined): boolean {
  * about the namespace, not about what that namespace's owner will do when the
  * command returns. "Appears to be" is the honest claim, and the escape hatch is
  * named in the line itself for the operator who knows better.
+ *
+ * THE WAY OUT IS A PLACE THE LISTENER OUTLIVES THIS COMMAND — and that is NOT
+ * "arm it from a hook": every hook the skill installs instructs, blocks or
+ * heartbeats, and not one of them starts `sparrow await`. Sending a trapped
+ * agent to a hook would be sending it nowhere.
  */
 export const sandboxRefusal = (evidence: string): string =>
   `sparrow await refused to arm: this command appears to be running inside a sandbox PID namespace ` +
-  `(${evidence}), where a background listener is killed the moment the command returns. Arm it from ` +
-  "a hook instead (the Sparrow skill's hooks do this; `sparrow skill verify` shows whether they " +
-  'fire) or run this command unsandboxed. Operators who know better can set ' +
-  'SPARROW_AWAIT_SANDBOX_CHECK=0.';
+  `(${evidence}), where a background listener is killed the moment the command returns. Run it where ` +
+  'it outlives this command: re-run it unsandboxed (in Codex, request approval to run this command ' +
+  'outside the sandbox), or run `sparrow harness --codex` on a host that stays up. Operators who know ' +
+  'better can set SPARROW_AWAIT_SANDBOX_CHECK=0.';
 
-/** The one line for each way hook verification can come up short. */
+/**
+ * The weaker signal: a nested PID namespace with an ordinary init.
+ *
+ * NOT A REFUSAL. This is what a per-command sandbox without a `--mount-proc`
+ * looks like — and equally what container-in-container, nested CI runners and
+ * several agent harnesses look like, where a background listener DOES outlive
+ * the command that started it. Refusing here would strand every one of those.
+ * So it names the condition, names what to check after the turn, and arms.
+ */
+export const nestedNamespaceNote = (evidence: string): string =>
+  `this command is running inside a nested PID namespace (${evidence}). If that namespace belongs to ` +
+  'a per-command sandbox, this listener dies when the command returns; a persistent container is ' +
+  'fine. `sparrow skill verify` after this turn should still show a live listener; if it does not, ' +
+  're-run unsandboxed or use `sparrow harness`.';
+
+/**
+ * The one line for each way hook verification can come up short.
+ *
+ * EVERY ONE OF THESE IS A STATEMENT ABOUT EVIDENCE, NEVER ABOUT THE HOOKS. A
+ * missing stamp is a fresh install before its Codex restart; a manual stamp is a
+ * script check that proves nothing either way; and stamps naming another thread
+ * are what a sibling session leaves behind, since there is one stamp file per
+ * EVENT rather than per thread. "The hooks are not running" would be a claim the
+ * CLI cannot support — and would send an agent chasing a working install.
+ */
 export function unverifiedHooksNote(
   reason: 'no-stamps' | 'manual-only' | 'other-thread',
   thread: string,
 ): string {
-  const head = `Codex hooks have not been observed firing for this thread (${thread}): `;
+  const head = `Codex hooks have not been observed firing for this thread (${thread})`;
   const tail = '`sparrow skill verify` shows the details.';
+  // The consequence is always CONDITIONAL — "if they are not running" — because
+  // the stamps are missing evidence, not evidence of absence.
+  const consequence =
+    'this listener has no verified Stop-hook safety net: if they are not running, nothing re-arms ' +
+    'it when the turn ends.';
   switch (reason) {
     case 'manual-only':
       return (
-        `${head}the only hook stamps on disk came from a hand run (SPARROW_HOOK_SELFTEST=1), not from ` +
-        'Codex itself, so nothing will re-arm this listener when the turn ends or block a deaf turn end. ' +
-        `Trust the project's hooks (review them with /hooks in Codex, or --dangerously-bypass-hook-trust ` +
-        `headless) and restart Codex; ${tail}`
+        `${head}: the only stamps on disk came from a hand run (SPARROW_HOOK_SELFTEST=1), which is not ` +
+        `evidence Codex runs them, so ${consequence} Trust the project's hooks (review them with /hooks in ` +
+        `Codex, or --dangerously-bypass-hook-trust headless) and restart Codex; ${tail}`
       );
     case 'other-thread':
       return (
-        `${head}the stamps on disk were written by a different Codex thread, so the hooks are not running ` +
-        `for this one and nothing will re-arm this listener when the turn ends. Restart Codex after ` +
-        `trusting its hooks so this session stamps its own; ${tail}`
+        `${head}: the stamps on disk name a different Codex thread (a sibling session may simply have ` +
+        `written last), so nothing proves they fire for this one and ${consequence} If hooks were just ` +
+        `installed, restart Codex after trusting them; ${tail}`
       );
     default:
       return (
-        `${head}nothing will re-arm this listener when the turn ends or block a deaf turn end. ` +
-        `If hooks were just installed, restart Codex after trusting them; ${tail}`
+        `${head}, so ${consequence} If hooks were just installed, restart Codex after trusting them; ${tail}`
       );
   }
 }
@@ -119,11 +151,14 @@ export function codexAwaitPreflight(opts: CodexAwaitPreflightOpts): void {
   const { env, thread, err, probe } = opts;
   const stateDir = opts.stateDir ?? resolveStateDir(env);
 
-  // 1. The sandbox: proof, so it is fatal — and checked first, because arming
-  //    in a sandbox fails no matter how healthy the hooks are.
+  // 1. The sandbox — checked first, because arming inside one fails no matter
+  //    how healthy the hooks are. ONLY the supervisor identity is strong enough
+  //    to refuse on (see nestedNamespaceNote for why a bare nested namespace is
+  //    not), so the two signals part company here.
   if (!switchedOff(env.SPARROW_AWAIT_SANDBOX_CHECK)) {
     const sandbox = detectPidNamespace(probe);
-    if (sandbox.inNamespace) throw new CliError(sandboxRefusal(sandbox.evidence));
+    if (sandbox.signal === 'init') throw new CliError(sandboxRefusal(sandbox.evidence));
+    if (sandbox.signal === 'nspid') err(`[await] ${nestedNamespaceNote(sandbox.evidence)}\n`);
   }
 
   // 2. The hooks: absence of a stamp is not evidence of absence.

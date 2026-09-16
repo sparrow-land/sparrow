@@ -30,9 +30,10 @@
 # on 2026-09-16: a Codex hook's environment does NOT carry CODEX_THREAD_ID or
 # CODEX_SESSION_ID (only CODEX_MANAGED_BY_NPM survives), so the identity has to
 # come out of the hook PAYLOAD on stdin — snake_case keys, `session_id` among
-# them. We lift it with sed (no jq, no node: this runs on every hook), sanitise
-# it, write `<kind> <thread>`, and export it as SPARROW_CODEX_THREAD for the
-# inner hook, which is how the Stop hook knows it is running under Codex at all.
+# them. We lift the TOP-LEVEL one (node when available, an anchored sed when
+# not — see below), sanitise it, write `<kind> <thread>`, and export it as
+# SPARROW_CODEX_THREAD for the inner hook, which is how the Stop hook knows it
+# is running under Codex at all.
 # No session_id in the payload -> a bare `<kind>`, exactly as before.
 #
 # Usage: sparrow-codex-hook.sh <Event> <script> [args...]
@@ -60,11 +61,28 @@ FIRED_DIR="$STATE_DIR/hooks-fired"
 # The payload, read WHOLE and best-effort: nothing below may fail if stdin is
 # closed, empty, or not JSON.
 input=$(cat 2>/dev/null || true)
-thread=$(printf '%s' "$input" \
-  | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-  | head -n 1 \
-  | tr -cd 'A-Za-z0-9_-' \
-  | cut -c1-128)
+
+# THE THREAD IS THE TOP-LEVEL `session_id`, AND ONLY THAT. Codex payloads nest:
+# a PostToolUse `tool_response` can carry a `session_id` of its own, and a regex
+# swept over the whole payload happily returns it. Stamping another session's id
+# is worse than stamping none — `hooksVerifiedForThread` would then answer
+# confidently about the wrong thread. So parse structurally with node when node
+# is there (the Stop hook already shells out to it for the unread count, so the
+# cost is accepted), and when it is not, fall back to an ANCHORED sed that can
+# only see a `session_id` while it is still at the top level, i.e. the first
+# top-level key BEFORE any nested object. Anything else yields no thread at all:
+# unverified is the safe answer.
+if command -v node >/dev/null 2>&1; then
+  thread=$(SPARROW_HOOK_PAYLOAD="$input" node -e 'try{const j=JSON.parse(process.env.SPARROW_HOOK_PAYLOAD||"");if(j&&typeof j==="object"&&typeof j.session_id==="string")process.stdout.write(j.session_id)}catch(e){}' 2>/dev/null || true)
+else
+  thread=$(printf '%s' "$input" \
+    | tr '\n' ' ' \
+    | sed -n 's/^[[:space:]]*{[^{}]*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1)
+fi
+# Sanitise whatever came back: a stamp filename's neighbour is still a file we
+# write, and a thread id is compared, printed and logged downstream.
+thread=$(printf '%s' "$thread" | tr -cd 'A-Za-z0-9_-' | cut -c1-128)
 
 if [ -n "$event" ]; then
   if [ -n "${SPARROW_HOOK_SELFTEST:-}" ]; then kind=manual; else kind=runtime; fi

@@ -22,7 +22,13 @@
  * either opened the events stream or reached the preflight hand-off, so a re-arm
  * that dies on a bad token or an unreachable server never evicts a healthy
  * listener. Until then it owns nothing and touches nothing (no heartbeat, no
- * cursor, no presence, no Codex queue).
+ * cursor, no presence, no Codex queue). That delay spans a round trip, though,
+ * and an outside reader looking only at the published record cannot tell "no
+ * listener" from "a listener is starting right now" — the Stop hook, checking
+ * the owner's pid while the agent's last-act re-arm was still authenticating,
+ * would see the exited listener's dead pid and block a turn that is about to be
+ * covered. The CANDIDATE MARKER below announces the arming attempt immediately
+ * so that window reads correctly, and it is never consulted for eviction.
  *
  * FAIL OPEN. Every read/write here is best-effort: an unreadable or missing
  * record reads as "still mine", and a record this process could not WRITE
@@ -93,6 +99,85 @@ export function awaitOwnerPath(env: Env): string {
   return path.join(resolveStateDir(env), 'await-owner.json');
 }
 
+/** `<state dir>/await-candidate.json` — see {@link AwaitCandidateRecord}. */
+export function awaitCandidatePath(env: Env): string {
+  return path.join(resolveStateDir(env), 'await-candidate.json');
+}
+
+/**
+ * "A LISTENER IS ARMING." Written the instant a generation is constructed —
+ * before credentials, before the network, before anything is published.
+ *
+ * IT IS NOT OWNERSHIP. Nothing here reads it, no eviction decision consults it,
+ * and publish-late is untouched: a candidate that dies on a bad token still
+ * evicts nobody. It exists so an OUTSIDE reader (the Stop hook) can tell the
+ * arming window apart from an empty state dir.
+ *
+ * HOW READERS MUST JUDGE IT: the marker means "arming" only while its `pid` is
+ * alive AND its `startedAt` is within the last {@link AWAIT_CANDIDATE_TTL_SECONDS}
+ * seconds; anything else is stale — age retires a marker no one cleaned up.
+ * Cleanup itself is never blind: a process removes the marker on its own publish
+ * and on its own exit, and ONLY when the nonce on disk is its own (see
+ * {@link clearAwaitCandidate}). A later arm overwrites whatever is there.
+ */
+export interface AwaitCandidateRecord {
+  version: 1;
+  /** The nonce this candidate will publish if it gets that far. */
+  nonce: string;
+  pid: number;
+  startedAt: string;
+}
+
+/** How long a candidate marker may be believed. Readers enforce this. */
+export const AWAIT_CANDIDATE_TTL_SECONDS = 120;
+
+/**
+ * Retire OUR OWN marker (publish, or the listener's exit) — and only ours.
+ *
+ * Read, compare, unlink: a newer candidate's file must never be deleted by an
+ * older process, exactly as the owner record is never unlinked blindly. The
+ * opposite would re-open the window the marker exists to close, by erasing the
+ * announcement of the listener that overtook us.
+ *
+ * A MARKER NEVER AUTHORISES ANYTHING. The Stop hook reads it only to decide how
+ * PATIENT to be: a live, fresh, unpublished candidate makes the hook poll the
+ * owner record for up to two seconds before blocking; the verdict itself always
+ * rests on a published owner whose process exists. So the residual — a candidate
+ * SIGKILLed before it could clean up, its pid recycled within
+ * {@link AWAIT_CANDIDATE_TTL_SECONDS} — costs one pointless wait that still ends
+ * in a block, never a turn that ends uncovered. (Reviewed 2026-09-16: a pending
+ * candidate is not a wake path; a false ALLOW here is the incident itself.)
+ */
+function clearAwaitCandidate(env: Env, nonce: string): void {
+  try {
+    const file = awaitCandidatePath(env);
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<AwaitCandidateRecord>;
+    if (raw?.nonce !== nonce) return; // someone else's announcement — hands off
+    fs.unlinkSync(file);
+  } catch {
+    /* absent, unreadable, already gone: nothing to retire */
+  }
+}
+
+/** Best-effort, atomic, never throws: an unwritable state dir just skips it. */
+function writeAwaitCandidate(env: Env, nonce: string): void {
+  const record: AwaitCandidateRecord = {
+    version: 1,
+    nonce,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  };
+  try {
+    const file = awaitCandidatePath(env);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${nonce}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(record)}\n`);
+    fs.renameSync(tmp, file); // atomic: no reader ever sees half a record
+  } catch {
+    /* best-effort: a marker that cannot be written must not stop the listener */
+  }
+}
+
 /** The published generation, or undefined when absent, unreadable, or malformed. */
 export function readAwaitOwner(env: Env): AwaitOwnerRecord | undefined {
   try {
@@ -139,6 +224,12 @@ export interface AwaitGeneration {
    */
   publish(): AwaitPublication;
   /**
+   * Retire this generation's candidate marker — on its own publish, and again
+   * on the listener's exit (a candidate that never published still has one).
+   * No-op for anyone else's marker; never throws; idempotent.
+   */
+  clearCandidate(): void;
+  /**
    * The CHECKPOINT. `undefined` while this listener still owns the state dir
    * (including before it has published, when it owns nothing and does nothing);
    * otherwise the nonce of the generation that superseded it.
@@ -164,6 +255,9 @@ export function prepareAwaitGeneration(opts: {
 }): AwaitGeneration {
   const { env, kind, profile } = opts;
   const nonce = crypto.randomBytes(8).toString('hex');
+  // IMMEDIATELY — before credentials, before the network, before publish-late.
+  // This is what turns the arming window from "no listener" into "one starting".
+  writeAwaitCandidate(env, nonce);
   let live = false;
   /** FALSE for an `unfenced` generation — one whose record never reached disk. */
   let onDisk = false;
@@ -197,8 +291,14 @@ export function prepareAwaitGeneration(opts: {
         /* best-effort: an unwritable state dir must not stop the listener */
       }
       live = true;
+      // The published record now makes the same announcement, with more
+      // authority — ours to retire, and only ours.
+      clearAwaitCandidate(env, nonce);
       runPublishHook();
       return onDisk ? 'published' : 'unfenced';
+    },
+    clearCandidate(): void {
+      clearAwaitCandidate(env, nonce);
     },
     supersededBy(): string | undefined {
       if (lost !== undefined) return lost;

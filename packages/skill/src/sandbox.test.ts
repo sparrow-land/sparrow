@@ -32,14 +32,24 @@ const STATUS_NS = ['Name:\tnode', 'Pid:\t3125325', 'NSpid:\t3125325\t5', 'Thread
 describe('detectPidNamespace', () => {
   it('reads an ordinary host as NOT namespaced', () => {
     const r = detectPidNamespace(fakeProbe({ '/proc/self/status': STATUS_HOST, '/proc/1/comm': 'systemd\n' }));
-    expect(r.inNamespace).toBe(false);
-    expect(r.evidence).toBe('no PID namespace detected');
+    expect(r).toEqual({ inNamespace: false, evidence: 'no PID namespace detected', signal: 'none' });
   });
 
   it('reads a two-field NSpid as namespaced, whatever pid 1 is', () => {
     const r = detectPidNamespace(fakeProbe({ '/proc/self/status': STATUS_NS, '/proc/1/comm': 'systemd\n' }));
     expect(r.inNamespace).toBe(true);
     expect(r.evidence).toBe('NSpid lists 2 pids (nested PID namespace)');
+    expect(r.signal).toBe('nspid');
+  });
+
+  /**
+   * The pid-1 rule is evaluated FIRST. A real sandbox can show both signals at
+   * once (nested NSpid *and* a supervisor at pid 1), and `init` is the stronger,
+   * actionable one — the CLI refuses on it, where it only warns on `nspid`.
+   */
+  it('reports init, not nspid, when BOTH signals are present', () => {
+    const r = detectPidNamespace(fakeProbe({ '/proc/self/status': STATUS_NS, '/proc/1/comm': 'codex\n' }));
+    expect(r).toEqual({ inNamespace: true, evidence: 'pid 1 is codex', signal: 'init' });
   });
 
   it('reads codex-linux-sandbox as pid 1 as namespaced even with a single NSpid', () => {
@@ -48,6 +58,7 @@ describe('detectPidNamespace', () => {
     );
     expect(r.inNamespace).toBe(true);
     expect(r.evidence).toBe('pid 1 is codex-linux-sandbox');
+    expect(r.signal).toBe('init');
   });
 
   /**
@@ -61,19 +72,18 @@ describe('detectPidNamespace', () => {
     expect(detectPidNamespace(fakeProbe({ '/proc/self/status': status, '/proc/1/comm': 'codex\n' }))).toEqual({
       inNamespace: true,
       evidence: 'pid 1 is codex',
+      signal: 'init',
     });
   });
 
   it('reads bwrap as pid 1 as namespaced too', () => {
     const r = detectPidNamespace(fakeProbe({ '/proc/self/status': STATUS_HOST, '/proc/1/comm': 'bwrap\n' }));
-    expect(r.inNamespace).toBe(true);
-    expect(r.evidence).toBe('pid 1 is bwrap');
+    expect(r).toEqual({ inNamespace: true, evidence: 'pid 1 is bwrap', signal: 'init' });
   });
 
   it('reads a Docker container (single NSpid, arbitrary pid 1) as NOT namespaced', () => {
     const r = detectPidNamespace(fakeProbe({ '/proc/self/status': STATUS_HOST, '/proc/1/comm': 'node\n' }));
-    expect(r.inNamespace).toBe(false);
-    expect(r.evidence).toBe('no PID namespace detected');
+    expect(r).toEqual({ inNamespace: false, evidence: 'no PID namespace detected', signal: 'none' });
   });
 
   /**
@@ -83,28 +93,30 @@ describe('detectPidNamespace', () => {
    */
   it('reads a nested-namespace container as namespaced, on the NSpid evidence alone', () => {
     const r = detectPidNamespace(fakeProbe({ '/proc/self/status': STATUS_NS, '/proc/1/comm': 'node\n' }));
-    expect(r).toEqual({ inNamespace: true, evidence: 'NSpid lists 2 pids (nested PID namespace)' });
+    expect(r).toEqual({ inNamespace: true, evidence: 'NSpid lists 2 pids (nested PID namespace)', signal: 'nspid' });
   });
 
   it('never guesses when procfs is unreadable: not namespaced, and says why', () => {
     const r = detectPidNamespace(fakeProbe({}));
-    expect(r.inNamespace).toBe(false);
-    expect(r.evidence).toBe('procfs unreadable');
+    expect(r).toEqual({ inNamespace: false, evidence: 'procfs unreadable', signal: 'none' });
   });
 
   it('still judges on whichever file it CAN read', () => {
     expect(detectPidNamespace(fakeProbe({ '/proc/1/comm': 'codex-linux-sandbox' }))).toEqual({
       inNamespace: true,
       evidence: 'pid 1 is codex-linux-sandbox',
+      signal: 'init',
     });
     expect(detectPidNamespace(fakeProbe({ '/proc/self/status': STATUS_NS }))).toEqual({
       inNamespace: true,
       evidence: 'NSpid lists 2 pids (nested PID namespace)',
+      signal: 'nspid',
     });
     // One file readable, and it says nothing → a verdict, not "unreadable".
     expect(detectPidNamespace(fakeProbe({ '/proc/self/status': STATUS_HOST }))).toEqual({
       inNamespace: false,
       evidence: 'no PID namespace detected',
+      signal: 'none',
     });
   });
 
@@ -119,6 +131,7 @@ describe('detectPidNamespace', () => {
     const junk = 'NSpid:\n';
     const r = detectPidNamespace(fakeProbe({ '/proc/self/status': junk, '/proc/1/comm': 'systemd' }));
     expect(r.inNamespace).toBe(false);
+    expect(r.signal).toBe('none');
   });
 
   /**
@@ -129,5 +142,6 @@ describe('detectPidNamespace', () => {
     const r = detectPidNamespace();
     expect(typeof r.inNamespace).toBe('boolean');
     expect(r.evidence.length).toBeGreaterThan(0);
+    expect(['init', 'nspid', 'none']).toContain(r.signal);
   });
 });

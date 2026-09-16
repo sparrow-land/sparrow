@@ -70,6 +70,24 @@ export interface PidNamespaceReport {
    * `procfs unreadable`.
    */
   evidence: string;
+  /**
+   * WHICH rule fired, because the two are not equally strong.
+   *
+   * `init` — pid 1 is a sandbox supervisor we recognize (`codex`,
+   * `codex-linux-sandbox`, `bwrap`). That identity is what ties the namespace to
+   * a per-command teardown, so it is strong enough to refuse to arm on.
+   *
+   * `nspid` — only the multi-field NSpid rule fired. A nested PID namespace on
+   * its own is also what persistent container-in-container setups and some CI
+   * runners look like, and a listener armed there DOES outlive the command. Not
+   * strong enough to refuse on; the CLI treats it as a warning.
+   *
+   * `none` — neither rule fired, including the case where procfs was unreadable.
+   *
+   * The `init` rule is evaluated FIRST, so a real Codex sandbox that shows both
+   * signals reports the actionable one.
+   */
+  signal: 'init' | 'nspid' | 'none';
 }
 
 /** Init names that mean "per-command sandbox", not "container". */
@@ -110,20 +128,28 @@ export function detectPidNamespace(probe: PidNamespaceProbe = defaultProbe): Pid
   const status = probe.readFile(STATUS_PATH);
   const comm = probe.readFile(INIT_COMM_PATH);
 
-  if (status !== undefined) {
-    const count = nspidCount(status);
-    if (count >= 2) {
-      return { inNamespace: true, evidence: `NSpid lists ${count} pids (nested PID namespace)` };
+  // The supervisor identity first: it is the actionable signal, and a real
+  // sandbox can show both.
+  if (comm !== undefined) {
+    const init = comm.trim();
+    if (SANDBOX_INITS.has(init)) {
+      return { inNamespace: true, evidence: `pid 1 is ${init}`, signal: 'init' };
     }
   }
 
-  if (comm !== undefined) {
-    const init = comm.trim();
-    if (SANDBOX_INITS.has(init)) return { inNamespace: true, evidence: `pid 1 is ${init}` };
+  if (status !== undefined) {
+    const count = nspidCount(status);
+    if (count >= 2) {
+      return {
+        inNamespace: true,
+        evidence: `NSpid lists ${count} pids (nested PID namespace)`,
+        signal: 'nspid',
+      };
+    }
   }
 
   if (status === undefined && comm === undefined) {
-    return { inNamespace: false, evidence: 'procfs unreadable' };
+    return { inNamespace: false, evidence: 'procfs unreadable', signal: 'none' };
   }
-  return { inNamespace: false, evidence: 'no PID namespace detected' };
+  return { inNamespace: false, evidence: 'no PID namespace detected', signal: 'none' };
 }

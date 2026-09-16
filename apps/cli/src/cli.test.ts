@@ -3972,6 +3972,8 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     }
     const HOST = { '/proc/self/status': 'NSpid:\t4242\n', '/proc/1/comm': 'systemd\n' };
     const SANDBOX = { '/proc/self/status': 'NSpid:\t4242\n', '/proc/1/comm': 'codex-linux-sandbox\n' };
+    /** Nested, but nothing names a sandbox: a container, as far as anyone knows. */
+    const NESTED = { '/proc/self/status': 'NSpid:\t3125325\t5\n', '/proc/1/comm': 'systemd\n' };
 
     /** The base env with the suite's sandbox escape hatch lifted. */
     const unpinned = (extra: Record<string, string | undefined>) => ({
@@ -3998,10 +4000,24 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
         await runCli(['await', '--timeout', '10'], unpinned({ CODEX_THREAD_ID: 'thread-sand' }), cap.io),
       ).toBe(1);
       expect(cap.err()).toContain('pid 1 is codex-linux-sandbox');
-      expect(cap.err()).toContain('sparrow skill verify');
+      expect(cap.err()).toContain('sparrow harness --codex');
       expect(cap.out()).toBe(''); // no wake line, and…
       // …no side effect: the previous listener's claim is untouched.
       expect(heartbeat()).toBe(before);
+    });
+
+    it('a nested namespace with an ordinary init WARNS and still arms', async () => {
+      await awaitFixture('awtpfnested');
+      stampHook('runtime thread-nested');
+      const cap = capture();
+      cap.io.sandboxProbe = probe(NESTED);
+
+      expect(
+        await runCli(['await', '--timeout', '1'], unpinned({ CODEX_THREAD_ID: 'thread-nested' }), cap.io),
+      ).toBe(2);
+      expect(cap.err()).toContain('nested PID namespace');
+      expect(cap.err()).toContain('a persistent container is fine');
+      expect(JSON.parse(cap.out().trim()).type).toBe('await.timeout');
     });
 
     it('CODEX_SESSION_ID alone identifies the thread (Codex exports both names)', async () => {

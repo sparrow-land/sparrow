@@ -150,31 +150,124 @@ sparrow_heartbeat_read() {
 #
 # Prints the pid when the owner record names a numeric one that is DEMONSTRABLY
 # GONE; prints nothing in every other case -- no record, no pid, a live process,
-# or a pid we are not allowed to signal. That last one matters: several agents
-# share a host under different unix users, and `kill -0` on a stranger's process
-# fails with EPERM, which is proof the process EXISTS. Treating it as absence
-# would block every one of those turns. Unknown always allows.
-dead_listener_pid() {
-  owner="$STATE_DIR/await-owner.json"
-  [ -r "$owner" ] || return 0
-  pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$owner" 2>/dev/null | head -n 1)
-  [ -n "$pid" ] || return 0
-  [ "$pid" -gt 0 ] 2>/dev/null || return 0
-  if kill -0 "$pid" 2>/dev/null; then
-    return 0                      # alive, and ours
-  fi
-  # It failed. Absence or permission? procfs answers without needing either.
+# a pid we are not allowed to signal, or a listener that is still STARTING.
+#
+# Permission matters: several agents share a host under different unix users, and
+# `kill -0` on a stranger's process fails with EPERM, which is proof the process
+# EXISTS. Treating that as absence would block every one of those turns. Unknown
+# always allows.
+#
+# THE ARMING RACE (review, 2026-09-16) is why this is not just `kill -0`. A
+# listener exits on work, the agent re-arms as the last act of its turn, and the
+# new listener publishes <state dir>/await-owner.json LATE -- by design, after
+# credentials and one HTTP round trip. A Stop hook firing in that window sees the
+# OLD owner pid gone and would block a turn that did exactly the right thing. So
+# the listener drops <state dir>/await-candidate.json the instant its process
+# starts, before any network: not ownership, never a claim, just an honest
+# "something is arming".
+#
+# A CANDIDATE IS NEVER EVIDENCE OF A WAKE PATH -- only a reason to be PATIENT.
+# Finding a live, fresh, not-yet-published candidate, this POLLS the owner record
+# for up to 2 seconds and allows only when a DIFFERENT generation has published
+# and its process exists. No candidate, or the window expires: block.
+#
+# WHY NOT "WHEN UNSURE, ALLOW" HERE. Everywhere else in this hook an unjudgeable
+# state allows, because a wrong block wastes a turn. Not on this path: a false
+# BLOCK costs one self-correcting turn, while a false ALLOW ends the turn with no
+# proven wake path -- which is precisely the 11-hour silent incident this check
+# exists for. The verdict always rests on the same fact, a published owner whose
+# process exists, so a recycled pid can only buy a longer wait, never a wrong
+# verdict.
+#
+# WHY THE NONCE GATE: a candidate whose nonce matches the heartbeat's generation
+# or the owner record's is BY DEFINITION the generation that already published,
+# so it is not arming -- without that check a stale marker plus a recycled pid
+# would buy a 2-second wait on every stop forever. The CLI also removes the
+# marker on publish and on clean exit, so it normally never outlives the arming
+# window. Residual failure mode, accepted: a candidate process that died without
+# cleanup, whose pid is recycled inside the freshness window, and whose nonce
+# never reached the owner record -- one pointless wait, still ending in a block.
+#
+# The sandbox case this whole check exists for cannot fake any of it: there the
+# listener process is dead, so the candidate names a corpse and we block at once.
+
+# Is <pid> demonstrably absent? Nothing else counts as absence.
+pid_absent() {
+  _p="$1"
+  kill -0 "$_p" 2>/dev/null && return 1
   if [ -d /proc/1 ]; then
-    [ -e "/proc/$pid" ] && return 0   # alive, somebody else's
-    printf '%s' "$pid"
+    [ -e "/proc/$_p" ] && return 1
     return 0
   fi
-  # No procfs (macOS): fall back to the error text, and keep the benefit of the
-  # doubt for anything we cannot read as "no such process".
-  err=$(kill -0 "$pid" 2>&1 >/dev/null || true)
-  case "$err" in
-    *o\ such\ process* | *ESRCH*) printf '%s' "$pid" ;;
+  # No procfs (macOS): read the error text, and keep the benefit of the doubt
+  # for anything we cannot positively read as "no such process".
+  _err=$(kill -0 "$_p" 2>&1 >/dev/null || true)
+  case "$_err" in
+    *o\ such\ process* | *ESRCH*) return 0 ;;
   esac
+  return 1
+}
+
+# The numeric `pid` / string `nonce` out of one of our JSON state records.
+json_pid() { sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null | head -n 1; }
+json_nonce() {
+  sed -n 's/.*"nonce"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9][A-Za-z0-9]*\)".*/\1/p' "$1" 2>/dev/null | head -n 1
+}
+
+owner_pid() { [ -r "$STATE_DIR/await-owner.json" ] && json_pid "$STATE_DIR/await-owner.json"; }
+
+# Is a listener currently ARMING? (live + fresh + a generation that has not
+# published yet). Answers with an exit status; prints nothing.
+listener_arming() {
+  _cand="$STATE_DIR/await-candidate.json"
+  [ -r "$_cand" ] || return 1
+  _cpid=$(json_pid "$_cand")
+  [ -n "$_cpid" ] || return 1
+  [ "$_cpid" -gt 0 ] 2>/dev/null || return 1
+  pid_absent "$_cpid" && return 1
+
+  # Freshness by the marker's mtime: portable, and enough. (`startedAt` is in the
+  # record for humans; parsing ISO dates in POSIX sh is not worth the edge cases.)
+  _cm=$(mtime "$_cand")
+  [ -n "${_cm:-}" ] || return 1
+  [ "$now" -gt 0 ] 2>/dev/null || return 1
+  _cage=$((now - _cm))
+  [ "$_cage" -ge 0 ] && [ "$_cage" -lt "$FRESH_SECONDS" ] || return 1
+
+  # The nonce gate: a candidate that names the generation already in the
+  # heartbeat or the owner record is that generation, not a new one arming.
+  _cnonce=$(json_nonce "$_cand")
+  _ononce=""
+  [ -r "$STATE_DIR/await-owner.json" ] && _ononce=$(json_nonce "$STATE_DIR/await-owner.json")
+  _hbnonce=$(head -c 96 "$HEARTBEAT_FILE" 2>/dev/null | tr '\t\r\n' '   ' \
+    | sed -n 's/^ *[^ ][^ ]*  *\([A-Za-z0-9][A-Za-z0-9]*\).*/\1/p')
+  [ "$_cnonce" = "$_ononce" ] && return 1
+  [ "$_cnonce" = "$_hbnonce" ] && return 1
+  return 0
+}
+
+dead_listener_pid() {
+  pid=$(owner_pid)
+  [ -n "${pid:-}" ] || return 0
+  [ "$pid" -gt 0 ] 2>/dev/null || return 0
+  pid_absent "$pid" || return 0
+
+  # Nothing is arming: this listener is simply gone.
+  listener_arming || { printf '%s' "$pid"; return 0; }
+
+  # Something IS arming. Wait for it to publish ownership -- up to 2 seconds, in
+  # 100ms steps (a shell whose `sleep` rejects fractions waits in 1s steps).
+  _start_nonce=$(json_nonce "$STATE_DIR/await-owner.json")
+  _waited=0
+  while [ "$_waited" -lt 2000 ]; do
+    if sleep 0.1 2>/dev/null; then _waited=$((_waited + 100)); else sleep 1; _waited=$((_waited + 1000)); fi
+    _n=$(json_nonce "$STATE_DIR/await-owner.json")
+    _p=$(owner_pid)
+    if [ -n "$_n" ] && [ "$_n" != "$_start_nonce" ] && [ -n "${_p:-}" ] && [ "$_p" -gt 0 ] 2>/dev/null; then
+      pid_absent "$_p" || return 0    # published, and its process exists: allow
+    fi
+  done
+  printf '%s' "$pid"
   return 0
 }
 

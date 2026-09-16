@@ -4306,7 +4306,23 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
    * which requires an upgrade before re-arm.
    */
   const AWAIT_DRAIN_CMD = 'sparrow pop';
+  /**
+   * Set by an armed run so the wrapper below can retire THIS listener's
+   * candidate marker on every exit path — including the ones that never
+   * publish (a bad token, an unreachable server). It only ever removes a marker
+   * whose nonce is its own, so a listener that was overtaken while it ran leaves
+   * its successor's announcement standing.
+   */
+  const awaitCandidate: { retire?: () => void } = {};
   const runAwait = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
+    try {
+      await runAwaitArmed(opts);
+    } finally {
+      awaitCandidate.retire?.();
+      awaitCandidate.retire = undefined;
+    }
+  };
+  const runAwaitArmed = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
     if (roomSelector(opts, env)) {
       throw new CliError(
         '`sparrow await` watches the ONE work queue, which spans rooms and mediums — drop ' +
@@ -4376,6 +4392,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       kind: awaitHeartbeatKind,
       profile: activeProfileName(opts, env),
     });
+    awaitCandidate.retire = () => generation.clearCandidate();
     let supersededBy: string | undefined;
     /** Set once the stream exists: how a checkpoint ends the wait. */
     let standDown: () => void = () => {};
