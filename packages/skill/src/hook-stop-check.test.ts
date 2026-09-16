@@ -543,6 +543,13 @@ describe('sparrow-stop-check.sh', () => {
    * process that wrote it still exists — `await-owner.json` records its pid.
    * Only a DEMONSTRABLY absent process blocks: a permission error (the owner may
    * belong to another unix user) is unknown, and unknown always allows.
+   *
+   * WHAT THE CLAUSE PROVES IS ABSENCE, NOT KILLING (field report from vm8,
+   * 2026-09-17). A normal wake-exit, a SIGKILL and a listener that failed at
+   * startup are indistinguishable on disk — all three leave a fresh heartbeat
+   * and no process — and the remedy is identical for all three: re-arm. So the
+   * reason says what was observed and prescribes the fix, and offers the sandbox
+   * story only as conditional troubleshooting, never as the detected cause.
    * ------------------------------------------------------------------------- */
   describe('a fresh heartbeat whose listener process is gone', () => {
     const writeOwner = (fields: Record<string, unknown>): void =>
@@ -568,11 +575,33 @@ describe('sparrow-stop-check.sh', () => {
       const json = JSON.parse(r.stdout);
       expect(json.decision).toBe('block');
       expect(json.reason).toContain(`pid ${pid}`);
-      expect(json.reason).toMatch(/is gone/);
-      expect(json.reason).toMatch(/heartbeat is (still )?fresh/i);
+      expect(json.reason).toMatch(/no longer running/);
+      expect(json.reason).toMatch(/heartbeat is still fresh/i);
       expect(json.reason).toContain(`run ${awaitCommand()} as a tracked background task`);
       expect(json.reason).toContain('sparrow pop');
       expect(json.reason).toContain('sparrow skill pause');
+    });
+
+    /**
+     * THE REGRESSION (vm8, 2026-09-17). `sparrow await` exiting because work
+     * arrived is the NORMAL end of a listener's life, and it looks exactly like
+     * a SIGKILL from here: fresh heartbeat, no process. Blocking is right — the
+     * turn really does end deaf — but telling the agent it "was killed by a
+     * sandboxed shell" sends it hunting a sandbox bug that does not exist.
+     */
+    it('does not accuse anything of killing a listener that simply woke and exited', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await f00d'); // a plain wake-exit under Claude
+      const pid = deadPid();
+      writeOwner({ nonce: 'f00d', pid });
+      const json = JSON.parse(runHook().stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('no longer running');
+      expect(json.reason).toMatch(/re-arm/i);
+      expect(json.reason).not.toMatch(/killed/i);
+      expect(json.reason).not.toMatch(/SIGKILL/);
+      // The sandbox is offered as a conditional, never asserted.
+      expect(json.reason).toMatch(/if a freshly armed listener keeps disappearing/i);
     });
 
     it('BLOCKS a fresh plain await (Claude) whose owner pid is gone too', () => {
@@ -772,7 +801,7 @@ describe('sparrow-stop-check.sh', () => {
       publishLater({ nonce: 'bbbb', pid: replacement }, 'await:codex bbbb');
       const json = JSON.parse(runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' }).stdout);
       expect(json.decision).toBe('block');
-      expect(json.reason).toContain('is gone');
+      expect(json.reason).toContain('no longer running');
     });
 
     it('BLOCKS when the candidate never publishes, after waiting out the window', () => {

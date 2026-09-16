@@ -15,15 +15,20 @@
 #      green while nothing can ever re-enter a turn-based session. Only
 #      `sparrow await` is a WAKE PATH -- it exits when work arrives, and that
 #      exit is what gets a turn-based agent re-invoked.
-#   4. FRESH HEARTBEAT, DEAD PROCESS -- the listener was SIGKILLed, so it stamped
-#      NOTHING on its way out (SIGKILL is uncatchable) and the heartbeat it had
-#      already written stays fresh for the whole window. This is what a Codex
-#      sandbox does to a listener armed from a model-run command: the PID
-#      namespace is torn down the instant the command returns. So a fresh
-#      `await`/`await:codex` heartbeat is cross-checked against the owner pid in
-#      <state dir>/await-owner.json, and a DEMONSTRABLY absent process blocks.
-#      Permission-denied is not absence (the owner may be another unix user), a
-#      missing pid is not absence, and neither of those blocks anything.
+#   4. FRESH HEARTBEAT, NO PROCESS -- the recorded listener is not running, yet
+#      the heartbeat it wrote is still inside the freshness window. A fresh
+#      `await`/`await:codex` heartbeat is therefore cross-checked against the
+#      owner pid in <state dir>/await-owner.json, and a DEMONSTRABLY absent
+#      process blocks. Permission-denied is not absence (the owner may be another
+#      unix user), a missing pid is not absence, and neither blocks anything.
+#
+#      THIS CLAUSE PROVES ABSENCE, NOT KILLING. A normal wake-exit (await's whole
+#      job is to exit when work arrives), an uncatchable SIGKILL from a sandbox
+#      torn down with its command, and a listener that died during startup are
+#      indistinguishable from here -- all three leave a fresh heartbeat and no
+#      process. The remedy is the same for all three, so the reason states the
+#      observation, prescribes the re-arm, and offers the sandbox story only as
+#      conditional troubleshooting.
 # If the loop switch is absent or paused, stay silent.
 #
 # HOW IT TELLS THEM APART: every CLI listener writes its own kind (`await`,
@@ -412,7 +417,7 @@ if [ -n "$unread" ] && [ "$unread" -gt 0 ] 2>/dev/null; then
   suffix=" (+ $unread unread)"
 fi
 if [ -n "$gone_pid" ]; then
-  reason="Sparrow loop is engaged and the heartbeat is fresh, but the listener process (pid $gone_pid) is gone${suffix} -- a killed listener cannot stamp anything, so a fresh heartbeat outlives it by up to $FRESH_SECONDS seconds and nothing can wake $runtime. Re-arm it: run $await_command as a tracked background task, then drain with $pop_command when work wakes you. If it keeps dying instantly, whatever started it is being torn down with the command (a sandboxed shell) -- start it somewhere that outlives the turn. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+  reason="Sparrow loop is engaged, but the recorded listener process (pid $gone_pid) is no longer running although its heartbeat is still fresh${suffix}. Await normally exits when work arrives; re-arm it before ending this turn: run $await_command as a tracked background task, then drain with $pop_command. If a freshly armed listener keeps disappearing at once, whatever started it is probably being torn down with the command (a sandboxed shell); run it where it outlives the command. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 elif [ -n "$dead_word" ]; then
   if [ "$dead_word" = killed ]; then
     if [ -n "$dead_signal" ]; then

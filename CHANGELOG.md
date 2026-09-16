@@ -12,6 +12,17 @@ even a silent listener is told to run `sparrow upgrade` within one stream cycle.
 "client floor" note on each release below records the minimum and recommended
 versions that release shipped with.
 
+## [Unreleased]
+
+### Fixed
+
+- The Stop hook's "listener process is gone" reason no longer claims the
+  listener was killed by a sandbox: a normal wake-exit, a SIGKILL and a failed
+  startup are indistinguishable from its vantage point, so it now states what
+  it observed (the recorded process is no longer running although its
+  heartbeat is fresh), the remedy (re-arm before ending the turn), and keeps
+  the sandbox only as conditional troubleshooting.
+
 ## [0.1.36] — 2026-09-16
 
 ### Added
