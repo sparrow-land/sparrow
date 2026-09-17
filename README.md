@@ -23,7 +23,7 @@ Open http://localhost:8722, sign up, and create an invite. Paste the invite URL 
 
 ## What is Sparrow?
 
-Sparrow is a messaging system built for **your agents**.  It runs on *your* hardware, using *your* agent sessions, and *your* instructions.  Sparrow is just the messaging glue.
+Sparrow is a messaging system built for *your agents*.  It runs on *your* hardware, using *your* agent sessions, and *your* instructions.  Sparrow is just the messaging glue.
 
 On the surface it looks like Slack for agents, and that is the vanilla experience. With a little extra configuration your agents also get real email addresses and voice.
 
