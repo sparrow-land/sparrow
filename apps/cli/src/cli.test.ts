@@ -4515,6 +4515,154 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
       }
     }
 
+    /* ================================================================
+     * WAITING OUT A BLOCK IS STILL BOUNDED BY `--timeout`.
+     *
+     * The wake line is out, the handoff is blocked, and the listener waits. That
+     * wait belongs to a harness that was promised an answer within `--timeout`:
+     * a nap on the standby cadence (30 s by default) must not outlive it, and a
+     * limit that lifts after the deadline must not start a turn for a listener
+     * whose harness has already been told to re-arm.
+     * ================================================================ */
+    interface Waiting {
+      running: Promise<number>;
+      cap: Capture;
+      calls: string[];
+      sent: string;
+      proxy: HoldingProxy;
+      elapsed: () => number;
+    }
+
+    /** Drive a listener into the post-wake handoff wait, with a marker in force. */
+    async function intoHandoffWait(opts: {
+      where: 'initial' | 'tail';
+      timeoutS: number;
+      pollMs: number;
+      fixture: string;
+    }): Promise<Waiting> {
+      const { owner, roomId, agentId } = await awaitFixture(opts.fixture);
+      const proxy = await startHoldingProxy();
+      const cap = capture();
+      const calls: string[] = [];
+      cap.io.notifyCodex = async (thread) => { calls.push(thread); };
+      let sent: string;
+
+      if (opts.where === 'initial') {
+        sent = (await owner.client.sendMessage(roomId, { to: agentId, body: 'bounded handoff' }))
+          .message.id;
+        proxy.holdPresence = true;
+      }
+      const t0 = Date.now();
+      const running = runCli(
+        ['await', '--timeout', String(opts.timeoutS), '--server', proxy.url],
+        { ...env, SPARROW_BLOCKED_POLL_MS: String(opts.pollMs), CODEX_THREAD_ID: 'thread-bounded' },
+        cap.io,
+      );
+      if (opts.where === 'tail') {
+        await until(async () => await ownerSeesOnline(owner, agentId));
+        proxy.holdPresence = true;
+        sent = (await owner.client.sendMessage(roomId, { to: agentId, body: 'bounded handoff' }))
+          .message.id;
+      }
+      await until(() => proxy.presenceHeld >= 1); // the wake line is out
+      block(); // …and the limit arrives before the handoff completes
+      proxy.release();
+      await until(() => heartbeat().startsWith('blocked:'));
+      return { running, cap, calls, sent: sent!, proxy, elapsed: () => Date.now() - t0 };
+    }
+
+    for (const where of ['initial', 'tail'] as const) {
+      it(`${where}: a cadence far longer than --timeout never delays the exit`, async () => {
+        // Poll 3 s, deadline 1 s: the old code slept the whole cadence and only
+        // then looked at the clock, so it could not exit before ~3 s.
+        const w = await intoHandoffWait({
+          where,
+          timeoutS: 1,
+          pollMs: 3000,
+          fixture: `awtbnd1${where[0]}`,
+        });
+        try {
+          expect(await w.running).toBe(2);
+          expect(w.elapsed()).toBeLessThan(2500);
+          expect(w.calls).toEqual([]); // no turn queued for a deadline that passed
+          await stillUnread(w.sent);
+        } finally {
+          await w.proxy.close();
+        }
+      }, 40_000);
+
+      it(`${where}: a clear AFTER the deadline cannot resurrect the handoff`, async () => {
+        // Deadline 1 s, cadence 3 s, and the limit lifts at ~1.1 s — INSIDE the
+        // old code's nap. It would wake at ~3 s, see a cleared marker, and hand
+        // off (queuing a Codex turn) two seconds past its own deadline.
+        const w = await intoHandoffWait({
+          where,
+          timeoutS: 1,
+          pollMs: 3000,
+          fixture: `awtbnd2${where[0]}`,
+        });
+        try {
+          const clearAt = setTimeout(
+            () => fs.rmSync(blockedDir, { recursive: true, force: true }),
+            Math.max(0, 1100 - w.elapsed()),
+          );
+          try {
+            expect(await w.running).toBe(2);
+            expect(w.elapsed()).toBeLessThan(2500);
+          } finally {
+            clearTimeout(clearAt);
+          }
+          await nap(300);
+          expect(w.calls).toEqual([]); // nothing rang the bridge afterwards
+          await stillUnread(w.sent);
+        } finally {
+          await w.proxy.close();
+        }
+      }, 40_000);
+
+      it(`${where}: a clear INSIDE the window still hands off, before the deadline`, async () => {
+        const w = await intoHandoffWait({
+          where,
+          timeoutS: 4,
+          pollMs: 200,
+          fixture: `awtbnd3${where[0]}`,
+        });
+        try {
+          await nap(500); // …about an eighth of the way in
+          fs.rmSync(blockedDir, { recursive: true, force: true });
+          expect(await w.running).toBe(0);
+          expect(w.elapsed()).toBeLessThan(4000); // inside the deadline
+          expect(w.calls).toEqual(['thread-bounded']);
+          expect(wakeLine(w.cap).item.id).toBe(w.sent);
+        } finally {
+          await w.proxy.close();
+        }
+      }, 40_000);
+    }
+
+    it('supersession during the handoff wait still exits 4', async () => {
+      const w = await intoHandoffWait({
+        where: 'initial',
+        timeoutS: 20,
+        pollMs: 200,
+        fixture: 'awtbnd4',
+      });
+      try {
+        const second = capture();
+        const successor = runCli(
+          ['await', '--timeout', '3'],
+          quick({ SPARROW_BLOCKED_POLL_MS: '200' }),
+          second.io,
+        );
+        expect(await w.running).toBe(4);
+        expect(w.elapsed()).toBeLessThan(20_000); // not waiting out the deadline
+        expect(w.calls).toEqual([]);
+        await successor;
+      } finally {
+        await w.proxy.close();
+      }
+    }, 40_000);
+
     it('an unreadable marker is ignored: junk never silences a listener', async () => {
       await awaitFixture('awtblockjunk');
       fs.mkdirSync(blockedDir, { recursive: true });

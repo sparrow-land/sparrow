@@ -4773,6 +4773,17 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      */
     const blockedSinceAsking = (): boolean => standingBy || readBlocked(env) !== undefined;
 
+    /**
+     * How long may we sleep? The standby cadence, or whatever is left of
+     * `--timeout` — whichever is shorter. A nap that outlives the deadline is
+     * how a listener ends up still alive (and, worse, still handing off) after
+     * the moment its harness was promised an answer.
+     */
+    const napWithinDeadline = (ms: number): number => {
+      if (handoffDeadline === undefined) return ms;
+      return Math.max(0, Math.min(ms, handoffDeadline - Date.now()));
+    };
+
     const abortableNap = (ms: number): Promise<void> =>
       new Promise((resolve) => {
         if (controller.signal.aborted) return resolve();
@@ -4839,14 +4850,34 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      * until then: nothing has acted on it, because nothing runs until we exit.
      * ================================================================== */
 
-    /** Cover the turn and ring the bridge. False = a block got in first. */
-    const completeHandoff = async (reason: 'work' | 'gap'): Promise<boolean> => {
+    /** Has this listener's own `--timeout` passed? (No timeout = never.) */
+    const deadlinePassed = (): boolean =>
+      handoffDeadline !== undefined && Date.now() >= handoffDeadline;
+
+    /**
+     * Cover the turn and ring the bridge. False = a block (or, for a handoff
+     * that a block delayed, the deadline) got in first.
+     */
+    const completeHandoff = async (
+      reason: 'work' | 'gap',
+      opts: { afterBlock?: boolean } = {},
+    ): Promise<boolean> => {
       if (blockedSinceAsking()) return false;
       await markTurn();
       // The presence POST is a round trip of its own, and under Claude Code the
       // bridge below is a no-op — so this is the check that catches a marker
       // written while the turn mark was being planted.
       if (blockedSinceAsking()) return false;
+      /* AND THE DEADLINE, for a handoff a block held up: a clear that races the
+       * expiry must not ring the bridge a moment after it. The turn would start
+       * for a listener whose harness has already been told to re-arm, and two
+       * listeners would be answering for one agent. The item is unread either
+       * way, so exit 2 loses nothing. Not applied to an ordinary handoff: a wake
+       * that was legitimately emitted inside the window is still a wake. */
+      if (opts.afterBlock === true && deadlinePassed()) {
+        timedOut = true;
+        return false;
+      }
       return (await queueCodexWake(reason)) !== 'blocked';
     };
 
@@ -4858,21 +4889,26 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const handoffAfterBlock = async (reason: 'work' | 'gap'): Promise<boolean> => {
       for (;;) {
         if (!owned()) return false; // superseded: exit 4, never a bare 0
+        /* THE DEADLINE IS READ FIRST, before the marker. Waking up to find both
+         * "the limit lifted" and "my time is up" is not ambiguous: this
+         * listener's harness has been waiting on `--timeout` and must be told
+         * to re-arm, and handing off instead would start a turn for a listener
+         * that no longer exists. Exit 2 costs nothing — the item is untouched,
+         * and the re-armed listener finds it exactly as it is. */
+        if (deadlinePassed()) {
+          timedOut = true;
+          return false;
+        }
         const blocked = readBlocked(env);
         if (blocked === undefined) {
           leaveStandby();
-          if (await completeHandoff(reason)) return true;
+          if (await completeHandoff(reason, { afterBlock: true })) return true;
           continue; // a second marker raced in — back to standing by
         }
         await enterStandby(blocked);
         if (!owned()) return false;
-        // The listener's own deadline still applies: exit 2 with the item
-        // unread is a re-arm, and the next listener finds it exactly as it is.
-        if (handoffDeadline !== undefined && Date.now() >= handoffDeadline) {
-          timedOut = true;
-          return false;
-        }
-        await sleep(blockedPollMs);
+        // …and the nap can never outlive the deadline it is waiting inside.
+        await sleep(napWithinDeadline(blockedPollMs));
       }
     };
 

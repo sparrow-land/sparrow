@@ -53,7 +53,11 @@ versions that release shipped with.
   process exiting), so a marker that lands between printing the line and
   completing the handoff means the listener stands by instead of exiting 0, and
   finishes the handoff when the limit lifts. A suppressed bridge is never
-  reported as a successful wake. Waiting work is still waiting when the
+  reported as a successful wake. That wait is bounded by the listener's own
+  `--timeout`: it never sleeps past the deadline, reads the deadline before the
+  marker, and re-checks it immediately before ringing the bridge — so a limit
+  that lifts late exits 2 with the item unread (the re-armed listener finds it)
+  rather than starting a turn for a listener whose harness has moved on. Waiting work is still waiting when the
   marker goes, and resuming asks the queue immediately — a stream reopened
   without a cursor cannot replay what arrived while the listener was away, so
   waiting for the next reconcile poll (or, with `--poll-seconds 0`, for the next
