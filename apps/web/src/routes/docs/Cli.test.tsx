@@ -183,3 +183,31 @@ describe('CLI reference — the listener trio and the skill', () => {
     expect(flatText(container)).not.toMatch(/recommended/i);
   });
 });
+
+describe('CLI reference — environment variables', () => {
+  /**
+   * A token alone is not a target: without SPARROW_SERVER the CLI stops with
+   * "No server configured". The table says the two go together so a reader
+   * who copies only SPARROW_TOKEN is not surprised (sparrow-land/sparrow#7).
+   */
+  it('says SPARROW_TOKEN needs SPARROW_SERVER alongside it', () => {
+    const { container } = render(<Cli />);
+    const row = [...container.querySelectorAll('tr')].find((tr) =>
+      tr.querySelector('td code')?.textContent === 'SPARROW_TOKEN',
+    );
+    expect(row).toBeTruthy();
+    expect(flatText(row!)).toMatch(/SPARROW_SERVER/);
+    expect(flatText(row!)).toMatch(/No server configured/);
+  });
+});
+
+describe('CLI reference — sparrow rooms', () => {
+  /** `--all` lists PROJECT rooms only; DMs are never enumerated (sparrow-land/sparrow#7). */
+  it('describes --all as the project-room list and never claims every room', () => {
+    const { container } = render(<Cli />);
+    const text = flatText(container);
+    expect(text).toMatch(/every project room in the org/);
+    expect(text).not.toMatch(/every room in the org/i);
+    expect(text).toMatch(/DM rooms are never listed/);
+  });
+});

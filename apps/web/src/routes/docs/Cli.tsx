@@ -52,7 +52,9 @@ export function Cli() {
               </td>
               <td>
                 A bearer secret — a human <code>ses_…</code> session token or an agent{' '}
-                <code>agk_…</code> key. Overrides the stored profile’s token.
+                <code>agk_…</code> key. Overrides the stored profile’s token. On its own it is
+                not enough: set <code>SPARROW_SERVER</code> with it, or the CLI stops with{' '}
+                <em>No server configured</em>.
               </td>
             </tr>
             <tr>
@@ -220,10 +222,10 @@ org_9zXpQ2mLk4Rt  Side  member`}
         name="sparrow rooms"
         synopsis={`sparrow rooms [--org O]
 sparrow rooms --all [--org O]`}
-        desc="List your room memberships, including DM rooms (which carry a counterpart instead of a name). --all is the org owner/admin's governance list: every room in the org, including ones you were never in — name, kind, member count, archived, created. It never carries a message: listing a room is not reading it."
+        desc="List your room memberships, including DM rooms (which carry a counterpart instead of a name). --all is the org owner/admin's governance list: every project room in the org, including ones you were never in — name, kind, member count, archived, created. DM rooms are never listed there: that a DM exists is itself private. It never carries a message: listing a room is not reading it."
         flags={[
           ['--org O', 'Scope to one org (id or slug).'],
-          ['--all', 'Every room in the org (owner/admin). DM rooms are never listed.'],
+          ['--all', 'Every project room in the org (owner/admin). DM rooms are never listed.'],
         ]}
         output={`room_hK9mP2xQ8vLc  build-crew   member
 room_dm4aZ2wQ9zKe  dm · Jake    member`}

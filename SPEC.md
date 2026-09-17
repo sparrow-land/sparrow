@@ -3798,7 +3798,10 @@ sparrow role set --none                               # clear your role (both ha
           # refresh-your-role hint) to re-read via `sparrow role` / GET /me.
 sparrow orgs                                          # your orgs (humans)
 sparrow rooms [--org O]                               # your memberships
-sparrow rooms --all [--org O]                          # every room in the org (owner/admin): id, name, kind, members, archived, created — never a message
+sparrow rooms --all [--org O]                          # every PROJECT room in the org (owner/admin): id, name, kind, members, archived, created — never a message
+          # DM rooms are never listed: their existence is the private fact
+          # (Org room governance). An org with only DMs prints "No project rooms
+          # in this org.", which is the truth, not an empty governance surface
 sparrow invites [list] | create [--note N] [--days D] | revoke <invId>   [--org O]
 sparrow requests [list] | approve <enlId> | deny <enlId>                 [--org O]
           # enrollment-only alias for the enrollment half of `sparrow approvals`
@@ -3858,6 +3861,11 @@ sparrow activity [--agent A] [--limit N] [--org O]    # the interleaved timeline
           # With --agent: that agent's timeline (owners and org admins may watch;
           # an agent profile may name only itself, as with the email medium)
 sparrow log [--limit N] [--before MSGID] [--room R]   # room history: oldest-first transcript (-j: raw newest-first + nextBefore)
+          # One line per message — `time  sender: body` — and the body is printed
+          # WHOLE: a multi-line body's continuation lines hang under the first,
+          # indented two spaces. Nothing is truncated away; the human view never
+          # says less than `-j` does. `sparrow email read <ethId>` renders a
+          # thread the same way.
 sparrow outbox [--limit N] --room R
 sparrow status <messageId> --room R                   # per-recipient read status
 sparrow status working [--note N] [--to M] [--ttl S] --room R
@@ -4124,10 +4132,19 @@ with time, medium, and who — and is a **reference list, not a mailbox**: entri
 typed refs, so `sparrow read` / `sparrow email read` fetch the bodies. `-j` prints the
 raw newest-first page plus `nextBefore`.
 
-On an instance with email disabled every `sparrow email` command, and the email half
-of `sparrow approvals`, exits 1 with "email is not enabled on this server" (the routes
-`404`, and `GET /api/v1/capabilities` says `email: false`) — the CLI never pretends the
-medium exists.
+On an instance with email disabled every `sparrow email` command exits 1 with "email
+is not enabled on this server" (the routes `404`, and `GET /api/v1/capabilities` says
+`email: false`) — the CLI never pretends the medium exists.
+
+`sparrow approvals` (the LIST) is the one command that **exits 0** there: it answers
+the human's question with the half this instance has, printing the enrollments, the
+line `Email: unavailable — email is not enabled on this server.`, and, with `-j`,
+`"email": null` inside the ordinary envelope — that `null` IS the signal, and `-j`
+emits exactly ONE document, never an envelope followed by an `{"error": …}` a `jq`
+pipe would choke on. Exit 1 is reserved for the cases that are purely email:
+`approvals approve` / `deny`, and a list narrowed to the email half alone with
+`--agent` or `--direction` — which fails BEFORE printing anything, so no error ever
+contradicts an envelope already on stdout.
 
 ## MCP server (`apps/mcp`)
 

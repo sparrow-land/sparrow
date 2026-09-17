@@ -313,6 +313,17 @@ describe('sparrow email read', () => {
     expect(body).toMatch(/\[held: unrecognized-recipient\]/);
   });
 
+  it('a thread transcript prints multi-line bodies WHOLE, continuation lines indented', async () => {
+    const f = await fixture();
+    const del = await inbound(f, { subject: 'Q3 rollout', text: 'line one\nline two\nline three' });
+    const cap = capture();
+    expect(await runCli(asBot('email', 'read', del.threadId), env, cap.io)).toBe(0);
+    const body = cap.out();
+    expect(body).toContain('line three');
+    expect(body).not.toContain('…');
+    expect(body).toContain('\n  line two\n');
+  });
+
   it('an eml_ id prints ONE email in full — headers, inbound verification, body, attachment ids', async () => {
     const f = await fixture();
     const del = await inbound(f, {
@@ -753,7 +764,7 @@ describe('an email-disabled instance', () => {
     void f;
   });
 
-  it('`approvals` still lists ENROLLMENTS; only its email half degrades', async () => {
+  it('`approvals` still lists ENROLLMENTS and exits 0; the email half degrades in place', async () => {
     const f = await fixture('fable', false);
     const inv = await f.owner.createInvite(f.orgId);
     const anon = new SparrowClient({ server: url });
@@ -761,18 +772,38 @@ describe('an email-disabled instance', () => {
     if (enr.status !== 'pending') throw new Error('expected a pending enrollment');
 
     const cap = capture();
-    // The enrollment half is answerable and IS answered; the email half is not,
-    // so the exit code is 1 (SPEC → CLI, the email-disabled rule).
-    expect(await runCli(asOwner('approvals'), env, cap.io)).toBe(1);
+    // The LIST answered the human's question ("what needs me?") with everything
+    // this instance has, and said plainly what it could not reach — that is a
+    // success, not a failure (issue #3).
+    expect(await runCli(asOwner('approvals'), env, cap.io)).toBe(0);
     expect(cap.out()).toContain(enr.enrollment.id);
     expect(cap.out()).toContain('newbie');
-    expect(cap.err()).toContain(MSG);
+    expect(cap.out()).toContain(`Email: unavailable — ${MSG}.`);
+    expect(cap.err()).toBe('');
 
     const json = capture();
-    expect(await runCli(asOwner('approvals', '--json'), env, json.io)).toBe(1);
+    expect(await runCli(asOwner('approvals', '--json'), env, json.io)).toBe(0);
+    // ONE document on stdout: `JSON.parse` of the whole stream is the test a
+    // `| jq` pipe runs. `email: null` carries the signal.
     const res = JSON.parse(json.out());
     expect(res.enrollments).toHaveLength(1);
     expect(res.email).toBeNull();
+    expect(json.err()).toBe('');
+  });
+
+  it('`approvals` narrowed to the email half alone exits 1 and prints no envelope', async () => {
+    const f = await fixture('fable', false);
+    for (const argv of [
+      ['approvals', '--direction', 'in'],
+      ['approvals', 'list', '--agent', f.agentName],
+    ]) {
+      const cap = capture();
+      expect(await runCli(asOwner(...argv), env, cap.io), argv.join(' ')).toBe(1);
+      expect(cap.err(), argv.join(' ')).toContain(MSG);
+      // The failure happens BEFORE any output, so `-j` never emits an envelope
+      // and then contradicts it.
+      expect(cap.out(), argv.join(' ')).toBe('');
+    }
   });
 
   it('`approvals approve` / `deny` are pure email and refuse outright', async () => {

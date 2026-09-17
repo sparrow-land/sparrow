@@ -1609,6 +1609,41 @@ describe('sparrow CLI — orgs, rooms, invites, requests', () => {
     await member.client.sendMessage(theirs.id, { body: 'hi' });
   });
 
+  it('rooms --all is the PROJECT-room governance list: DMs are never enumerated', async () => {
+    // SPEC → "Org room governance": the existence of a DM is itself the private
+    // fact, so `GET /orgs/:orgId/rooms` lists project rooms only. The CLI must
+    // say that in the words it uses, or an org whose only rooms are DMs reads
+    // its governance list as "there is nothing here" (issue #7).
+    const owner = await boot('roomsdm@x.com');
+    const bot = await makeAgent(owner, 'roomsdm-bot');
+    const dm = await owner.client.ensureDm({ principal: bot.id });
+    await ownerProfile(owner);
+
+    const empty = capture();
+    expect(await runCli(['rooms', '--all'], env, empty.io)).toBe(0);
+    expect(empty.out()).toContain('No project rooms in this org.');
+    expect(empty.out()).toContain('DM');
+    expect(empty.out()).not.toContain(dm.room.id);
+
+    const json = capture();
+    expect(await runCli(['rooms', '--all', '--json'], env, json.io)).toBe(0);
+    expect(JSON.parse(json.out()).items).toEqual([]);
+
+    // With one project room, that room — and only it — is listed.
+    const proj = await owner.client.createRoom(owner.orgId, { name: 'proj-room' });
+    const listed = capture();
+    expect(await runCli(['rooms', '--all'], env, listed.io)).toBe(0);
+    expect(listed.out()).toContain(proj.id);
+    expect(listed.out()).not.toContain(dm.room.id);
+
+    // The help text promises exactly what the command delivers.
+    const help = capture();
+    await runCli(['rooms', '--help'], env, help.io);
+    const helpText = help.out() + help.err();
+    expect(helpText).toContain('project room');
+    expect(helpText).not.toMatch(/every room in the org/);
+  });
+
   it('invites create → list → revoke', async () => {
     const owner = await boot('inv@x.com');
     await ownerProfile(owner);
@@ -1952,6 +1987,24 @@ describe('sparrow CLI — room messaging', () => {
       ),
     ).toBe(0);
     expect(JSON.parse(p2.out()).items.map((m: { body: string }) => m.body)).toEqual(['first']);
+  });
+
+  it('log prints a multi-line body WHOLE, continuation lines indented', async () => {
+    const { owner, roomId, roomName, agentId } = await roomFixture('mlog');
+    const body = 'line one\nline two\n\nline four';
+    await owner.client.sendMessage(roomId, { to: agentId, body });
+
+    const cap = capture();
+    expect(await runCli(['log', '--room', roomName], env, cap.io)).toBe(0);
+    const text = cap.out();
+    // Nothing is silently lost, and nothing is elided.
+    expect(text).toContain('line one');
+    expect(text).toContain('line four');
+    expect(text).not.toContain('…');
+    // Continuation lines hang under the first, indented by two spaces; a blank
+    // line in the body stays blank (no trailing whitespace).
+    expect(text).toContain('\n  line two\n');
+    expect(text).toContain('\n\n  line four');
   });
 
   it('send --suggest + read shows suggestions; --in-reply-to/--reply-value echoes', async () => {
@@ -6671,10 +6724,12 @@ describe('sparrow CLI — agent↔agent DM oversight', () => {
     expect(await runCli(['agent-dms', 'read', f.dmRoomId], env, cap.io)).toBe(0);
     const out = cap.out();
     // Oldest-first `time  sender: body` lines — the room-log idiom; a
-    // multi-line body collapses to its first line with an ellipsis.
+    // multi-line body prints WHOLE, hanging indented under its first line
+    // (issue #6: oversight that silently drops half a message is not oversight).
     expect(out.indexOf('adm3-alpha: first line')).toBeGreaterThanOrEqual(0);
     expect(out.indexOf('adm3-alpha: first line')).toBeLessThan(out.indexOf('adm3-beta: reply'));
-    expect(out).toContain('…');
+    expect(out).toContain('\n  second line\n');
+    expect(out).not.toContain('…');
 
     // -j: the raw newest-first page with its cursor.
     const json = capture();
