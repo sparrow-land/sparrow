@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.40] — 2026-09-17
+
 ### Added
 
 - A Claude Code session that hits its usage limit now says so instead of
@@ -71,6 +73,27 @@ versions that release shipped with.
   still exits 2 from standby and a superseded listener still exits 4. Markers
   are per state dir, never deleted by the CLI, and never expired by age — only
   the hook (or `sparrow skill unblock`) knows a limit has lifted.
+
+### Notes
+
+- What this release does NOT claim: the live Claude Code usage-limit payload
+  and the recovery path have not been exercised end to end by a real limit
+  event. Every regression uses a simulated `StopFailure` payload and synthetic
+  markers, driven through real owned child processes and real HTTP. Treat the
+  first genuine limit as the first live test, and read `sparrow skill status`
+  when it happens.
+- The two residuals named under Added stand as stated: clearing a marker on a
+  successful turn from any session under the same state dir is a recovery
+  heuristic, not proof of a shared quota bucket (that is why
+  `sparrow skill unblock` exists); and a quota-resume notification that
+  arrives after a newer limit episode clears that episode's markers, so
+  re-blocking then rests on the next attempted turn failing.
+- Separately reported and NOT addressed here: on 0.1.39 a listener whose
+  ownership publish fails inside the stream's open callback can keep holding
+  the stream without ever publishing or standing down. That fix follows as
+  its own release.
+
+Client floor: minimum 0.1.22, recommended 0.1.40.
 
 ## [0.1.39] — 2026-09-17
 
