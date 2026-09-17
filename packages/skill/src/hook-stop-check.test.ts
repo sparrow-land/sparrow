@@ -1088,6 +1088,90 @@ describe('sparrow-stop-check.sh', () => {
     });
   });
 
+  /* ------------------------- background tasks ------------------------------ *
+   * MEASURED 2026-09-17 with a real headless session: the Stop payload carries
+   * `background_tasks`, an array of `{id,type,status,description,command}` —
+   * and it appears on `Stop` and `SubagentStop` only, NOT on UserPromptSubmit or
+   * PostToolUse (all four tested). The docs list neither the field nor that
+   * distinction. It turns the background-shell count from an inference off the
+   * process tree into a fact the harness itself reported.
+   *
+   * `command` is dropped on the way in: it is whatever a user typed, and this
+   * file exists to be read by a diagnostic people paste to each other.
+   * ------------------------------------------------------------------------ */
+  describe('the background-task record', () => {
+    const FILE = () => path.join(stateDir, 'background-tasks.json');
+    const record = (): Record<string, any> => JSON.parse(fs.readFileSync(FILE(), 'utf8'));
+    const stopPayload = (tasks: unknown): string =>
+      JSON.stringify({
+        session_id: 'ses_1',
+        hook_event_name: 'Stop',
+        stop_hook_active: false,
+        ...(tasks === undefined ? {} : { background_tasks: tasks }),
+      });
+    const TWO = [
+      { id: 'bn0xj062c', type: 'shell', status: 'running', description: 'Sleep 40 seconds in background', command: 'sleep 40' },
+      { id: 'bn1abc999', type: 'shell', status: 'running', description: 'Build the bundle', command: 'npm run build -- --secret=hunter2' },
+    ];
+
+    it('records what the harness reported, without the command line', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(3, 'await');
+      runHook(stopPayload(TWO));
+      const rec = record();
+      expect(rec.version).toBe(1);
+      expect(rec.at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+      expect(rec.tasks).toHaveLength(2);
+      expect(rec.tasks[0]).toEqual({
+        id: 'bn0xj062c',
+        type: 'shell',
+        status: 'running',
+        description: 'Sleep 40 seconds in background',
+      });
+      expect(JSON.stringify(rec)).not.toContain('sleep 40');
+      expect(JSON.stringify(rec)).not.toContain('hunter2');
+    });
+
+    it('records an empty list when the turn ended with no background tasks', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(3, 'await');
+      runHook(stopPayload([]));
+      expect(record().tasks).toEqual([]);
+    });
+
+    it('writes it on a BLOCKING stop too (the payload is in hand either way)', () => {
+      writeLoopState('engaged'); // no heartbeat → the drift block
+      const r = runHook(stopPayload(TWO));
+      expect(JSON.parse(r.stdout).decision).toBe('block');
+      expect(record().tasks).toHaveLength(2);
+    });
+
+    it('writes nothing when the field is absent or malformed, and never throws', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(3, 'await');
+      expect(runHook(stopPayload(undefined)).code).toBe(0);
+      expect(fs.existsSync(FILE())).toBe(false);
+      expect(runHook(stopPayload('not-an-array')).code).toBe(0);
+      expect(fs.existsSync(FILE())).toBe(false);
+      expect(runHook('{"hook_event_name":"Stop","background_tasks":[{bro').code).toBe(0);
+      expect(fs.existsSync(FILE())).toBe(false);
+    });
+
+    it('honours the loop switch', () => {
+      writeLoopState('paused');
+      runHook(stopPayload(TWO));
+      expect(fs.existsSync(FILE())).toBe(false);
+    });
+
+    it('leaves the last record alone when a later turn cannot report', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(3, 'await');
+      runHook(stopPayload(TWO));
+      runHook(stopPayload(undefined));
+      expect(record().tasks).toHaveLength(2);
+    });
+  });
+
   it('does NOT set idle on a blocked stop (loop drift)', () => {
     writeLoopState('engaged'); // stale/no heartbeat → block
     const curlLog = stubRecordingCurl();

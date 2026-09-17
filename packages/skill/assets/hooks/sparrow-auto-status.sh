@@ -105,10 +105,21 @@
 #     a marker (new name, new `at`), so the worst case is ONE bounce of presence
 #     per attempted turn, and the CLI is back in standby within a cadence.
 #
+#   subagent-start / subagent-stop (SubagentStart / SubagentStop) → the SUBAGENT
+#                 INDICATOR. One marker file per running subagent under
+#                 <state dir>/subagents/, named by `agent_id`, and the sticky
+#                 note grows a summary of what is running: `working (2 subagents:
+#                 code-review, explore)`. Both post that note themselves, because
+#                 a FOREGROUND subagent blocks its parent -- no tool call fires
+#                 while it runs, which is exactly when someone is watching.
+#                 Output is discarded for both, so they write nothing to stdout.
+#
 # PAYLOAD FIELDS THIS HOOK READS, and nothing else. StopFailure: `error_type`
 # (falling back to `error`), `session_id`, `prompt_id`, `transcript_path`,
 # `hook_event_name`. Notification: `notification_type`, `quota_type`.
-# UserPromptSubmit: `prompt`, only under SPARROW_STATUS_NOTES=verbose. Plus a
+# Subagent{Start,Stop}: `agent_id`, `agent_type`. (The Stop hook, not this one,
+# reads `background_tasks` -- see sparrow-stop-check.sh.) UserPromptSubmit: `prompt`,
+# only under SPARROW_STATUS_NOTES=verbose. Plus a
 # reset timestamp if a future Claude Code supplies one (`resets_at` /
 # `resumes_at` / `resetsAt`) -- none is documented today, so `resumesAt` is
 # optional everywhere. Everything else in the payload is undocumented and
@@ -153,6 +164,17 @@ POST_STAMP="$STATE_DIR/auto-status-post"
 IDLE_MARKER="$STATE_DIR/auto-status-idle"
 # One file per block (see THE MARKER PROTOCOL above).
 BLOCKED_DIR="$STATE_DIR/blocked"
+# One file per RUNNING SUBAGENT, named by its agent id (see THE SUBAGENT
+# INDICATOR below), plus the last subagent summary we posted.
+SUBAGENT_DIR="$STATE_DIR/subagents"
+SUBAGENT_NOTE_STAMP="$STATE_DIR/auto-status-subagents"
+# Longer than any session plausibly runs: past this a marker is a crash
+# leftover, not a subagent. The trade is deliberate -- 12h of a phantom in the
+# note is better than dropping a real long-running subagent from it.
+SUBAGENT_STALE="${SPARROW_SUBAGENT_STALE:-43200}"
+# `STATUS_NOTE_MAX` in @sparrow/common-types. The API REJECTS a longer note with
+# 400 -- it does not truncate -- so the composer trims before it posts.
+NOTE_MAX=140
 POST_THROTTLE="${SPARROW_STATUS_POST_THROTTLE:-20}"
 MAX_ROOMS="${SPARROW_STATUS_MAX_ROOMS:-10}"
 PRESENCE_TTL="${SPARROW_PRESENCE_TTL:-300}"
@@ -167,6 +189,8 @@ if [ -z "$MODE" ]; then
     *'"hook_event_name":"PostToolUse"'* | *'"hook_event_name": "PostToolUse"'*) MODE=post-tool ;;
     *'"hook_event_name":"Notification"'* | *'"hook_event_name": "Notification"'*) MODE=notification ;;
     *'"hook_event_name":"StopFailure"'* | *'"hook_event_name": "StopFailure"'*) MODE=stop-failure ;;
+    *'"hook_event_name":"SubagentStart"'* | *'"hook_event_name": "SubagentStart"'*) MODE=subagent-start ;;
+    *'"hook_event_name":"SubagentStop"'* | *'"hook_event_name": "SubagentStop"'*) MODE=subagent-stop ;;
     *'"hook_event_name":"Stop"'* | *'"hook_event_name": "Stop"'*) MODE=stop ;;
     *) exit 0 ;;
   esac
@@ -205,6 +229,115 @@ clock_of() {
     [ -n "$_c" ] && { printf '%s' "$_c"; return 0; }
   fi
   printf '%s' "$_iso" | sed -n 's/.*T\([0-9][0-9]:[0-9][0-9]\).*/\1/p'
+}
+
+# Seconds since a file was last written, or nothing when it cannot be told.
+file_age() {
+  _fa_now=$(date +%s 2>/dev/null || echo 0)
+  _fa_m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo "")
+  [ -n "$_fa_m" ] && [ "$_fa_now" -gt 0 ] 2>/dev/null || return 0
+  _fa_a=$((_fa_now - _fa_m))
+  [ "$_fa_a" -ge 0 ] 2>/dev/null && printf '%s' "$_fa_a"
+}
+
+# --- THE SUBAGENT INDICATOR -------------------------------------------------
+#
+# WHAT IT IS FOR. A foreground subagent blocks its parent completely: no tool
+# calls, no output, nothing to see, while whoever is watching wonders what the
+# agent is doing. `SubagentStart`/`SubagentStop` are the ONLY signal available --
+# subagents are not separate OS processes (verified: a session running one showed
+# only an MCP server and two background shells), and the docs say not to read
+# `<session>/subagents/*.jsonl`. So each running subagent is one file here, named
+# by its agent id, and a stop deletes exactly its own: the same
+# snapshot-by-name discipline as the usage-limit markers, for the same reason.
+#
+# MEASURED 2026-09-17, against a real headless session, because the docs neither
+# list the payloads nor promise this:
+#   * Registering these two events with NO `matcher` key fires them for every
+#     agent type (checked with an `Explore` subagent) -- the matcher there is an
+#     exact agent-type name, so a named one would silently cover one type.
+#   * SubagentStart carries agent_id, agent_type, cwd, hook_event_name,
+#     prompt_id, session_id, transcript_path. SubagentStop adds
+#     agent_transcript_path, background_tasks, effort{level},
+#     last_assistant_message, permission_mode, session_crons, stop_hook_active.
+#   * THE SAME `agent_id` APPEARS ON BOTH EVENTS -- which is exactly what this
+#     marker protocol rests on, now verified rather than assumed.
+#
+# THE `sinceAt` TRADE. The server tracks `sinceAt` as "when the CURRENT note was
+# set" and only preserves it when the note is byte-identical (see
+# apps/api/src/status-store.ts). So every subagent boundary changes the note and
+# restarts the age: the room shows "working (2 subagents: ...)" as fresh even
+# though the turn began earlier. Accepted deliberately -- a live picture of what
+# is running beats an accurate age for a note nobody could interpret.
+
+# Delete markers too old to be real (hooks only; `sparrow skill status` is a
+# read-only command and merely ignores them).
+subagent_sweep() {
+  [ -d "$SUBAGENT_DIR" ] || return 0
+  for _sf in "$SUBAGENT_DIR"/*.json; do
+    [ -f "$_sf" ] || continue
+    _sa=$(file_age "$_sf")
+    [ -n "$_sa" ] || continue
+    [ "$_sa" -ge "$SUBAGENT_STALE" ] 2>/dev/null && rm -f "$_sf" 2>/dev/null
+  done
+  return 0
+}
+
+# The TYPE of every live subagent, one per line (stale markers ignored).
+subagent_types() {
+  [ -d "$SUBAGENT_DIR" ] || return 0
+  for _sf in "$SUBAGENT_DIR"/*.json; do
+    [ -f "$_sf" ] || continue
+    _sa=$(file_age "$_sf")
+    [ -n "$_sa" ] && [ "$_sa" -lt "$SUBAGENT_STALE" ] 2>/dev/null || continue
+    _st=$(json_field "$_sf" type)
+    printf '%s\n' "${_st:-unknown}"
+  done
+}
+
+# The parenthetical summary, or nothing when no subagent is running:
+#   (1 subagent: explore)
+#   (3 subagents: code-review, 2× explore)
+#   (6 subagents: code-review, 2× explore, general-purpose +1 more)
+# Count is AGENTS; the list is sorted by type name (the `N×` prefix is not part
+# of the sort key); `+N more` counts the types not named. `limit` caps how many
+# types are named -- the composer lowers it until the whole note fits.
+subagent_summary() {
+  _limit="${1:-3}"
+  _types=$(subagent_types | sort)
+  [ -n "$_types" ] || return 0
+  _n=$(printf '%s\n' "$_types" | grep -c . 2>/dev/null || echo 0)
+  [ "$_n" -gt 0 ] 2>/dev/null || return 0
+  _word=subagents
+  [ "$_n" = 1 ] && _word=subagent
+  if [ "$_limit" -le 0 ] 2>/dev/null; then
+    printf '(%s %s)' "$_n" "$_word"
+    return 0
+  fi
+  _list=$(printf '%s\n' "$_types" | uniq -c | awk -v limit="$_limit" '
+    { count = $1; $1 = ""; sub(/^[ \t]+/, ""); type = $0
+      named++
+      if (named <= limit) { list = list (list == "" ? "" : ", ") (count > 1 ? count "× " type : type) }
+      else { more++ } }
+    END { if (more > 0) printf "%s +%d more", list, more; else printf "%s", list }')
+  printf '(%s %s: %s)' "$_n" "$_word" "$_list"
+}
+
+# `<base> <summary>`, trimmed to fit NOTE_MAX. Deterministic: name fewer types
+# (3 → 2 → 1 → none), then hard-cut as the last resort.
+compose_note() {
+  _base="$1"
+  for _lim in 3 2 1 0; do
+    _sum=$(subagent_summary "$_lim")
+    if [ -z "$_sum" ]; then printf '%s' "$_base"; return 0; fi
+    _out="$_base $_sum"
+    # `${#var}` counts BYTES in dash, characters in bash; the server counts
+    # characters. Bytes >= characters, so this can only trim EARLIER than
+    # required -- never past the limit, which is the direction that matters when
+    # the alternative is a 400.
+    [ "${#_out}" -le "$NOTE_MAX" ] 2>/dev/null && { printf '%s' "$_out"; return 0; }
+  done
+  printf '%s' "$_out" | cut -c1-"$NOTE_MAX"
 }
 
 # Every usage-limit marker, oldest first (the filename starts with a compact
@@ -471,7 +604,29 @@ case "$MODE" in
       blocked_note="blocked — $(safe_field "$err" 40)"
     fi
     ;;
+  subagent-start)
+    # LOCAL BOOKKEEPING ALWAYS RUNS, before the blocked gate below. Writing a
+    # file contradicts nothing anybody can see; only the network post has to be
+    # suppressed while a usage limit stands. Gating this instead would leave a
+    # phantom subagent in the count for the whole blocked window.
+    subagent_sweep
+    _ag=$(safe_field "$(payload_value agent_id)" 80 | tr -cd 'A-Za-z0-9_-')
+    _ty=$(safe_field "$(payload_value agent_type)" 60 | tr -cd 'A-Za-z0-9_-')
+    if [ -n "$_ag" ]; then
+      mkdir -p "$SUBAGENT_DIR" 2>/dev/null || true
+      printf '{"version":1,"agent":"%s","type":"%s","at":"%s"}\n' \
+        "$_ag" "${_ty:-unknown}" "$(now_iso_ms)" > "$SUBAGENT_DIR/$_ag.json" 2>/dev/null || true
+    fi
+    ;;
+  subagent-stop)
+    # Delete exactly THIS agent's marker, by name. An id with no marker is a
+    # silent no-op (an older install, a swept phantom, a stop we never saw start).
+    subagent_sweep
+    _ag=$(safe_field "$(payload_value agent_id)" 80 | tr -cd 'A-Za-z0-9_-')
+    [ -n "$_ag" ] && rm -f "$SUBAGENT_DIR/$_ag.json" 2>/dev/null
+    ;;
   post-tool)
+    subagent_sweep
     # Snapshot the markers, then delete only the ones this run can PROVE are
     # over. A marker written after this listing has a name we never saw.
     tpath=$(payload_value transcript_path)
@@ -576,6 +731,21 @@ post_status_all() {
   done
 }
 
+# Post a composed note to every room AND remember the subagent part of it, so
+# the post-tool backstop can tell "the composition changed" from "somebody else
+# wrote a different note". (A same-note repost is free server-side: `sinceAt` is
+# preserved when the text is identical, so this stamp is a network optimisation,
+# not a correctness dependency.)
+post_note() {
+  post_status_all "{\"state\":\"working\",\"note\":\"$(safe_json "$1")\",\"sticky\":true}"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s' "$2" > "$SUBAGENT_NOTE_STAMP" 2>/dev/null || true
+}
+
+# Strip anything that would break the hand-rolled JSON body (the composed note
+# is the only note here that is not a literal).
+safe_json() { printf '%s' "$1" | tr -d '"\\' | tr '\r\n\t' '   '; }
+
 # Throttle a mode via a state-dir stamp file: succeed (and re-stamp) at most once
 # per $2 seconds. Returns 0 to proceed, 1 to skip.
 throttled() {
@@ -640,8 +810,21 @@ case "$MODE" in
       derived=$(safe_note "$prompt")
       [ -n "$derived" ] && note="$derived"
     fi
+    # Whoever is running under this turn goes in the note too (capped at 140).
+    _sum=$(subagent_summary)
+    note=$(compose_note "$note")
     refresh_presence
-    post_status_all "{\"state\":\"working\",\"note\":\"$note\",\"sticky\":true}"
+    post_note "$note" "$_sum"
+    rm -f "$IDLE_MARKER" 2>/dev/null || true
+    ;;
+  subagent-start | subagent-stop)
+    # POST THE NOTE HERE, not only at turn boundaries: a FOREGROUND subagent
+    # blocks its parent, so no tool call happens while it runs -- which is
+    # exactly when someone is watching and wondering. The cost is the `sinceAt`
+    # reset named above.
+    _sum=$(subagent_summary)
+    refresh_presence
+    post_note "$(compose_note working)" "$_sum"
     rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;
   notification)
@@ -696,7 +879,23 @@ case "$MODE" in
     if [ -f "$IDLE_MARKER" ]; then
       rm -f "$IDLE_MARKER" 2>/dev/null || true
       refresh_presence
-      post_status_all '{"state":"working","note":"working","sticky":true}'
+      post_note "$(compose_note working)" "$(subagent_summary)"
+      mkdir -p "$STATE_DIR" 2>/dev/null || true
+      : > "$POST_STAMP" 2>/dev/null || true
+      wait 2>/dev/null || true
+      exit 0
+    fi
+    # THE BACKSTOP. If the subagent picture changed without one of its hooks
+    # posting -- a hook that failed, an install that predates them, a marker
+    # swept for age -- put the truth back. Deliberately NOT throttled: it fires
+    # only on a real change, and comparing the stamp costs nothing. It compares
+    # the SUBAGENT part only, so it never overwrites somebody else's note (a
+    # `blocked — needs your input`, say) just because the wording differs.
+    _sum=$(subagent_summary)
+    _prev=$(cat "$SUBAGENT_NOTE_STAMP" 2>/dev/null || printf '')
+    if [ "$_sum" != "$_prev" ]; then
+      refresh_presence
+      post_note "$(compose_note working)" "$_sum"
       mkdir -p "$STATE_DIR" 2>/dev/null || true
       : > "$POST_STAMP" 2>/dev/null || true
       wait 2>/dev/null || true

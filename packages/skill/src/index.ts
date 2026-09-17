@@ -56,6 +56,21 @@ export {
   type HookVerification,
 } from './provider-codex.js';
 
+/** Who is running under a state dir: subagents (fact) and shells (inference). */
+export {
+  readSubagents,
+  subagentTypeList,
+  subagentStatusLine,
+  countBackgroundShells,
+  shellStatusLine,
+  readBackgroundTasks,
+  type BackgroundTask,
+  type BackgroundTaskRecord,
+  subagentDir,
+  SUBAGENT_STALE_SECONDS,
+  type Subagent,
+} from './subagents.js';
+
 /** Usage-limit markers: what `sparrow skill status`/`unblock` and the hooks read. */
 export {
   readBlockedMarkers,

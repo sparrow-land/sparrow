@@ -80,6 +80,46 @@ esac
 state=$(tr -d ' \t\r\n' < "$LOOP_STATE_FILE" 2>/dev/null || echo "")
 [ "$state" = "engaged" ] || allow_stop
 
+# --- what the harness says is running in the background ---------------------
+#
+# MEASURED 2026-09-17 against a real headless session (the docs list neither the
+# field nor this distinction): the Stop payload carries `background_tasks`, an
+# array of `{id,type,status,description,command}`, and it appears on `Stop` and
+# `SubagentStop` only -- not on UserPromptSubmit or PostToolUse. That turns the
+# background-shell count from an inference off the process tree into a fact the
+# harness itself reported, so it is recorded here, where the Stop payload is
+# actually in hand on EVERY path (blocking ones included). `sparrow skill status`
+# reads the file.
+#
+# `command` IS DROPPED: it is whatever a user typed, and this file is meant to be
+# pasted into a bug report. Needs node (already an optional dependency of the
+# unread count below); without it nothing is written, like every other
+# best-effort step here. An old record is never cleared by a turn that reports
+# nothing -- absence of the field is not evidence the tasks ended.
+if command -v node >/dev/null 2>&1; then
+  printf '%s' "$input" | SPARROW_BG_FILE="$STATE_DIR/background-tasks.json" node -e '
+    let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+      try {
+        const j = JSON.parse(s);
+        if (!j || !Array.isArray(j.background_tasks)) return;
+        const tasks = j.background_tasks
+          .filter(t => t && typeof t === "object")
+          .map(t => ({
+            id: String(t.id ?? ""),
+            type: String(t.type ?? ""),
+            status: String(t.status ?? ""),
+            description: String(t.description ?? ""),
+          }));
+        const fs = require("fs"), path = require("path");
+        const file = process.env.SPARROW_BG_FILE;
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const tmp = file + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify({ version: 1, at: new Date().toISOString(), tasks }) + "\n");
+        fs.renameSync(tmp, file);
+      } catch (e) {}
+    });' >/dev/null 2>&1 || true
+fi
+
 # Fresh heartbeat → a listener is alive. WHICH one decides: `await` can wake this
 # session, `watch`/`loop` can only hold it online, anything else is unjudgeable.
 # `hold_kind` stays empty unless we found a hold-only listener, so the tail of

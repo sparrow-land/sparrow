@@ -1364,3 +1364,272 @@ describe('sparrow-auto-status.sh — silence while blocked', () => {
     expect(statusPosts()).toEqual([]);
   });
 });
+
+/* =========================== SUBAGENT INDICATOR ============================ *
+ * "What is it actually doing?" — the question a human asks while a foreground
+ * subagent runs and the parent sits there producing nothing. Claude Code fires
+ * `SubagentStart` before a subagent's first turn and `SubagentStop` after its
+ * last, both carrying `agent_id` and `agent_type`, and both discard their
+ * output. Subagents are NOT separate OS processes, so nothing can be counted
+ * from the process tree; the hooks are the only signal there is.
+ *
+ * One file per running subagent, named by agent id — the same
+ * snapshot-by-name discipline as the usage-limit markers, for the same reason:
+ * a stop must delete ITS OWN marker and nothing else.
+ * ========================================================================== */
+const SUBAGENT_DIR = () => path.join(stateDir, 'subagents');
+const subagentFiles = (): string[] =>
+  fs.existsSync(SUBAGENT_DIR()) ? fs.readdirSync(SUBAGENT_DIR()).sort() : [];
+const subagentRecord = (name: string): Record<string, unknown> =>
+  JSON.parse(fs.readFileSync(path.join(SUBAGENT_DIR(), name), 'utf8')) as Record<string, unknown>;
+
+function subagentPayload(event: 'SubagentStart' | 'SubagentStop', id: string, type: string): string {
+  return JSON.stringify({
+    session_id: 'ses_1',
+    prompt_id: 'pr_1',
+    transcript_path: path.join(stateDir, 'transcript.jsonl'),
+    cwd: '/tmp',
+    scratchpad_dir: '/tmp/scratch',
+    permission_mode: 'default',
+    hook_event_name: event,
+    agent_id: id,
+    agent_type: type,
+    effort: { level: 'medium' },
+    ...(event === 'SubagentStop' ? { last_assistant_message: 'done' } : {}),
+  });
+}
+
+/** Write a live subagent marker by hand. */
+function writeSubagent(id: string, type: string, ageSeconds = 0): string {
+  fs.mkdirSync(SUBAGENT_DIR(), { recursive: true });
+  const f = path.join(SUBAGENT_DIR(), `${id}.json`);
+  const at = new Date(Date.now() - ageSeconds * 1000);
+  fs.writeFileSync(f, JSON.stringify({ version: 1, agent: id, type, at: at.toISOString() }));
+  fs.utimesSync(f, at, at);
+  return f;
+}
+
+describe('sparrow-auto-status.sh — subagent markers', () => {
+  it('start writes exactly one marker, named by agent id', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const r = runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'code-review'));
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe(''); // output is discarded; write none
+    expect(subagentFiles()).toEqual(['ag_1.json']);
+    const rec = subagentRecord('ag_1.json');
+    expect(rec.version).toBe(1);
+    expect(rec.agent).toBe('ag_1');
+    expect(rec.type).toBe('code-review');
+    expect(rec.at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+  });
+
+  it('stop deletes ITS OWN marker and leaves the others standing', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeSubagent('ag_1', 'explore');
+    writeSubagent('ag_2', 'code-review');
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_1', 'explore'));
+    expect(subagentFiles()).toEqual(['ag_2.json']);
+  });
+
+  it('a stop for an agent with no marker is a silent no-op', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const r = runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_ghost', 'explore'));
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe('');
+    expect(subagentFiles()).toEqual([]);
+  });
+
+  it('sanitises the agent id and type, and cannot write outside the directory', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', '../../escape', 'we*ird type!'));
+    expect(fs.existsSync(path.join(os.tmpdir(), 'escape.json'))).toBe(false);
+    expect(subagentFiles()).toEqual(['escape.json']);
+    expect(subagentRecord('escape.json').type).toBe('weirdtype');
+  });
+
+  it('honours the loop switch', () => {
+    writeLoopState('paused');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(subagentFiles()).toEqual([]);
+  });
+
+  it('writes into the state dir it was pointed at, and no other', () => {
+    const neighbour = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-as-nb-'));
+    fs.writeFileSync(path.join(neighbour, 'loop-state'), 'engaged\n');
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'), {
+      SPARROW_STATE_DIR: neighbour,
+    });
+    expect(subagentFiles()).toEqual([]);
+    expect(fs.readdirSync(path.join(neighbour, 'subagents'))).toEqual(['ag_1.json']);
+    fs.rmSync(neighbour, { recursive: true, force: true });
+  });
+});
+
+describe('sparrow-auto-status.sh — the subagent note', () => {
+  const note = (): string => {
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0);
+    return (/"note":"([^"]*)"/.exec(posts[posts.length - 1]!.body) ?? [])[1] ?? '';
+  };
+
+  it('is the plain working note when nothing is running', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('prompt', '{"prompt":"hi"}');
+    expect(note()).toBe('working');
+  });
+
+  it('names one subagent in the singular', () => {
+    writeLoopState('engaged');
+    writeSubagent('ag_1', 'explore');
+    stubCurl();
+    runHook('prompt', '{"prompt":"hi"}');
+    expect(note()).toBe('working (1 subagent: explore)');
+  });
+
+  it('lists two distinct types, sorted', () => {
+    writeLoopState('engaged');
+    writeSubagent('ag_1', 'explore');
+    writeSubagent('ag_2', 'code-review');
+    stubCurl();
+    runHook('prompt', '{"prompt":"hi"}');
+    expect(note()).toBe('working (2 subagents: code-review, explore)');
+  });
+
+  it('counts repeats with a multiplier, and the count is AGENTS', () => {
+    writeLoopState('engaged');
+    writeSubagent('ag_1', 'explore');
+    writeSubagent('ag_2', 'explore');
+    writeSubagent('ag_3', 'code-review');
+    stubCurl();
+    runHook('prompt', '{"prompt":"hi"}');
+    expect(note()).toBe('working (3 subagents: code-review, 2× explore)');
+  });
+
+  it('names at most three types and counts the rest', () => {
+    writeLoopState('engaged');
+    writeSubagent('ag_1', 'explore');
+    writeSubagent('ag_2', 'explore');
+    writeSubagent('ag_3', 'code-review');
+    writeSubagent('ag_4', 'general-purpose');
+    writeSubagent('ag_5', 'plan');
+    stubCurl();
+    runHook('prompt', '{"prompt":"hi"}');
+    expect(note()).toBe('working (5 subagents: code-review, 2× explore, general-purpose +1 more)');
+  });
+
+  /**
+   * THE 140-CHARACTER WALL. `STATUS_NOTE_MAX` is 140 and the API REJECTS a
+   * longer note with 400 — it does not truncate — so the composer trims
+   * deterministically and the result is pinned here.
+   */
+  it('never exceeds 140 characters, however long the type names are', () => {
+    writeLoopState('engaged');
+    for (let i = 0; i < 6; i++) writeSubagent(`ag_${i}`, `${'x'.repeat(40)}-${i}`);
+    stubCurl();
+    runHook('prompt', '{"prompt":"hi"}');
+    const n = note();
+    expect(n.length).toBeLessThanOrEqual(140);
+    expect(n.startsWith('working (6 subagents:')).toBe(true);
+    expect(n.endsWith(')')).toBe(true);
+  });
+
+  it('appends to a verbose prompt note too, still within 140', () => {
+    writeLoopState('engaged');
+    writeSubagent('ag_1', 'explore');
+    stubCurl();
+    runHook('prompt', '{"prompt":"refactor the billing module carefully"}', {
+      SPARROW_STATUS_NOTES: 'verbose',
+    });
+    const n = note();
+    expect(n).toContain('refactor the billing module');
+    expect(n).toContain('(1 subagent: explore)');
+    expect(n.length).toBeLessThanOrEqual(140);
+  });
+
+  it('ignores a marker older than 12h (a crash cannot pin a phantom)', () => {
+    writeLoopState('engaged');
+    writeSubagent('ag_old', 'explore', 13 * 3600);
+    writeSubagent('ag_now', 'code-review');
+    stubCurl();
+    runHook('prompt', '{"prompt":"hi"}');
+    expect(note()).toBe('working (1 subagent: code-review)');
+  });
+});
+
+describe('sparrow-auto-status.sh — posting the subagent note', () => {
+  const lastNote = (): string =>
+    (/"note":"([^"]*)"/.exec(statusPosts()[statusPosts().length - 1]!.body) ?? [])[1] ?? '';
+
+  it('start posts the composed note itself (a foreground subagent runs no tools)', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(lastNote()).toBe('working (1 subagent: explore)');
+    expect(presencePosts().length).toBeGreaterThan(0);
+  });
+
+  it('stop posts the note the remaining subagents justify', () => {
+    writeLoopState('engaged');
+    writeSubagent('ag_2', 'code-review');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(lastNote()).toBe('working (2 subagents: code-review, explore)');
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_1', 'explore'));
+    expect(lastNote()).toBe('working (1 subagent: code-review)');
+  });
+
+  it('the last subagent to stop restores the plain working note', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_1', 'explore'));
+    expect(lastNote()).toBe('working');
+  });
+
+  it('post-tool reposts only when the composition CHANGED', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    const after = statusPosts().length;
+    // Nothing changed: the throttled tick refreshes presence, writes no status.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts().length).toBe(after);
+    // A marker appearing without its hook (the backstop's whole purpose). It
+    // reposts even INSIDE the throttle window: the change check is local and
+    // free, and a stale picture is what this exists to prevent.
+    writeSubagent('ag_2', 'code-review');
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts().length).toBeGreaterThan(after);
+    expect(lastNote()).toBe('working (2 subagents: code-review, explore)');
+  });
+
+  it('writes the markers but posts NOTHING while a usage limit stands', () => {
+    writeLoopState('engaged');
+    writeMarker('20260917T180000-1.json', { at: new Date().toISOString() });
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(subagentFiles()).toEqual(['ag_1.json']); // bookkeeping still runs
+    expect(statusPosts()).toEqual([]);
+    expect(presencePosts()).toEqual([]);
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_1', 'explore'));
+    expect(subagentFiles()).toEqual([]); // and so does the delete
+    expect(statusPosts()).toEqual([]);
+    expect(presencePosts()).toEqual([]);
+  });
+
+  it('sweeps markers older than 12h on its way through', () => {
+    writeLoopState('engaged');
+    writeSubagent('ag_old', 'explore', 13 * 3600);
+    stubCurl();
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_ghost', 'explore'));
+    expect(subagentFiles()).toEqual([]);
+  });
+});

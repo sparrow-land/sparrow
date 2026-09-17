@@ -96,6 +96,14 @@ describe('install (project scope)', () => {
     // every turn silently while still looking online.
     expect(s.hooks.StopFailure[0].hooks[0].command).toMatch(/sparrow-auto-status\.sh stop-failure$/);
     expect(s.hooks.StopFailure[0].hooks[0].command).toContain('$CLAUDE_PROJECT_DIR');
+    // Subagent{Start,Stop}: matched on AGENT TYPE, so the catch-all is an
+    // OMITTED matcher key — the form Claude Code's own SubagentStop example
+    // uses. A named matcher here would silently cover only that agent type.
+    expect(s.hooks.SubagentStart[0].hooks[0].command).toMatch(/sparrow-auto-status\.sh subagent-start$/);
+    expect(s.hooks.SubagentStop[0].hooks[0].command).toMatch(/sparrow-auto-status\.sh subagent-stop$/);
+    expect(s.hooks.SubagentStart[0].hooks[0].command).toContain('$CLAUDE_PROJECT_DIR');
+    expect('matcher' in s.hooks.SubagentStart[0]).toBe(false);
+    expect('matcher' in s.hooks.SubagentStop[0]).toBe(false);
     // Stop stays a SINGLE stop-check entry (it invokes auto-status idle itself).
     expect(commandsFor(s, 'Stop').some((c) => c.includes('sparrow-auto-status.sh'))).toBe(false);
 
@@ -107,7 +115,14 @@ describe('install (project scope)', () => {
     await run(['install']);
     const s = readSettings(cwd);
     expect(commandsFor(s, 'Stop').filter((c) => c.includes('sparrow-stop-check.sh'))).toHaveLength(1);
-    for (const event of ['UserPromptSubmit', 'PostToolUse', 'Notification', 'StopFailure']) {
+    for (const event of [
+      'UserPromptSubmit',
+      'PostToolUse',
+      'Notification',
+      'StopFailure',
+      'SubagentStart',
+      'SubagentStop',
+    ]) {
       expect(commandsFor(s, event).filter((c) => c.includes('sparrow-auto-status.sh'))).toHaveLength(1);
     }
   });
@@ -132,6 +147,21 @@ describe('install (project scope)', () => {
     expect(s.hooks.Notification).toHaveLength(1);
     expect(s.hooks.Notification[0].matcher).toContain('quota_auto_resume_fired');
     expect(commandsFor(s, 'Notification')).toHaveLength(1);
+  });
+
+  /** The same upgrade path for the subagent indicator's two events. */
+  it('upgrades an older install: adds SubagentStart and SubagentStop', async () => {
+    await run(['install']);
+    const file = settingsFile(cwd, 'settings.local.json');
+    const before = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, any>;
+    delete before.hooks.SubagentStart;
+    delete before.hooks.SubagentStop;
+    fs.writeFileSync(file, JSON.stringify(before, null, 2));
+
+    await run(['install']);
+    const s = readSettings(cwd);
+    expect(commandsFor(s, 'SubagentStart').filter((c) => c.includes('subagent-start'))).toHaveLength(1);
+    expect(commandsFor(s, 'SubagentStop').filter((c) => c.includes('subagent-stop'))).toHaveLength(1);
   });
 
   it('preserves unrelated settings and unrelated hooks on install', async () => {
@@ -568,6 +598,8 @@ describe('uninstall', () => {
     expect(s.hooks.PostToolUse).toBeUndefined();
     expect(s.hooks.Notification).toBeUndefined();
     expect(s.hooks.StopFailure).toBeUndefined();
+    expect(s.hooks.SubagentStart).toBeUndefined();
+    expect(s.hooks.SubagentStop).toBeUndefined();
   });
 
   it('round-trips the settings file back to empty hooks when we were the only hooks', async () => {
@@ -586,7 +618,15 @@ describe('uninstall', () => {
     // command still in settings.json must still resolve to a file on disk.
     expect(fs.existsSync(skillFile(cwd))).toBe(true);
     const shared = readSettings(cwd, 'settings.json');
-    for (const event of ['Stop', 'UserPromptSubmit', 'PostToolUse', 'Notification', 'StopFailure']) {
+    for (const event of [
+      'Stop',
+      'UserPromptSubmit',
+      'PostToolUse',
+      'Notification',
+      'StopFailure',
+      'SubagentStart',
+      'SubagentStop',
+    ]) {
       for (const command of commandsFor(shared, event)) {
         const script = /sparrow-[a-z-]+\.sh/.exec(command)![0];
         expect(fs.existsSync(path.join(cwd, '.claude', 'skills', 'sparrow', 'hooks', script))).toBe(true);
@@ -843,6 +883,119 @@ describe('pause / resume / status', () => {
     fs.writeFileSync(path.join(stateDir, 'blocked', 'notes.txt'), 'keep me');
     await run(['unblock']);
     expect(fs.readdirSync(path.join(stateDir, 'blocked'))).toEqual(['notes.txt']);
+  });
+
+  /* --------------------------- subagents + shells -------------------------- *
+   * `status` is the diagnostic surface, so it reports what is running under
+   * this state dir — and is honest about which half is a fact and which is an
+   * inference. Subagent markers are written by hooks (fact); background shells
+   * have no hook at all and can only be read off the process tree (inference,
+   * and labelled as such wherever it is printed).
+   * ------------------------------------------------------------------------ */
+  const writeSubagent = (id: string, type: string, ageSeconds = 0): void => {
+    const dir = path.join(stateDir, 'subagents');
+    fs.mkdirSync(dir, { recursive: true });
+    const f = path.join(dir, `${id}.json`);
+    const at = new Date(Date.now() - ageSeconds * 1000);
+    fs.writeFileSync(f, JSON.stringify({ version: 1, agent: id, type, at: at.toISOString() }));
+    fs.utimesSync(f, at, at);
+  };
+
+  it('reports no subagents when none are running', async () => {
+    await run(['install']);
+    expect(await statusOut()).toContain('subagents:  none running (this state dir)');
+  });
+
+  it('lists what is running, sorted and de-duplicated, scoped to the state dir', async () => {
+    await run(['install']);
+    writeSubagent('ag_1', 'explore');
+    writeSubagent('ag_2', 'explore');
+    writeSubagent('ag_3', 'code-review');
+    expect(await statusOut()).toContain('subagents:  3 running (this state dir): code-review, 2× explore');
+  });
+
+  it('ignores a marker older than 12h WITHOUT deleting it (status is read-only)', async () => {
+    await run(['install']);
+    writeSubagent('ag_old', 'explore', 13 * 3600);
+    const out = await statusOut();
+    expect(out).toContain('subagents:  none running (this state dir)');
+    expect(fs.existsSync(path.join(stateDir, 'subagents', 'ag_old.json'))).toBe(true);
+  });
+
+  it('survives a malformed subagent marker', async () => {
+    await run(['install']);
+    fs.mkdirSync(path.join(stateDir, 'subagents'), { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'subagents', 'junk.json'), '{not json');
+    logs.length = 0;
+    expect(await run(['status'])).toBe(0);
+  });
+
+  /* ---------------------------- background tasks --------------------------- *
+   * The Stop hook records what the harness reported in `background_tasks`, so
+   * this line is a FACT once a turn has ended — dated, because it is a snapshot
+   * of that moment and not of now. Before the first turn ends there is no
+   * record, and the old process-tree inference is all there is; it stays as the
+   * fallback, still labelled, because a fresh session is exactly when someone
+   * asks and the file cannot answer.
+   * ------------------------------------------------------------------------ */
+  const writeTasks = (tasks: Record<string, string>[], at = new Date()): void => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, 'background-tasks.json'),
+      JSON.stringify({ version: 1, at: at.toISOString(), tasks }),
+    );
+  };
+  const shellsLine = async (): Promise<string> =>
+    (await statusOut()).split('\n').find((l) => l.startsWith('shells:')) ?? '';
+
+  it('reports running background tasks from the record, dated', async () => {
+    await run(['install']);
+    const at = new Date(Date.now() - 300_000);
+    writeTasks(
+      [
+        { id: 'bn0', type: 'shell', status: 'running', description: 'Sleep 40 seconds in background' },
+        { id: 'bn1', type: 'shell', status: 'running', description: 'Build the bundle' },
+      ],
+      at,
+    );
+    expect(await shellsLine()).toBe(
+      `shells:     2 running (as of the last turn end, ${clock(at)}): Sleep 40 seconds in background, Build the bundle`,
+    );
+  });
+
+  it('says none when the last turn ended with nothing running', async () => {
+    await run(['install']);
+    const at = new Date();
+    writeTasks([], at);
+    expect(await shellsLine()).toBe(`shells:     none running (as of the last turn end, ${clock(at)})`);
+  });
+
+  it('counts only what is still running', async () => {
+    await run(['install']);
+    const at = new Date();
+    writeTasks(
+      [
+        { id: 'bn0', type: 'shell', status: 'running', description: 'Tail the log' },
+        { id: 'bn1', type: 'shell', status: 'completed', description: 'Build the bundle' },
+      ],
+      at,
+    );
+    expect(await shellsLine()).toBe(`shells:     1 running (as of the last turn end, ${clock(at)}): Tail the log`);
+  });
+
+  it('falls back to the labelled inference before any turn has ended', async () => {
+    await run(['install']);
+    expect(await shellsLine()).toMatch(
+      /^shells: {5}(\d+ \(inferred from the process tree; no turn has ended in this state dir yet\)|unknown \(no turn has ended in this state dir yet\))$/,
+    );
+  });
+
+  it('survives a malformed record by falling back, not by failing', async () => {
+    await run(['install']);
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'background-tasks.json'), '{not json');
+    expect(await run(['status'])).toBe(0);
+    expect(await shellsLine()).toMatch(/no turn has ended in this state dir yet/);
   });
 
   it('rejects an unknown subcommand with a nonzero code', async () => {

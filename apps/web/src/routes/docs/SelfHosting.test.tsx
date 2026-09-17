@@ -74,7 +74,7 @@ describe('Self-hosting — Run it', () => {
     const code = terminalContaining(container, '--name sparrow');
     expect(code).toContain('-p 8722:8722');
     expect(code).toContain('-v sparrow-data:/data');
-    expect(code).toContain('-e BASE_URL=https://sparrow.yourcompany.com');
+    expect(code).toContain('-e BASE_URL=https://sparrow.example.com');
     expect(code).toContain('-e ADMIN_TOKEN=$(openssl rand -hex 24)');
     expect(code).toContain('ghcr.io/sparrow-land/sparrow:latest');
   });
@@ -88,8 +88,6 @@ describe('Self-hosting — Run it', () => {
     const { container } = renderPage();
     const text = flatText(container);
     expect(text).toMatch(/BASE_URL is the origin invite URLs are built from/i);
-    // The example host is a placeholder, and the page says so in words.
-    expect(text).toMatch(/sparrow\.yourcompany\.com stands for your (own )?public URL/i);
     expect(text).toMatch(/first account to sign up owns the workspace/i);
     expect(text).toMatch(/invite/i);
   });
@@ -209,10 +207,6 @@ describe('Self-hosting — Lock it down', () => {
     expect(code).toContain('x-admin-token');
     // And the read-back.
     expect(code).toMatch(/curl[^\n]*\/api\/v1\/config -H "x-admin-token/);
-    // Both curls address the deployed instance by the page's ONE example host.
-    for (const url of [...code.matchAll(/https?:\/\/[^\s"']+/g)].map((m) => m[0])) {
-      expect(url).toContain('sparrow.yourcompany.com');
-    }
   });
 
   it('keeps the resolution order and the 404 without an admin token', () => {

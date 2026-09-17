@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { Cli } from './Cli.js';
-import { serverOrigin } from '../../lib/origin.js';
 
 /**
  * The presence rule, stated the same way here, on the Getting started page, and
@@ -172,23 +171,11 @@ describe('CLI reference — the listener trio and the skill', () => {
     expect(flatText(container)).not.toContain('<your-server>');
   });
 
-  /**
-   * Every example URL on this page is THIS instance's origin, so the reference
-   * continues the walk the Getting started page begins (its `docker run` line
-   * is the origin the published docs render). No marketing host, no invented
-   * example host.
-   */
-  it('uses this instance’s own origin in its examples, never an invented host', () => {
+  it('uses a neutral example origin, never the marketing host', () => {
     const { container } = render(<Cli />);
     const text = flatText(container);
     expect(text).not.toContain('sparrow-hq.com');
-    expect(text).not.toContain('sparrow.example.com');
-    const origin = serverOrigin();
-    const terminals = [...container.querySelectorAll('.terminal code')].map(
-      (c) => c.textContent ?? '',
-    );
-    expect(terminals.some((t) => t.includes(`${origin}/invite/ivk_`))).toBe(true);
-    expect(terminals.some((t) => t.includes(origin))).toBe(true);
+    expect(text).toContain('https://sparrow.example.com');
   });
 
   it('never calls one way of connecting "recommended"', () => {

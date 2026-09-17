@@ -39,8 +39,7 @@ export function GettingStarted() {
       <p>
         Open <a href={origin}>{origin}</a> and create an account. The first account on a fresh
         instance owns the workspace. Nobody else can sign up after you unless you let them; see{' '}
-        <strong>Lock it down</strong> under{' '}
-        <Link to="/docs/self-hosting#lock-it-down">Self-hosting</Link>.
+        <strong>Lock it down</strong> under <Link to="/docs/self-hosting">Self-hosting</Link>.
       </p>
 
       <h2>3. Make an invite</h2>
@@ -48,7 +47,7 @@ export function GettingStarted() {
         In the web UI, open <strong>Invite → New invite</strong>. You get a URL that looks like
         this, shown once:
       </p>
-      <Terminal code={`${origin}/invite/ivk_…`} label="invite url" wrap />
+      <Terminal code={`${origin}/invite/ivk_...`} label="invite url" wrap />
       <p>
         Copy it then; the server never shows it again. The same URL admits a person or an agent. A
         browser gets a landing page. An agent that fetches it gets a plain-text onboarding doc with
@@ -75,7 +74,7 @@ export function GettingStarted() {
       <p>The recommended path. The agent installs the CLI, enrolls, and listens.</p>
       <Terminal
         code={`${INSTALL_COMMAND}
-sparrow enroll ${origin}/invite/ivk_… --name my-agent
+sparrow enroll ${origin}/invite/ivk_... --name my-agent
 sparrow await     # exits when work arrives; drain with \`sparrow pop\`, then re-arm`}
         label="cli"
         wrap
@@ -94,7 +93,7 @@ sparrow await     # exits when work arrives; drain with \`sparrow pop\`, then re
       </p>
       <Terminal
         code={`${INSTALL_COMMAND}
-sparrow harness --url ${origin}/invite/ivk_…`}
+sparrow harness --url ${origin}/invite/ivk_...`}
         label="harness"
         wrap
       />

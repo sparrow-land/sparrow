@@ -67,6 +67,7 @@ import {
 } from './state.js';
 import { readAwaitFailure } from './await-failure.js';
 import { blockedDir, clearBlockedMarkers, clockOf, currentBlock } from './blocked.js';
+import { shellStatusLine, subagentStatusLine } from './subagents.js';
 
 export type { Scope, Resolved, Provider };
 
@@ -380,6 +381,14 @@ export function status(r: Resolved): number {
   r.log(`heartbeat:  ${hb}`);
   r.log(`state dir:  ${r.stateDir}`);
   r.log(`skill:      ${installed ? 'installed' : 'not installed'} (${r.scope} scope, ${dir})`);
+  // Who is running under this state dir. Both counts are FACTS the harness
+  // reported: the Subagent{Start,Stop} hooks write the subagent markers, and the
+  // Stop hook records `background_tasks` (measured 2026-09-17; undocumented).
+  // The shells line falls back to a process-tree inference only before the first
+  // turn has ended, and says "inferred" when it does — the two kinds of claim
+  // must never read alike.
+  r.log(`subagents:  ${subagentStatusLine(r.stateDir)}`);
+  r.log(`shells:     ${shellStatusLine(r.stateDir)}`);
   // A usage limit is the one failure that leaves everything else looking
   // healthy: the listener holds the stream, presence is green, and no turn can
   // run. Nothing expires it — age is not evidence quota came back — so the line

@@ -21,7 +21,8 @@
  * when the other one already owns the registration ({@link installRefusal}):
  * proceeding would leave two live registrations while overwriting the playbook
  * underneath them.
- * Events    → Stop, StopFailure, UserPromptSubmit, PostToolUse, Notification.
+ * Events    → Stop, StopFailure, UserPromptSubmit, PostToolUse, Notification,
+ *             SubagentStart, SubagentStop.
  * Also      → `env.CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, which opts the
  *             session out of Claude Code's memory-pressure reaper so a long idle
  *             stretch cannot kill the background `sparrow await` that is a
@@ -56,8 +57,22 @@ const NOTIFICATION_MATCHER =
  * paths — so a blocked stop never flickers the agent idle (no separate Stop
  * entry, no working→idle→working churn).
  */
-type HookEvent = 'Stop' | 'StopFailure' | 'UserPromptSubmit' | 'PostToolUse' | 'Notification';
-const HOOKS: ReadonlyArray<{ file: string; event: HookEvent; mode?: string; matcher?: string }> = [
+type HookEvent =
+  | 'Stop'
+  | 'StopFailure'
+  | 'UserPromptSubmit'
+  | 'PostToolUse'
+  | 'Notification'
+  | 'SubagentStart'
+  | 'SubagentStop';
+const HOOKS: ReadonlyArray<{
+  file: string;
+  event: HookEvent;
+  mode?: string;
+  matcher?: string;
+  /** Write the group with NO `matcher` key at all (see the subagent events). */
+  omitMatcher?: boolean;
+}> = [
   { file: 'sparrow-stop-check.sh', event: 'Stop' },
   // StopFailure is a DIFFERENT event from Stop, and the plain Stop hook does not
   // fire when a turn ends on an API error. Without this entry a session that has
@@ -73,6 +88,14 @@ const HOOKS: ReadonlyArray<{ file: string; event: HookEvent; mode?: string; matc
     mode: 'notification',
     matcher: NOTIFICATION_MATCHER,
   },
+  // THE SUBAGENT INDICATOR. These two are matched on AGENT TYPE — exact names,
+  // pipe-separated, not a regex — so the catch-all is an OMITTED `matcher` key,
+  // the form Claude Code's own SubagentStop example uses. Writing `'*'` or a
+  // name here would cover one agent type and silently miss every other, which is
+  // the same class of failure as the old `matcher: ''` Notification bug. Codex
+  // documents no subagent hook events at all, so its adapter stays untouched.
+  { file: 'sparrow-auto-status.sh', event: 'SubagentStart', mode: 'subagent-start', omitMatcher: true },
+  { file: 'sparrow-auto-status.sh', event: 'SubagentStop', mode: 'subagent-stop', omitMatcher: true },
 ];
 
 /** The two settings files Claude Code reads at a scope, in load order. */
@@ -231,13 +254,16 @@ function upsertHook(
   file: string,
   command: string,
   matcher = '',
+  omitMatcher = false,
 ): void {
   settings.hooks ??= {};
   const existing = Array.isArray(settings.hooks[event]) ? settings.hooks[event] : [];
   const groups = stripOurHook(existing, file);
+  // A missing key and `''` are the same catch-all, so this still adopts an
+  // existing group either way; only a group we CREATE follows `omitMatcher`.
   let group = groups.find((g) => (g.matcher ?? '') === matcher);
   if (!group) {
-    group = { matcher, hooks: [] };
+    group = omitMatcher ? { hooks: [] } : { matcher, hooks: [] };
     groups.push(group);
   }
   group.hooks.push({ type: 'command', command });
@@ -318,8 +344,8 @@ function syncSettings(r: Resolved, mode: 'install' | 'uninstall'): string[] {
   const before = JSON.stringify(settings);
   for (const file of SCRIPTS) removeEverywhere(settings, file);
   if (mode === 'install') {
-    for (const { file, event, mode: hookMode, matcher } of HOOKS) {
-      upsertHook(settings, event, file, hookCommand(r, file, hookMode), matcher ?? '');
+    for (const { file, event, mode: hookMode, matcher, omitMatcher } of HOOKS) {
+      upsertHook(settings, event, file, hookCommand(r, file, hookMode), matcher ?? '', omitMatcher);
     }
     setReaperOptOut(settings);
   } else {
@@ -400,7 +426,8 @@ export const CLAUDE_ADAPTER: ProviderAdapter & DualSettingsAdapter = {
     const sp = settingsPath(r);
     syncSettings(r, 'install');
     r.log(
-      `Hooks merged into ${sp} (Stop + StopFailure + UserPromptSubmit + PostToolUse + Notification).`,
+      `Hooks merged into ${sp} (Stop + StopFailure + UserPromptSubmit + PostToolUse + ` +
+        `Notification + SubagentStart + SubagentStop).`,
     );
     r.log(BG_REAP_INSTALL_NOTE);
     if (r.scope === 'project') {
@@ -449,7 +476,15 @@ export const CLAUDE_ADAPTER: ProviderAdapter & DualSettingsAdapter = {
           groups.some((g) => (g.hooks ?? []).some((h) => typeof h.command === 'string' && h.command.includes('sparrow-')))
         );
       });
-    for (const event of ['Stop', 'StopFailure', 'UserPromptSubmit', 'PostToolUse', 'Notification']) {
+    for (const event of [
+      'Stop',
+      'StopFailure',
+      'UserPromptSubmit',
+      'PostToolUse',
+      'Notification',
+      'SubagentStart',
+      'SubagentStop',
+    ]) {
       lines.push(
         registered(event)
           ? { level: 'ok', text: `hook ${event}: registered` }
