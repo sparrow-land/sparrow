@@ -136,6 +136,13 @@ export const differentThreadRefusal = (thread: string, pid: number): string =>
  *
  * @param thread this candidate's Codex thread, or `undefined` for a non-Codex
  *   listener — which never consults the guard at all.
+ *
+ * DELIBERATELY ONE-WAY. `thread` undefined (a Claude Code listener, or any
+ * non-Codex runtime) consults nothing and keeps newest-wins, even over a live
+ * Codex incumbent: there is no identity to compare in that direction, and two
+ * Claude Code sessions in one project genuinely ARE the same agent re-arming.
+ * A live cross-runtime collision means two agents share a profile and state
+ * dir that only one should own — a misconfiguration, not a case to arbitrate.
  */
 export function assertMayArm(env: Env, thread: string | undefined, kill?: PidSignal): void {
   if (!thread) return;
