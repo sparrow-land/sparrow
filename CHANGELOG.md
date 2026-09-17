@@ -26,12 +26,19 @@ versions that release shipped with.
   and, never having published, never learned it had been superseded, so it woke
   on the same message as the listener that did claim the dir. The refusal is now
   captured, the stream is abandoned without a retry, and the refusal's own text
-  goes to stderr with exit 1; an unexpected throw is reported the same way.
+  goes to stderr with exit 1; an unexpected throw is reported the same way. The
+  failure is terminal for every channel, not just the reconnect: a reconcile or
+  replay-gap continuation that resumes after it prints no wake line, queues no
+  Codex turn and touches neither the heartbeat nor the cursor.
   Publish-late is unchanged, and an ordinary reconnect (an already-published
   generation) is unaffected.
 - The arming lock's `flock` probe and helper now run with the listener's
-  environment merged over this process's, so an embedder that drives `runCli`
-  with an env of its own gets the binaries it named.
+  environment (merged over this process's) and working directory, so an embedder
+  that drives `runCli` with an env of its own gets the binaries it named. The
+  probe's answer is cached per resolution context — binary, merged `PATH` and
+  cwd — rather than once per process, so one invocation with a stripped `PATH`
+  can no longer downgrade a later listener to advisory on a host that has a
+  working kernel lock. Only `ENOENT` is cached; every other failure is re-probed.
 
 ## [0.1.40] — 2026-09-17
 

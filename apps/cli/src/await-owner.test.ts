@@ -406,6 +406,94 @@ describe('which mechanism this host offers', () => {
     expect(working.calls).toHaveLength(1);
   });
 
+  /* ================================================================
+   * THE CACHE IS PER CONTEXT, NOT PER PROCESS.
+   *
+   * Once the probe honours the listener's own environment, "is there a flock?"
+   * is no longer a fact about the process: one embedder invocation with a
+   * stripped PATH would answer `advisory` for every later listener, silently
+   * downgrading a host that has a perfectly good kernel lock — and advisory is
+   * the one mode we promise is chosen ONLY when the binary is genuinely absent.
+   * ================================================================ */
+
+  /** A spawn stand-in that answers by the PATH it is actually given. */
+  function spawnByPath(answer: (p: string | undefined) => any): any & { paths: Array<string | undefined> } {
+    const paths: Array<string | undefined> = [];
+    const fn = (_cmd: string, _args: string[], opts: any) => {
+      paths.push(opts?.env?.PATH);
+      return answer(opts?.env?.PATH);
+    };
+    (fn as any).paths = paths;
+    return fn as any;
+  }
+  const GOOD = '/usr/bin:/bin';
+  const MISSING = '/nonexistent-sparrow-fixture';
+
+  it('a stripped PATH does not condemn the next listener to advisory', () => {
+    const spawn = spawnByPath((p) =>
+      p === GOOD ? { ...helperArgs, status: 0 } : { ...helperArgs, error: errno('ENOENT') },
+    );
+    // The reviewer's sequence, in ONE process and with NO reset between:
+    expect(detectArmLockMechanism({ spawn }, { PATH: MISSING }).mechanism).toBe('advisory');
+    expect(detectArmLockMechanism({ spawn }, { PATH: GOOD }).mechanism).toBe('flock');
+    expect(spawn.paths).toEqual([MISSING, GOOD]); // each context asked for itself
+  });
+
+  it('the same PATH under a different cwd is a different context', () => {
+    // A relative (or empty) PATH entry resolves against the working directory,
+    // so an answer earned in one directory says nothing about another.
+    const spawn = spawnByPath(() => ({ ...helperArgs, error: errno('ENOENT') }));
+    expect(detectArmLockMechanism({ spawn, cwd: '/tmp/a' }, { PATH: './bin' }).mechanism).toBe(
+      'advisory',
+    );
+    expect(detectArmLockMechanism({ spawn, cwd: '/tmp/b' }, { PATH: './bin' }).mechanism).toBe(
+      'advisory',
+    );
+    expect(spawn.paths).toHaveLength(2); // asked again, not reused
+    // …and the same cwd IS reused.
+    detectArmLockMechanism({ spawn, cwd: '/tmp/a' }, { PATH: './bin' });
+    expect(spawn.paths).toHaveLength(2);
+  });
+
+  it('caches the settled answer per context (one spawn for two identical asks)', () => {
+    const spawn = spawnByPath(() => ({ ...helperArgs, error: errno('ENOENT') }));
+    expect(detectArmLockMechanism({ spawn }, { PATH: MISSING }).mechanism).toBe('advisory');
+    expect(detectArmLockMechanism({ spawn }, { PATH: MISSING }).mechanism).toBe('advisory');
+    expect(spawn.paths).toHaveLength(1);
+  });
+
+  it('does not cache a FAULT, in any context: a chmod away is re-probed', () => {
+    const spawn = spawnByPath(() => ({ ...helperArgs, error: errno('EACCES') }));
+    expect(detectArmLockMechanism({ spawn }, { PATH: GOOD }).mechanism).toBe('unavailable');
+    expect(detectArmLockMechanism({ spawn }, { PATH: GOOD }).mechanism).toBe('unavailable');
+    expect(spawn.paths).toHaveLength(2);
+  });
+
+  it('the binary itself is part of the key, not just the PATH', () => {
+    const spawn = (cmd: string, _args: string[], _opts: any) =>
+      cmd === 'flock' ? { ...helperArgs, status: 0 } : { ...helperArgs, error: errno('ENOENT') };
+    expect(detectArmLockMechanism({ spawn: spawn as any }, { PATH: GOOD }).mechanism).toBe('flock');
+    expect(
+      detectArmLockMechanism({ spawn: spawn as any, flockPath: '/opt/nope/flock' }, { PATH: GOOD })
+        .mechanism,
+    ).toBe('advisory');
+    // …and neither answer bled into the other.
+    expect(detectArmLockMechanism({ spawn: spawn as any }, { PATH: GOOD }).mechanism).toBe('flock');
+  });
+
+  it('the reset clears EVERY context, not just the last', () => {
+    const missing = spawnByPath(() => ({ ...helperArgs, error: errno('ENOENT') }));
+    detectArmLockMechanism({ spawn: missing }, { PATH: MISSING });
+    detectArmLockMechanism({ spawn: missing }, { PATH: GOOD });
+    expect(missing.paths).toHaveLength(2);
+
+    __resetArmLockProbeForTests();
+    const working = spawnByPath(() => ({ ...helperArgs, status: 0 }));
+    expect(detectArmLockMechanism({ spawn: working }, { PATH: MISSING }).mechanism).toBe('flock');
+    expect(detectArmLockMechanism({ spawn: working }, { PATH: GOOD }).mechanism).toBe('flock');
+    expect(working.paths).toHaveLength(2);
+  });
+
   it('probes once per process for the answers it does cache', () => {
     const probe = fakeSpawn(() => ({ ...helperArgs, status: 0 }));
     detectArmLockMechanism({ spawn: probe });

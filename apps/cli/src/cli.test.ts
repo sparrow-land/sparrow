@@ -4053,6 +4053,13 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
    * state dir, never stamping the heartbeat, and — never having published —
    * never learning it had been superseded, so it woke on the same message as
    * the listener that DID claim the dir.
+   *
+   * WHICH FIXTURE PROVES WHAT. The three `flock` fixtures refuse BEFORE the
+   * record is written, so they — and only they — establish that an incumbent's
+   * record and heartbeat come through byte-identical. The publish-hook fixture
+   * fires AFTER a successful publish, so it proves terminal handling of an
+   * UNEXPECTED throw (no wake, no bridge, no retry, exit 1) and says nothing
+   * about incumbent preservation.
    * ================================================================== */
   describe('a refused claim', () => {
     const binDirs: string[] = [];
@@ -4060,6 +4067,130 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
       for (const d of binDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
       __resetArmLockProbeForTests();
     });
+
+    /**
+     * A relay that can PARK the two responses this scenario turns on: the SSE
+     * establishment (so the claim fails at a moment of the test's choosing) and
+     * the inbox read the reconcile poll makes (so its answer arrives after the
+     * failure has already been reported).
+     */
+    interface ParkingRelay {
+      url: string;
+      holdSse: boolean;
+      sseHeld: number;
+      releaseSse(): void;
+      /** Park inbox reads from this one onward (1 = the first). */
+      holdInboxFrom: number;
+      inboxHeld: number;
+      releaseInbox(): void;
+      close(): Promise<void>;
+    }
+
+    async function startParkingRelay(): Promise<ParkingRelay> {
+      const upstream = new URL(url);
+      const sockets = new Set<Socket>();
+      const state = {
+        holdSse: false,
+        sseParked: [] as Array<() => void>,
+        holdInboxFrom: 0,
+        inboxSeen: 0,
+        inboxParked: [] as Array<() => void>,
+      };
+      const server = http.createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (d: Buffer) => chunks.push(d));
+        req.on('end', () => {
+          const raw = Buffer.concat(chunks);
+          const forward = (): void => {
+            const up = http.request(
+              {
+                host: upstream.hostname,
+                port: upstream.port,
+                path: req.url,
+                method: req.method,
+                headers: { ...req.headers, host: upstream.host, 'content-length': String(raw.length) },
+              },
+              (ur) => {
+                res.writeHead(ur.statusCode ?? 502, ur.headers);
+                ur.pipe(res);
+              },
+            );
+            up.on('error', () => {
+              res.writeHead(502);
+              res.end();
+            });
+            up.end(raw);
+          };
+          const path_ = (req.url ?? '').split('?')[0] ?? '';
+          if (state.holdSse && path_ === '/api/v1/me/events') {
+            state.sseParked.push(forward);
+            return;
+          }
+          if (path_ === '/api/v1/me/inbox') {
+            state.inboxSeen += 1;
+            if (state.holdInboxFrom > 0 && state.inboxSeen >= state.holdInboxFrom) {
+              state.inboxParked.push(forward);
+              return;
+            }
+          }
+          forward();
+        });
+      });
+      server.on('connection', (s) => {
+        sockets.add(s);
+        s.on('close', () => sockets.delete(s));
+      });
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+      const port = (server.address() as AddressInfo).port;
+      return {
+        url: `http://127.0.0.1:${port}`,
+        get holdSse() {
+          return state.holdSse;
+        },
+        set holdSse(v: boolean) {
+          state.holdSse = v;
+        },
+        get sseHeld() {
+          return state.sseParked.length;
+        },
+        releaseSse() {
+          state.holdSse = false;
+          for (const f of state.sseParked.splice(0)) f();
+        },
+        get holdInboxFrom() {
+          return state.holdInboxFrom;
+        },
+        set holdInboxFrom(v: number) {
+          state.holdInboxFrom = v;
+        },
+        get inboxHeld() {
+          return state.inboxParked.length;
+        },
+        releaseInbox() {
+          state.holdInboxFrom = 0;
+          for (const f of state.inboxParked.splice(0)) f();
+        },
+        close() {
+          for (const s of sockets) s.destroy();
+          return new Promise<void>((r) => server.close(() => r()));
+        },
+      };
+    }
+
+    /** The queued item, still unread — a refused claim consumes nothing. */
+    async function stillUnread(id: string): Promise<void> {
+      const inbox = capture();
+      expect(await runCli(['inbox', '--json'], env, inbox.io)).toBe(0);
+      expect(JSON.parse(inbox.out()).items.map((i: any) => i.id)).toContain(id);
+    }
+
+    const until = async (want: () => boolean, ms = 8000): Promise<void> => {
+      const deadline = Date.now() + ms;
+      while (!want()) {
+        if (Date.now() > deadline) throw new Error('timed out waiting for the condition');
+        await nap(20);
+      }
+    };
 
     /** A stand-in `flock` on PATH — the only way to make a claim refuse for real. */
     function fakeFlock(body: string, mode = 0o755): string {
@@ -4183,7 +4314,10 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
 
     /* Not every failure is one we predicted. An unexpected throw must reach the
      * operator too — never a listener that keeps running as if it had claimed. */
-    it('exits 1 for an UNEXPECTED throw from publish, with its message', async () => {
+    /* AFTER a successful publish — so this is about terminal handling of an
+     * unexpected throw, NOT about leaving an incumbent alone (the record has
+     * already been replaced by the time the hook runs). */
+    it('exits 1 for an UNEXPECTED throw from publish, and stops there', async () => {
       await awaitFixture('awtref4');
       const proxy = await startPresenceProxy();
       __setAwaitPublishHookForTests(() => {
@@ -4210,6 +4344,48 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
       } finally {
         __setAwaitPublishHookForTests(undefined);
         await proxy.close();
+      }
+    }, 30_000);
+
+    /* A CONTINUATION THAT RESUMES AFTER THE FAILURE MUST STAY SILENT.
+     *
+     * The reconcile poll sees work and asks the inbox; the answer arrives after
+     * publication has already failed and the command has reported it. Nothing
+     * about that late answer may reach stdout, the bridge, or the queue — the
+     * no-wake guarantee is about every channel, not just the one that noticed.
+     */
+    it('a late inbox answer cannot wake after the failure is reported', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtreflate');
+      const dir = fakeFlock('exit 1');
+      const relay = await startParkingRelay();
+      try {
+        relay.holdSse = true; // publication cannot fail until the stream opens
+        relay.holdInboxFrom = 2; // …let the pre-stream look through, park the next
+        const cap = capture();
+        const codex: string[] = [];
+        cap.io.notifyCodex = async (thread) => { codex.push(thread); };
+
+        const running = runCli(
+          ['await', '--timeout', '10', '--server', relay.url],
+          withFlock(dir, { SPARROW_RECONCILE_POLL_MS: '150' }),
+          cap.io,
+        );
+        await until(() => relay.sseHeld >= 1); // establishment parked
+
+        const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'late answer' });
+        await until(() => relay.inboxHeld >= 1); // the poll's reconcile is parked
+
+        relay.releaseSse(); // …now the claim is attempted, and refused
+        expect(await running).toBe(1);
+        expect(cap.out()).toBe('');
+
+        relay.releaseInbox(); // the answer the listener was waiting on arrives
+        await nap(300);
+        expect(cap.out()).toBe(''); // still nothing: the claim failed, terminally
+        expect(codex).toEqual([]);
+        await stillUnread(sent.message.id);
+      } finally {
+        await relay.close();
       }
     }, 30_000);
 

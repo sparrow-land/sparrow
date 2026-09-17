@@ -4496,7 +4496,22 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     /** Set once the stream exists: how a checkpoint ends the wait. */
     let standDown: () => void = () => {};
     /** May this listener still act on the state dir? Sticky once lost. */
+    /**
+     * A `publish()` that REFUSED at stream open (see the `onOpen` note below).
+     * Held rather than thrown, because the SSE read path would swallow it into
+     * a reconnect — and TERMINAL from the moment it is set: a listener that
+     * could not claim the state dir owns nothing, so every side effect
+     * `owned()` guards (the heartbeat, presence, the cursor, the Codex bridge)
+     * and the wake line itself are off, for good. An in-flight inbox read that
+     * resumes AFTER the failure must not be able to speak either.
+     */
+    let publishFailure: unknown;
+
     const owned = (): boolean => {
+      // Never claimed, and now never will: not "not yet" (an ordinary candidate
+      // before its first publish still reads as owned — it is simply idle), but
+      // "asked and was refused".
+      if (publishFailure !== undefined) return false;
       if (supersededBy !== undefined) return false;
       const by = generation.supersededBy();
       if (by === undefined) return true;
@@ -4655,6 +4670,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
 
     let emittedReason: string | undefined;
     const wake = (reason: string, item: InboxEntry | null, extra?: Record<string, unknown>): void => {
+      /* THE ONE CHOKE POINT every wake passes through — the pre-stream hand-off,
+       * an event, a poll reconcile, a batch deadline, a replay gap. A claim that
+       * FAILED is terminal here too, and not only for the code path that
+       * noticed: an inbox read already in flight resumes after the failure and
+       * would otherwise print a wake line for a listener that has just reported
+       * it could not arm. (`owned()` covers this, and says so explicitly.) */
+      if (publishFailure !== undefined) return;
       if (!owned()) return; // superseded: this work belongs to the newer listener
       emittedReason = reason;
       emit({
@@ -5116,12 +5138,6 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     if (alreadyWaiting) firstDeferMs = alreadyWaiting.deferMs;
 
     let terminalError: unknown;
-    /**
-     * A `publish()` that REFUSED at stream open (see the `onOpen` note). Held
-     * here because the SSE read path would otherwise swallow it into a
-     * reconnect; the tail turns it into exit 1 with its own message.
-     */
-    let publishFailure: unknown;
     let upgradeWake: Promise<unknown> | undefined;
     const terminateForUpgrade = (e: unknown): boolean => {
       if (!isUpgradeRequired(e)) return false;
@@ -5458,14 +5474,23 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       // `awaitSignals`, where `runAwait` calls `runAwaitArmed`.
     }
 
-    /* A REFUSED CLAIM OUTRANKS EVERYTHING BELOW. Nothing was stamped, nothing
-     * was emitted (the stream never went live for this listener), and the
-     * incumbent — if there is one — is untouched. Exit 1 carrying the refusal's
-     * own words: the contention line naming the holder's pid, the unusable-lock
-     * line naming the path, the broken-`flock` line naming the errno, or the
-     * different-thread line naming the owner. DISTINCT from a stand-down: being
-     * superseded is exit 4 and says so in its own words (`reportSuperseded`);
-     * failing to claim is exit 1 and says why. */
+    /* A REFUSED CLAIM OUTRANKS EVERYTHING BELOW, and is reported at once.
+     *
+     * NOT BY DRAINING FIRST: an inbox read can be in flight against a server
+     * that is answering slowly (or not at all), and waiting for it would hang
+     * the very exit that is supposed to tell the operator the arm failed —
+     * there is no cancellation to reach for either, since these reads carry no
+     * signal. The guarantee comes from making the failure TERMINAL instead:
+     * `publishFailure` short-circuits `wake()` and `owned()`, so a continuation
+     * that resumes a second later prints nothing, queues nothing, and touches
+     * neither the heartbeat nor the cursor. Nothing was stamped, nothing was
+     * emitted, and the incumbent — if there is one — is untouched.
+     *
+     * Exit 1 carrying the refusal's own words: the contention line naming the
+     * holder's pid, the unusable-lock line naming the path, the broken-`flock`
+     * line naming the errno, or the different-thread line naming the owner.
+     * DISTINCT from a stand-down: being superseded is exit 4 and says so in its
+     * own words (`reportSuperseded`); failing to claim is exit 1 and says why. */
     if (publishFailure !== undefined) throw publishFailure;
 
     // Let an inbox check that was in flight when the stream ended finish, so a

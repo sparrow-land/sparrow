@@ -387,6 +387,8 @@ export interface ArmLockOptions {
   flockPath?: string;
   /** The CLI entry the helper is run from; `process.argv[1]` by default. */
   bundle?: string;
+  /** Working directory for the probe and the helper; `process.cwd()` by default. */
+  cwd?: string;
   /** Injected `spawnSync` for both the probe and the helper. */
   spawn?: typeof spawnSync;
 }
@@ -412,7 +414,30 @@ export const ADVISORY_LOCK_NOTE =
 
 /* ------------------------------ mechanism ------------------------------ */
 
-let probedMechanism: ArmLockMechanism | undefined;
+/**
+ * Settled probe answers, keyed by the CONTEXT that produced them.
+ *
+ * "Is there a `flock`?" stopped being a process-wide fact the moment the probe
+ * started honouring the listener's own environment: one embedder invocation
+ * with a stripped PATH would otherwise answer `advisory` for every later
+ * listener on the same process, silently downgrading a host that has a perfectly
+ * good kernel lock — and advisory is the one mode we promise is chosen ONLY when
+ * the binary is genuinely absent. So the key is what actually decides which
+ * executable runs: the binary name (or `flockPath` override) and the merged PATH
+ * the spawn is given.
+ */
+const probedMechanism = new Map<string, ArmLockMechanism>();
+
+/**
+ * The executable-resolution context a probe answer belongs to: the binary, the
+ * PATH the spawn is given, and the working directory it is given — a relative
+ * PATH entry (and an empty one, which means the cwd) resolves against that, so
+ * the same PATH text can legitimately find or miss the binary from two
+ * directories. Keyed on cwd always rather than trying to spot relative entries.
+ */
+function probeKey(flockPath: string, mergedPath: string | undefined, cwd: string): string {
+  return `${flockPath}\u0000${mergedPath ?? ''}\u0000${cwd}`;
+}
 
 /** The operator/embedder override, when it names a mechanism we know. */
 function envForcedMechanism(env: Env): ArmLockMechanism | undefined {
@@ -446,19 +471,25 @@ export function detectArmLockMechanism(o: ArmLockOptions = {}, env: Env = {}): A
   // in-process) must set: the helper is a real subprocess of the real binary.
   const forced = envForcedMechanism(env);
   if (forced !== undefined) return { mechanism: forced };
-  if (probedMechanism !== undefined) return { mechanism: probedMechanism };
+  // The listener's PATH decides which `flock` this is a probe OF — the same
+  // environment the helper will be spawned with, or the answer means nothing.
+  const spawnEnv = { ...process.env, ...env };
+  const binary = o.flockPath ?? 'flock';
+  const cwd = o.cwd ?? process.cwd();
+  const key = probeKey(binary, spawnEnv.PATH, cwd);
+  const cached = probedMechanism.get(key);
+  if (cached !== undefined) return { mechanism: cached };
   const run = o.spawn ?? spawnSync;
   let failure: NodeJS.ErrnoException | undefined;
   try {
-    const r = run(o.flockPath ?? 'flock', ['--version'], {
+    const r = run(binary, ['--version'], {
       stdio: 'ignore',
       timeout: 5_000,
-      // The listener's PATH decides which `flock` this is a probe OF — the same
-      // environment the helper will be spawned with, or the answer means nothing.
-      env: { ...process.env, ...env } as NodeJS.ProcessEnv,
+      env: spawnEnv as NodeJS.ProcessEnv,
+      cwd,
     });
     if (r.error === undefined) {
-      probedMechanism = 'flock';
+      probedMechanism.set(key, 'flock');
       return { mechanism: 'flock' };
     }
     failure = r.error as NodeJS.ErrnoException;
@@ -466,15 +497,15 @@ export function detectArmLockMechanism(o: ArmLockOptions = {}, env: Env = {}): A
     failure = e as NodeJS.ErrnoException;
   }
   if (failure?.code === 'ENOENT') {
-    probedMechanism = 'advisory';
+    probedMechanism.set(key, 'advisory');
     return { mechanism: 'advisory' };
   }
   return { mechanism: 'unavailable', code: failure?.code ?? 'UNKNOWN' };
 }
 
-/** TEST-ONLY: forget the per-process probe. */
+/** TEST-ONLY: forget every context's probe answer. */
 export function __resetArmLockProbeForTests(): void {
-  probedMechanism = undefined;
+  probedMechanism.clear();
 }
 
 /* ------------------------------- the helper ------------------------------ */
@@ -606,6 +637,8 @@ function publishUnderFlock(
        * partial env (a test's, typically) still inherits everything it did not
        * set — the same shape `queueCodexAwaitWake` uses for `codex`. */
       env: { ...process.env, ...env } as NodeJS.ProcessEnv,
+      // The same directory the probe answered for (see `probeKey`).
+      cwd: o.cwd ?? process.cwd(),
     },
   );
 
