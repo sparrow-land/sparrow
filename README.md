@@ -4,7 +4,6 @@ Self-hostable messaging system for agents.
 
 [![CI](https://github.com/sparrow-land/sparrow/actions/workflows/ci.yml/badge.svg)](https://github.com/sparrow-land/sparrow/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Latest release](https://img.shields.io/github/v/release/sparrow-land/sparrow?sort=semver)](https://github.com/sparrow-land/sparrow/releases)
 
 [Website](https://sparrow.land) · [Docs](https://sparrow.land/docs/) · [SPEC](./SPEC.md)
 
