@@ -4507,6 +4507,23 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      */
     let publishFailure: unknown;
 
+    /**
+     * IS THIS RUN OVER? A claim that was refused, or a signal — the two states
+     * from which nothing further may be attempted on anyone's behalf: no
+     * republish, no wake line, no bridge, no stamp. Checked FIRST in every
+     * continuation, including the ones that resume into an ERROR: a rejected
+     * inbox read is still an answer arriving after the end, and the upgrade
+     * path in particular would otherwise try to claim the state dir a second
+     * time, long after this command reported that it could not.
+     */
+    const runIsOver = (): boolean => publishFailure !== undefined || interrupted();
+
+    /** Keep a late rejection from surfacing as an unhandled one after we return. */
+    const track = (p: Promise<void>): Promise<void> => {
+      void p.catch(() => {});
+      return p;
+    };
+
     const owned = (): boolean => {
       // Never claimed, and now never will: not "not yet" (an ordinary candidate
       // before its first publish still reads as owned — it is simply idle), but
@@ -5141,6 +5158,12 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     let upgradeWake: Promise<unknown> | undefined;
     const terminateForUpgrade = (e: unknown): boolean => {
       if (!isUpgradeRequired(e)) return false;
+      /* NOT AFTER THE END. The 426 hand-off below CLAIMS the state dir — and a
+       * run that has already reported a refused claim (or been interrupted)
+       * must never attempt a second one, least of all from a continuation that
+       * resumes after the command returned: the refusal would reject into
+       * nobody's error path. `true` means "handled, stop here". */
+      if (runIsOver()) return true;
       // A 426 is a HAND-OFF, exactly like the preflight one: it queues a repair
       // turn and reports the floor. So a candidate that meets the floor on its
       // very first stream open claims the state dir FIRST — publish-late, never
@@ -5189,7 +5212,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         return;
       }
       checking = true;
-      pending = (async () => {
+      pending = track((async () => {
         try {
           do {
             recheck = false;
@@ -5210,6 +5233,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
             if (decision) armBatch(decision.deferMs);
           } while (recheck && !emitted);
         } catch (e) {
+          // TERMINAL FIRST: a rejected read is an answer too, and this run may
+          // already be over (refused claim, or a signal).
+          if (runIsOver()) return;
           if (terminateForUpgrade(e)) return;
           // A transient inbox read must never end the wait — the next event or
           // poll tick asks again.
@@ -5220,7 +5246,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         } finally {
           checking = false;
         }
-      })();
+      })());
     };
 
     /**
@@ -5250,11 +5276,12 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const onGap = (since?: string | number, latest?: string | number): void => {
       if (emitted || controller.signal.aborted) return;
       cursor.gap(latest);
-      pending = (async () => {
+      pending = track((async () => {
         let item: InboxEntry | null = null;
         try {
           item = await oldestWaiting();
         } catch (e) {
+          if (runIsOver()) return; // the same rule as everywhere else
           if (terminateForUpgrade(e)) return;
           // RECHECK POINT 3a — even the conservative "wake so the turn can
           // retry" is a turn, and a blocked agent cannot take one.
@@ -5286,7 +5313,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           cursor: cursor.current() ?? null,
         });
         controller.abort();
-      })();
+      })());
     };
 
     const onEvent = (e: PrincipalEvent): void => {
@@ -5411,6 +5438,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         onGap: ({ since, latest }) => onGap(since, latest),
         onSeed: (latest) => cursor.seed(latest),
         onError: (e) => {
+          if (runIsOver()) return;
           if (terminateForUpgrade(e)) return;
           lifecycle(
             { type: 'await.poll_error', message: String((e as Error)?.message ?? e) },
@@ -5451,6 +5479,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       });
       if (result.reason === 'error') throw result.error;
     } catch (e) {
+      // A refused claim is THE report, whatever the stream did next.
+      if (publishFailure !== undefined) throw publishFailure;
       if (terminateForUpgrade(e)) {
         await upgradeWake;
         // Superseded while the floor was being handled: stand down silently.

@@ -4083,6 +4083,8 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
       holdInboxFrom: number;
       inboxHeld: number;
       releaseInbox(): void;
+      /** Answer the parked inbox reads with a canned status instead of forwarding. */
+      releaseInboxAs(status: number, body: unknown): void;
       close(): Promise<void>;
     }
 
@@ -4094,7 +4096,7 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
         sseParked: [] as Array<() => void>,
         holdInboxFrom: 0,
         inboxSeen: 0,
-        inboxParked: [] as Array<() => void>,
+        inboxParked: [] as Array<(canned?: { status: number; body: unknown }) => void>,
       };
       const server = http.createServer((req, res) => {
         const chunks: Buffer[] = [];
@@ -4122,6 +4124,10 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
             up.end(raw);
           };
           const path_ = (req.url ?? '').split('?')[0] ?? '';
+          const answer = (status: number, body: unknown): void => {
+            res.writeHead(status, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(body));
+          };
           if (state.holdSse && path_ === '/api/v1/me/events') {
             state.sseParked.push(forward);
             return;
@@ -4129,7 +4135,7 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
           if (path_ === '/api/v1/me/inbox') {
             state.inboxSeen += 1;
             if (state.holdInboxFrom > 0 && state.inboxSeen >= state.holdInboxFrom) {
-              state.inboxParked.push(forward);
+              state.inboxParked.push((canned) => (canned ? answer(canned.status, canned.body) : forward()));
               return;
             }
           }
@@ -4170,6 +4176,10 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
           state.holdInboxFrom = 0;
           for (const f of state.inboxParked.splice(0)) f();
         },
+        releaseInboxAs(status: number, body: unknown) {
+          state.holdInboxFrom = 0;
+          for (const f of state.inboxParked.splice(0)) f({ status, body });
+        },
         close() {
           for (const s of sockets) s.destroy();
           return new Promise<void>((r) => server.close(() => r()));
@@ -4196,9 +4206,22 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     function fakeFlock(body: string, mode = 0o755): string {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-flock-'));
       binDirs.push(dir);
-      fs.writeFileSync(path.join(dir, 'flock'), `#!/bin/sh\n${body}\n`, { mode });
+      // Each invocation leaves a mark: a SECOND claim attempt is the thing
+      // these tests are watching for.
+      fs.writeFileSync(
+        path.join(dir, 'flock'),
+        `#!/bin/sh\necho x >> ${path.join(dir, 'calls.log')}\n${body}\n`,
+        { mode },
+      );
       return dir;
     }
+    const claimAttempts = (dir: string): number => {
+      try {
+        return fs.readFileSync(path.join(dir, 'calls.log'), 'utf8').split('\n').filter(Boolean).length;
+      } catch {
+        return 0;
+      }
+    };
     const withFlock = (dir: string, extra: Record<string, string | undefined> = {}) => ({
       ...env,
       PATH: `${dir}:${process.env.PATH ?? ''}`,
@@ -4388,6 +4411,61 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
         await relay.close();
       }
     }, 30_000);
+
+    /* AN ANSWER THAT ARRIVES AS AN ERROR IS STILL AN ANSWER AFTER THE END.
+     *
+     * The success path was the easy half. A rejected read resumes into a catch,
+     * and the 426 branch there CLAIMS the state dir — a second attempt, made
+     * after the command has already reported it could not claim at all, whose
+     * refusal rejects into nobody's error path.
+     */
+    for (const late of [
+      { name: '426', status: 426, body: { error: { code: 'client_upgrade_required', message: 'too old' } } },
+      { name: 'a transient 5xx', status: 503, body: { error: { code: 'internal', message: 'later' } } },
+    ] as const) {
+      it(`a late ${late.name} cannot restart anything after the failure`, async () => {
+        const { owner, roomId, agentId } = await awaitFixture(`awtreflate${late.status}`);
+        const dir = fakeFlock('exit 1');
+        const relay = await startParkingRelay();
+        const rejections: unknown[] = [];
+        const onUnhandled = (e: unknown): void => { rejections.push(e); };
+        process.on('unhandledRejection', onUnhandled);
+        try {
+          relay.holdSse = true;
+          relay.holdInboxFrom = 2;
+          const cap = capture();
+          const codex: string[] = [];
+          cap.io.notifyCodex = async (thread) => { codex.push(thread); };
+
+          const running = runCli(
+            ['await', '--timeout', '10', '--server', relay.url],
+            withFlock(dir, { SPARROW_RECONCILE_POLL_MS: '150' }),
+            cap.io,
+          );
+          await until(() => relay.sseHeld >= 1);
+          const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'late error' });
+          await until(() => relay.inboxHeld >= 1);
+
+          relay.releaseSse();
+          expect(await running).toBe(1);
+          const attemptsAtExit = claimAttempts(dir);
+          expect(attemptsAtExit).toBeGreaterThan(0); // it did try, once
+
+          relay.releaseInboxAs(late.status, late.body);
+          await nap(400);
+
+          // NOT A SECOND CLAIM: the upgrade branch never reached `publish()`.
+          expect(claimAttempts(dir)).toBe(attemptsAtExit);
+          expect(rejections).toEqual([]); // …and nothing rejected into thin air
+          expect(cap.out()).toBe('');
+          expect(codex).toEqual([]);
+          await stillUnread(sent.message.id);
+        } finally {
+          process.off('unhandledRejection', onUnhandled);
+          await relay.close();
+        }
+      }, 30_000);
+    }
 
     /* THE CONSEQUENCE the field saw: two listeners waking on one message. The
      * refusing one must be GONE, not sitting unpublished and unsupersedable. */

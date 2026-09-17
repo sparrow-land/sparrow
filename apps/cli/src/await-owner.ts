@@ -429,14 +429,33 @@ export const ADVISORY_LOCK_NOTE =
 const probedMechanism = new Map<string, ArmLockMechanism>();
 
 /**
+ * The directory the spawn will really run in, ABSOLUTE. A literal `./bin` names
+ * different places before and after a `chdir`, so resolving it here is what
+ * keeps the cache key honest — the same aliasing the PATH axis is guarded
+ * against, in the other dimension.
+ */
+function resolveSpawnCwd(cwd: string | undefined): string {
+  return cwd === undefined ? process.cwd() : path.resolve(process.cwd(), cwd);
+}
+
+/**
  * The executable-resolution context a probe answer belongs to: the binary, the
  * PATH the spawn is given, and the working directory it is given — a relative
  * PATH entry (and an empty one, which means the cwd) resolves against that, so
  * the same PATH text can legitimately find or miss the binary from two
  * directories. Keyed on cwd always rather than trying to spot relative entries.
+ *
+ * ABSENT AND EMPTY ARE NOT THE SAME PATH. With no `PATH` at all, `spawn`
+ * searches its own default (`/usr/bin:/bin`, via `execvp`); with `PATH=""` it
+ * searches the working directory and nothing else. A key that rendered both as
+ * `''` would hand one context's answer to the other.
+ *
+ * JSON IS THE ENCODING, for the same reason: it keeps `null` (absent) and `""`
+ * (empty) apart, and every string is quoted and escaped, so no PATH value —
+ * separators, quotes, NULs, brackets — can spell out a different tuple.
  */
 function probeKey(flockPath: string, mergedPath: string | undefined, cwd: string): string {
-  return `${flockPath}\u0000${mergedPath ?? ''}\u0000${cwd}`;
+  return JSON.stringify([flockPath, mergedPath ?? null, cwd]);
 }
 
 /** The operator/embedder override, when it names a mechanism we know. */
@@ -475,7 +494,7 @@ export function detectArmLockMechanism(o: ArmLockOptions = {}, env: Env = {}): A
   // environment the helper will be spawned with, or the answer means nothing.
   const spawnEnv = { ...process.env, ...env };
   const binary = o.flockPath ?? 'flock';
-  const cwd = o.cwd ?? process.cwd();
+  const cwd = resolveSpawnCwd(o.cwd);
   const key = probeKey(binary, spawnEnv.PATH, cwd);
   const cached = probedMechanism.get(key);
   if (cached !== undefined) return { mechanism: cached };
@@ -638,7 +657,7 @@ function publishUnderFlock(
        * set — the same shape `queueCodexAwaitWake` uses for `codex`. */
       env: { ...process.env, ...env } as NodeJS.ProcessEnv,
       // The same directory the probe answered for (see `probeKey`).
-      cwd: o.cwd ?? process.cwd(),
+      cwd: resolveSpawnCwd(o.cwd),
     },
   );
 

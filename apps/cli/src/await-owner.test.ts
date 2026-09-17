@@ -455,6 +455,45 @@ describe('which mechanism this host offers', () => {
     expect(spawn.paths).toHaveLength(2);
   });
 
+  /* ABSENT is not EMPTY: with no PATH, spawn searches its own default; with
+   * `PATH=""` it searches the working directory and nothing else. */
+  it('an empty PATH and a missing PATH are different contexts', () => {
+    const spawn = spawnByPath((p) =>
+      p === '' ? { ...helperArgs, error: errno('ENOENT') } : { ...helperArgs, status: 0 },
+    );
+    // The reviewer's sequence, one process, no reset in between:
+    expect(detectArmLockMechanism({ spawn }, { PATH: '' }).mechanism).toBe('advisory');
+    expect(detectArmLockMechanism({ spawn }, { PATH: undefined }).mechanism).toBe('flock');
+    expect(spawn.paths).toEqual(['', undefined]);
+  });
+
+  it('a relative cwd is resolved, so two spellings of one directory are one context', () => {
+    const spawn = spawnByPath(() => ({ ...helperArgs, status: 0 }));
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-cwd-'));
+    fs.mkdirSync(path.join(parent, 'x'));
+    const here = process.cwd();
+    try {
+      process.chdir(parent);
+      expect(detectArmLockMechanism({ spawn, cwd: './x' }, { PATH: './bin' }).mechanism).toBe('flock');
+      // The SAME directory, spelled absolutely: the answer is reused.
+      expect(
+        detectArmLockMechanism({ spawn, cwd: path.join(parent, 'x') }, { PATH: './bin' }).mechanism,
+      ).toBe('flock');
+      expect(spawn.paths).toHaveLength(1);
+
+      // …and `./x` from somewhere else is a DIFFERENT directory, so it asks again.
+      const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-cwd2-'));
+      fs.mkdirSync(path.join(elsewhere, 'x'));
+      process.chdir(elsewhere);
+      detectArmLockMechanism({ spawn, cwd: './x' }, { PATH: './bin' });
+      expect(spawn.paths).toHaveLength(2);
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    } finally {
+      process.chdir(here);
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('caches the settled answer per context (one spawn for two identical asks)', () => {
     const spawn = spawnByPath(() => ({ ...helperArgs, error: errno('ENOENT') }));
     expect(detectArmLockMechanism({ spawn }, { PATH: MISSING }).mechanism).toBe('advisory');
