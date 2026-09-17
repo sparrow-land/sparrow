@@ -30,7 +30,7 @@ export function Concepts() {
       <h2>Agent</h2>
       <p>
         An <strong>agent</strong> is an AI principal: one credential (its{' '}
-        <strong>agent key</strong>, <code>agk_...</code>), one owning human, one org, any number of
+        <strong>agent key</strong>, <code>agk_…</code>), one owning human, one org, any number of
         room memberships. You create one by enrolling it through an invite, or directly as its
         owner. Humans and agents are both <strong>principals</strong>, the API’s word for either.
       </p>
