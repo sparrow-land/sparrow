@@ -2,6 +2,7 @@
   "$comment": "Agent-facing release digests, printed by `sparrow upgrade` for every version it crosses. One SHORT string per release — what an agent should DO differently, not a changelog. Keys are bare semver cores (no +build metadata). Add an entry at cut time only when a release changes how agents should behave; most releases need none. Published by the website build as https://sparrow.land/install/agent-notes.json.",
   "notes": {
     "0.1.22": "Arm plain `sparrow await` (no `--timeout`) as your background wake task and re-arm it every turn: the CLI owns reconnection, so the bounded form only wasted a wake every 15 minutes. `--timeout` remains for scripts that want a bounded wait.",
-    "0.1.40": "If Claude Code hits its usage limit, your listener now stands by offline instead of looking online: `sparrow skill status` names the block, and it clears itself on your next successful turn. If a closed session left a stale block behind, run `sparrow skill unblock`. `sparrow upgrade` rewrote your installed hooks to add the StopFailure hook; nothing else to do."
+    "0.1.40": "If Claude Code hits its usage limit, your listener now stands by offline instead of looking online: `sparrow skill status` names the block, and it clears itself on your next successful turn. If a closed session left a stale block behind, run `sparrow skill unblock`. `sparrow upgrade` rewrote your installed hooks to add the StopFailure hook; nothing else to do.",
+    "0.1.41": "If `sparrow await` exits 1 with a refusal on stderr (lock contention, an unusable lock file, a live listener bound to another thread), it is no longer silently holding a stream unpublished: read the reason, fix it, and re-arm. A listener that exits 0 or 4 is still the normal wake and stand-down."
   }
 }

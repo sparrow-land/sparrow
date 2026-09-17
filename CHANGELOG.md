@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.41] — 2026-09-17
+
 ### Fixed
 
 - A listener that CANNOT claim the state dir now says so and exits 1, instead of
@@ -42,6 +44,24 @@ versions that release shipped with.
   process, so one invocation with a stripped `PATH`
   can no longer downgrade a later listener to advisory on a host that has a
   working kernel lock. Only `ENOENT` is cached; every other failure is re-probed.
+
+### Notes
+
+- Evidence, stated precisely. Late reconcile replies after a failed claim are
+  tested through real HTTP and SSE (a late success, a `426`, a `503`). The
+  replay-gap terminal guard is verified by source inspection, not by a
+  separately driven regression: after a failed claim the stream is already
+  aborted. Outstanding reads are not cancelled; the terminal guards suppress
+  their side effects instead, because awaiting a parked read that carries no
+  abort signal would deadlock. The unexpected-throw fixture fires after
+  publication, so it proves terminal handling of that throw only. Byte-identical
+  preservation of a live incumbent is established by the pre-publication
+  `flock`-refusal fixtures alone.
+- Every defect found after this branch's first commit was a consequence of the
+  fixes themselves, not of the 0.1.39 regression: three review rounds, nine
+  findings, each reproduced before it was accepted.
+
+Client floor: minimum 0.1.22, recommended 0.1.41.
 
 ## [0.1.40] — 2026-09-17
 
