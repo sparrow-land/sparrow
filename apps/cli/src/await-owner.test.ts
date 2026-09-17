@@ -355,23 +355,75 @@ const payloadOf = (args: string[]): any =>
 
 beforeEach(() => __resetArmLockProbeForTests());
 
+const errno = (code: string): any => Object.assign(new Error(`spawn flock ${code}`), { code });
+
 describe('which mechanism this host offers', () => {
-  it('uses flock when the binary answers at all (busybox exits non-zero)', () => {
-    expect(detectArmLockMechanism({ spawn: fakeSpawn(() => ({ ...helperArgs, status: 1 })) })).toBe(
-      'flock',
-    );
+  it('uses flock when the binary answers at all (busybox exits non-zero for --version)', () => {
+    expect(
+      detectArmLockMechanism({ spawn: fakeSpawn(() => ({ ...helperArgs, status: 1 })) }).mechanism,
+    ).toBe('flock');
   });
 
-  it('falls to advisory ONLY when the binary is absent', () => {
-    const missing = fakeSpawn(() => ({ ...helperArgs, error: new Error('spawn flock ENOENT') }));
-    expect(detectArmLockMechanism({ spawn: missing })).toBe('advisory');
+  /* ENOENT — and ONLY ENOENT — means the binary is not there. Every other
+   * failure means a flock that exists and did not work, which is a fault to
+   * report, never a licence to publish without the kernel lock. */
+  it('falls to advisory only on a genuine ENOENT', () => {
+    const missing = fakeSpawn(() => ({ ...helperArgs, error: errno('ENOENT') }));
+    expect(detectArmLockMechanism({ spawn: missing }).mechanism).toBe('advisory');
   });
 
-  it('probes once per process', () => {
+  it.each(['EACCES', 'ETIMEDOUT', 'EIO', 'EPERM'])(
+    'reports %s as unavailable — never advisory',
+    (code) => {
+      const broken = fakeSpawn(() => ({ ...helperArgs, error: errno(code) }));
+      expect(detectArmLockMechanism({ spawn: broken })).toEqual({ mechanism: 'unavailable', code });
+    },
+  );
+
+  it('reports a thrown error as unavailable, with whatever code it carried', () => {
+    const throws = () => {
+      throw errno('EMFILE');
+    };
+    expect(detectArmLockMechanism({ spawn: throws as any })).toEqual({
+      mechanism: 'unavailable',
+      code: 'EMFILE',
+    });
+    const anonymous = () => {
+      throw new Error('something odd');
+    };
+    expect(detectArmLockMechanism({ spawn: anonymous as any })).toEqual({
+      mechanism: 'unavailable',
+      code: 'UNKNOWN',
+    });
+  });
+
+  it('caches only the ENOENT answer — a broken probe is retried', () => {
+    const broken = fakeSpawn(() => ({ ...helperArgs, error: errno('EACCES') }));
+    expect(detectArmLockMechanism({ spawn: broken }).mechanism).toBe('unavailable');
+    // …and a later probe of a working flock is believed, not the stale fault.
+    const working = fakeSpawn(() => ({ ...helperArgs, status: 0 }));
+    expect(detectArmLockMechanism({ spawn: working }).mechanism).toBe('flock');
+    expect(working.calls).toHaveLength(1);
+  });
+
+  it('probes once per process for the answers it does cache', () => {
     const probe = fakeSpawn(() => ({ ...helperArgs, status: 0 }));
     detectArmLockMechanism({ spawn: probe });
     detectArmLockMechanism({ spawn: probe });
     expect(probe.calls).toHaveLength(1);
+  });
+
+  it('refuses to arm when flock is present but will not run', () => {
+    const broken = fakeSpawn(() => ({ ...helperArgs, error: errno('EACCES') }));
+    const gen = prepareAwaitGeneration({
+      env: { SPARROW_STATE_DIR: stateDir },
+      kind: 'await',
+      lock: { spawn: broken },
+    });
+    expect(() => gen.publish()).toThrow(/flock is present but failed to run \(EACCES\)/);
+    expect(() => gen.publish()).toThrow(/SPARROW_ARM_LOCK=advisory deliberately/);
+    expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
+    expect(gen.published()).toBe(false);
   });
 });
 

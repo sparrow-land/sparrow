@@ -35,8 +35,11 @@ versions that release shipped with.
   guard, the publish-time re-check and newest-wins all behave exactly as in
   0.1.38, but two SIMULTANEOUS publishers are not serialised. Refusing to arm
   there would leave such an agent unable to listen at all. Advisory is chosen
-  only for a genuinely absent binary — never as a fallback from contention, a
-  permission error or a helper crash — and the mechanism is recorded in the
+  only for a genuinely absent binary (`ENOENT` from the probe, and nothing
+  else) — never as a fallback from contention, a helper crash, or a `flock`
+  that is installed but will not run: an `EACCES`, `ETIMEDOUT` or `EIO` probe
+  refuses the arm naming the code, and is not cached, so fixing the binary is
+  enough. The mechanism is recorded in the
   candidate and owner records as `lock: "flock" | "advisory"`. The sequential
   ordering guarantee from 0.1.38 (a later arm supersedes an earlier one, and a
   live different-thread incumbent is never replaced) holds in both modes.

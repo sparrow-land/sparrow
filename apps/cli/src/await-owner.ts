@@ -357,6 +357,14 @@ export const ARM_LOCK_WAIT_MS = 3_000;
 /** Which mechanism made this generation's publication atomic. */
 export type ArmLockMechanism = 'flock' | 'advisory';
 
+/**
+ * What the probe concluded. `unavailable` is NOT a mechanism: it is a `flock`
+ * that exists and could not be run, which refuses rather than publishing.
+ */
+export type ArmLockDecision =
+  | { mechanism: ArmLockMechanism }
+  | { mechanism: 'unavailable'; code: string };
+
 /** The hidden CLI entry that runs the critical section under the kernel lock. */
 export const ARM_HELPER_COMMAND = '__arm-publish';
 
@@ -395,6 +403,10 @@ export const armLockUnavailable = (path: string, detail: string): string =>
   `sparrow await could not arm: the arming lock ${path} could not be taken (${detail}); nothing was ` +
   'published. Fix that path (or its permissions) and run `sparrow await` again.';
 
+export const flockBrokenRefusal = (code: string): string =>
+  `sparrow await could not arm: flock is present but failed to run (${code}); nothing was published. ` +
+  'Fix the flock binary or set SPARROW_ARM_LOCK=advisory deliberately.';
+
 export const ADVISORY_LOCK_NOTE =
   'arming lock unavailable (no flock on PATH): ownership checks are advisory on this host';
 
@@ -409,28 +421,49 @@ function envForcedMechanism(env: Env): ArmLockMechanism | undefined {
 }
 
 /**
- * Is there a `flock` binary? Probed ONCE per process (an arm is not the moment
- * to spawn twice), and only ever answering the question "does the binary
- * exist" — every other failure mode is handled where it happens.
+ * Which mechanism does this host offer?
+ *
+ * ADVISORY IS A CONCLUSION ABOUT ONE THING ONLY: the binary is not installed —
+ * `ENOENT`, and nothing else. Every other way a probe can fail describes a
+ * `flock` that IS there and did not work: `EACCES` (present, not executable),
+ * `ETIMEDOUT`, `EIO`, a descriptor limit, something unrecognised. Publishing
+ * without the kernel lock because the kernel lock is BROKEN is precisely the
+ * silent downgrade this design forbids, so those answer `unavailable` and the
+ * arm refuses, naming the code.
+ *
+ * WHAT IS CACHED: only a settled answer. `ENOENT` (a binary does not appear
+ * mid-session) and a working `flock` are remembered for the process; a fault is
+ * not — it may be a transient EIO or a chmod away from being fixed, and an arm
+ * a minute later deserves a fresh look.
+ *
+ * A NON-ZERO EXIT IS NOT A FAULT: busybox's flock has no `--version` and exits
+ * non-zero. The binary ran, which is the whole question here.
  */
-export function detectArmLockMechanism(o: ArmLockOptions = {}, env: Env = {}): ArmLockMechanism {
-  if (o.mechanism !== undefined) return o.mechanism;
+export function detectArmLockMechanism(o: ArmLockOptions = {}, env: Env = {}): ArmLockDecision {
+  if (o.mechanism !== undefined) return { mechanism: o.mechanism };
   // OPERATOR/TEST OVERRIDE. `SPARROW_ARM_LOCK=advisory` is also what an embedder
   // that has no CLI bundle to re-enter (the test suite driving `runCli`
   // in-process) must set: the helper is a real subprocess of the real binary.
   const forced = envForcedMechanism(env);
-  if (forced !== undefined) return forced;
-  if (probedMechanism !== undefined) return probedMechanism;
+  if (forced !== undefined) return { mechanism: forced };
+  if (probedMechanism !== undefined) return { mechanism: probedMechanism };
   const run = o.spawn ?? spawnSync;
+  let failure: NodeJS.ErrnoException | undefined;
   try {
     const r = run(o.flockPath ?? 'flock', ['--version'], { stdio: 'ignore', timeout: 5_000 });
-    // busybox flock has no --version and exits non-zero; only a MISSING binary
-    // (spawn error) means advisory.
-    probedMechanism = r.error === undefined ? 'flock' : 'advisory';
-  } catch {
-    probedMechanism = 'advisory';
+    if (r.error === undefined) {
+      probedMechanism = 'flock';
+      return { mechanism: 'flock' };
+    }
+    failure = r.error as NodeJS.ErrnoException;
+  } catch (e) {
+    failure = e as NodeJS.ErrnoException;
   }
-  return probedMechanism;
+  if (failure?.code === 'ENOENT') {
+    probedMechanism = 'advisory';
+    return { mechanism: 'advisory' };
+  }
+  return { mechanism: 'unavailable', code: failure?.code ?? 'UNKNOWN' };
 }
 
 /** TEST-ONLY: forget the per-process probe. */
@@ -708,11 +741,13 @@ export function prepareAwaitGeneration(opts: {
   // WHICH MECHANISM, decided once at arm time: it goes into both records, so a
   // reader (a test, `sparrow skill status`, an operator) can see whether this
   // listener's publication was kernel-serialised or merely advisory.
-  const mechanism = detectArmLockMechanism(lockOpts, env);
+  const decision = detectArmLockMechanism(lockOpts, env);
+  const mechanism = decision.mechanism === 'unavailable' ? undefined : decision.mechanism;
   // The note explains an ABSENT binary, so it is not printed when an operator
   // (or an embedder with no CLI bundle to re-enter) asked for advisory mode by
   // name — saying "no flock on PATH" to someone who typed `SPARROW_ARM_LOCK`
-  // would simply be false.
+  // would simply be false. A BROKEN flock says nothing here either: it is not a
+  // mode, and publish() refuses with the code it failed on.
   if (mechanism === 'advisory' && envForcedMechanism(env) === undefined) {
     err?.(`[await] ${ADVISORY_LOCK_NOTE}\n`);
   }
@@ -740,6 +775,9 @@ export function prepareAwaitGeneration(opts: {
        * is a real failure and refuses — it must never quietly degrade into an
        * unfenced publish that evicts nobody but believes it is listening. */
       if (!stateDirWritable(env)) return goLive('unfenced');
+      // A flock that is installed and will not run is a FAULT, not a mode: the
+      // kernel lock is unavailable, so nothing is published.
+      if (decision.mechanism === 'unavailable') throw new CliError(flockBrokenRefusal(decision.code));
       if (mechanism === 'flock') {
         const outcome = publishUnderFlock(
           env,
