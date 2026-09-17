@@ -3,15 +3,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  ARM_LOCK_STALE_MS,
+  __resetArmLockProbeForTests,
   assertMayArm,
+  detectArmLockMechanism,
+  encodeArmHelperPayload,
+  runArmPublishHelper,
   awaitArmLockPath,
   awaitCandidatePath,
   awaitOwnerPath,
   prepareAwaitGeneration,
   readAwaitOwner,
 } from './await-owner.js';
-import { __setAwaitPublishHookForTests } from './await-owner.js';
 import { CliError } from './util.js';
 
 /* ==================================================================
@@ -25,7 +27,13 @@ import { CliError } from './util.js';
  * ================================================================== */
 
 let stateDir: string;
-const env = (): Record<string, string | undefined> => ({ SPARROW_STATE_DIR: stateDir });
+/* The in-process default is ADVISORY: the flock helper is a subprocess of the
+ * real CLI bundle, which a vitest worker is not. The flock-mode tests below opt
+ * in explicitly (and drive `spawnSync` through an injected stand-in). */
+const env = (): Record<string, string | undefined> => ({
+  SPARROW_STATE_DIR: stateDir,
+  SPARROW_ARM_LOCK: 'advisory',
+});
 
 beforeEach(() => {
   stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-await-owner-'));
@@ -318,189 +326,279 @@ describe('publish() re-checks ownership at the last possible moment', () => {
 });
 
 /* ==================================================================
- * THE ARMING LOCK — `<state dir>/await-arming.lock`.
+ * PUBLISHING ATOMICALLY — the arming lock
  *
- * `assertMayArm` and the rename are two operations, so two different-thread
- * candidates could both pass the guard and both publish, the last rename
- * winning and a live incumbent vanishing (reproduced with two real processes,
- * vm5, 2026-09-17). The lock serialises the RE-CHECK + rename + candidate
- * cleanup — milliseconds, always after the network round trip publish-late
- * already forces.
- *
- * HOLDER LIVENESS DECIDES, NEVER AGE ALONE. A dead holder's lock is reclaimed;
- * a live holder's lock is waited on and then REFUSED (exit 1), never stolen: a
- * SIGSTOPed or descheduled holder can resume and rename straight over the
- * thief, which is the race this exists to close.
+ * Two modes, and nothing in between: where a `flock` binary exists the kernel
+ * holds the lock across the critical section (which runs in the helper process
+ * that holds it, so a death releases it and there is nothing to reclaim), and
+ * where it does not, ownership checks are advisory and say so. Every failure
+ * that is NOT "the binary is absent" refuses and publishes nothing.
  * ================================================================== */
 
 const lockPath = (): string => awaitArmLockPath(env());
-const lockBody = (pid: number): string =>
-  `${JSON.stringify({ pid, startedAt: new Date().toISOString(), nonce: 'someoneelses1234' })}\n`;
-const ageFile = (file: string, ms: number): void => {
-  const when = new Date(Date.now() - ms);
-  fs.utimesSync(file, when, when);
-};
+const candidateRecord = (): any => JSON.parse(fs.readFileSync(awaitCandidatePath(env()), 'utf8'));
 
-describe('the arming lock', () => {
-  it('is taken and released around the publish, leaving nothing behind', () => {
-    const gen = prepareAwaitGeneration({ env: env(), kind: 'await' });
-    expect(fs.existsSync(lockPath())).toBe(false);
-    expect(gen.publish()).toBe('published');
-    expect(fs.existsSync(lockPath())).toBe(false);
+/** A `spawnSync` stand-in: records calls, answers with a canned result. */
+function fakeSpawn(reply: (args: string[]) => any): any & { calls: string[][] } {
+  const calls: string[][] = [];
+  const fn = (_cmd: string, args: string[]) => {
+    calls.push(args);
+    return reply(args);
+  };
+  (fn as any).calls = calls;
+  return fn as any;
+}
+const helperArgs = { status: 0, stdout: '', stderr: '', error: undefined };
+/** What the parent hands the helper, decoded — the payload is the last arg. */
+const payloadOf = (args: string[]): any =>
+  JSON.parse(Buffer.from(args[args.length - 1]!, 'base64url').toString('utf8'));
+
+beforeEach(() => __resetArmLockProbeForTests());
+
+describe('which mechanism this host offers', () => {
+  it('uses flock when the binary answers at all (busybox exits non-zero)', () => {
+    expect(detectArmLockMechanism({ spawn: fakeSpawn(() => ({ ...helperArgs, status: 1 })) })).toBe(
+      'flock',
+    );
   });
 
-  it('holds it across the record write (the publish seam runs inside)', () => {
-    const seen: boolean[] = [];
-    __setAwaitPublishHookForTests(() => seen.push(fs.existsSync(lockPath())));
-    try {
-      prepareAwaitGeneration({ env: env(), kind: 'await' }).publish();
-    } finally {
-      __setAwaitPublishHookForTests(undefined);
-    }
-    expect(seen).toEqual([true]);
-    expect(fs.existsSync(lockPath())).toBe(false); // …and released on the way out
+  it('falls to advisory ONLY when the binary is absent', () => {
+    const missing = fakeSpawn(() => ({ ...helperArgs, error: new Error('spawn flock ENOENT') }));
+    expect(detectArmLockMechanism({ spawn: missing })).toBe('advisory');
   });
 
-  it('reclaims a lock whose holder is demonstrably gone (ESRCH), however fresh', () => {
-    fs.writeFileSync(lockPath(), lockBody(4242));
-    const gen = prepareAwaitGeneration({ env: env(), kind: 'await', lock: { kill: esrch } });
+  it('probes once per process', () => {
+    const probe = fakeSpawn(() => ({ ...helperArgs, status: 0 }));
+    detectArmLockMechanism({ spawn: probe });
+    detectArmLockMechanism({ spawn: probe });
+    expect(probe.calls).toHaveLength(1);
+  });
+});
+
+describe('advisory mode (no flock on this host)', () => {
+  // No SPARROW_ARM_LOCK here: this describes a host where `flock` is genuinely
+  // absent, which is the only case that earns the stderr note.
+  const advisory = (extra: Record<string, unknown> = {}): any => ({
+    env: { SPARROW_STATE_DIR: stateDir },
+    kind: 'await',
+    lock: { mechanism: 'advisory' as const },
+    ...extra,
+  });
+
+  it('publishes exactly as 0.1.38 did, and says once that it is advisory', () => {
+    const err: string[] = [];
+    const gen = prepareAwaitGeneration(advisory({ err: (s: string) => err.push(s) }));
+
+    expect(err).toHaveLength(1);
+    expect(err[0]).toContain('arming lock unavailable (no flock on PATH)');
+    expect(err[0]).toContain('advisory');
+    expect(err[0]!.trimEnd().split('\n')).toHaveLength(1);
     expect(gen.publish()).toBe('published');
     expect(readAwaitOwner(env())!.nonce).toBe(gen.nonce());
-    expect(fs.existsSync(lockPath())).toBe(false);
   });
 
-  /* THE UNKNOWN POLICY: a lock we cannot read a pid out of proves nothing about
-   * its holder, so age is all that is left — and only real age (5 s) counts. */
-  it('reclaims a MALFORMED lock only once it is older than the stale window', () => {
-    fs.writeFileSync(lockPath(), 'not json at all\n');
-    ageFile(lockPath(), ARM_LOCK_STALE_MS + 1000);
-    const gen = prepareAwaitGeneration({ env: env(), kind: 'await' });
-    expect(gen.publish()).toBe('published');
+  it('records the mechanism in both the candidate and the owner record', () => {
+    const gen = prepareAwaitGeneration(advisory());
+    expect(candidateRecord().lock).toBe('advisory');
+    gen.publish();
+    expect(readAwaitOwner(env())!.lock).toBe('advisory');
   });
 
-  it('waits on a FRESH malformed lock, then refuses rather than stealing it', () => {
-    fs.writeFileSync(lockPath(), 'not json at all\n');
-    const gen = prepareAwaitGeneration({
-      env: env(),
-      kind: 'await',
-      lock: { waitMs: 10, pollMs: 1, sleep: () => {} },
-    });
-    expect(() => gen.publish()).toThrow(CliError);
-    expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
-  });
-
-  it('refuses after the wait window when the holder is alive, naming its pid', () => {
-    fs.writeFileSync(lockPath(), lockBody(4242));
-    const gen = prepareAwaitGeneration({
-      env: env(),
-      kind: 'await:codex',
-      thread: 'thread-mine',
-      lock: { waitMs: 10, pollMs: 1, sleep: () => {}, kill: alive },
-    });
-
-    let thrown: unknown;
-    try {
-      gen.publish();
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(CliError);
-    const message = (thrown as Error).message;
-    expect(message.split('\n')).toHaveLength(1);
-    expect(message).toContain('another listener (pid 4242) is publishing in this state dir');
-    expect(message).toContain('run `sparrow await` again');
-    // NOTHING was touched: not ownership, not the foreign lock.
-    expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
-    expect(gen.published()).toBe(false);
-    expect(fs.readFileSync(lockPath(), 'utf8')).toContain('4242');
-  });
-
-  it('EPERM is a live holder too — refused, not reclaimed', () => {
-    fs.writeFileSync(lockPath(), lockBody(4242));
-    const gen = prepareAwaitGeneration({
-      env: env(),
-      kind: 'await',
-      lock: { waitMs: 10, pollMs: 1, sleep: () => {}, kill: eperm },
-    });
-    expect(() => gen.publish()).toThrow(CliError);
-  });
-
-  it('publishes as soon as a live holder lets go mid-wait', () => {
-    fs.writeFileSync(lockPath(), lockBody(4242));
-    let polls = 0;
-    const gen = prepareAwaitGeneration({
-      env: env(),
-      kind: 'await',
-      lock: {
-        waitMs: 5000,
-        pollMs: 1,
-        kill: alive,
-        sleep: () => {
-          if (++polls === 3) fs.rmSync(lockPath(), { force: true });
-        },
-      },
-    });
-    expect(gen.publish()).toBe('published');
-    expect(polls).toBe(3);
-  });
-
-  /* RECLAIM IS NOT A LICENCE TO UNLINK. Between judging a lock stale and
-   * removing it, its holder may have finished and a NEW holder taken the file. */
-  it('never unlinks a lock that was replaced between the read and the unlink', () => {
-    fs.writeFileSync(lockPath(), lockBody(4242)); // judged dead below…
-    const replacement = `${JSON.stringify({ pid: 5151, startedAt: 'later', nonce: 'newholder000000' })}\n`;
-    const gen = prepareAwaitGeneration({
-      env: env(),
-      kind: 'await',
-      lock: {
-        waitMs: 10,
-        pollMs: 1,
-        sleep: () => {},
-        // 4242 is gone; the holder that replaces it very much is not.
-        kill: (pid: number) => {
-          if (pid === 4242) esrch();
-        },
-        // …and a live holder takes the file in the instant before the unlink.
-        onReclaim: () => fs.writeFileSync(lockPath(), replacement),
-      },
-    });
-
-    expect(() => gen.publish()).toThrow(CliError); // contended, so refused
-    expect(fs.readFileSync(lockPath(), 'utf8')).toBe(replacement); // untouched
-    expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
-  });
-
-  it('releases only OUR lock — a foreign one written meanwhile is left alone', () => {
-    const foreign = `${JSON.stringify({ pid: 5151, startedAt: 'later', nonce: 'newholder000000' })}\n`;
-    __setAwaitPublishHookForTests(() => fs.writeFileSync(lockPath(), foreign));
-    try {
-      expect(prepareAwaitGeneration({ env: env(), kind: 'await' }).publish()).toBe('published');
-    } finally {
-      __setAwaitPublishHookForTests(undefined);
-    }
-    expect(fs.readFileSync(lockPath(), 'utf8')).toBe(foreign);
-  });
-
-  it('propagates a refusal raised INSIDE the lock, and still releases it', () => {
-    const gen = prepareAwaitGeneration({
-      env: env(),
-      kind: 'await:codex',
-      thread: 'thread-mine',
-      kill: alive,
-    });
+  it('still refuses a live different-thread incumbent (the guard is unchanged)', () => {
     ownerRecord('thread-theirs', 4242);
-
+    const gen = prepareAwaitGeneration(
+      advisory({ kind: 'await:codex', thread: 'thread-mine', kill: alive }),
+    );
     expect(() => gen.publish()).toThrow(CliError);
-    expect(fs.existsSync(lockPath())).toBe(false); // released in `finally`
-    expect(gen.published()).toBe(false); // never an unfenced publish
     expect(readAwaitOwner(env())!.thread).toBe('thread-theirs');
   });
 
-  it('stays unfenced (and silent) when the state dir cannot be written at all', () => {
+  it('stays unfenced when the state dir cannot be written at all', () => {
     const blocker = path.join(stateDir, 'not-a-dir');
     fs.writeFileSync(blocker, 'x');
-    const broken = { SPARROW_STATE_DIR: path.join(blocker, 'nested') };
-    const gen = prepareAwaitGeneration({ env: broken, kind: 'await' });
+    const gen = prepareAwaitGeneration({
+      env: { SPARROW_STATE_DIR: path.join(blocker, 'nested') },
+      kind: 'await',
+      lock: { mechanism: 'advisory' },
+    });
     expect(gen.publish()).toBe('unfenced');
+  });
+});
+
+describe('flock mode — the parent reads exactly one line from the helper', () => {
+  const underFlock = (spawn: any, extra: Record<string, unknown> = {}): any =>
+    prepareAwaitGeneration({
+      env: env(),
+      kind: 'await:codex',
+      thread: 'thread-mine',
+      lock: { mechanism: 'flock', spawn, bundle: '/fake/sparrow.mjs', waitMs: 3000 },
+      ...extra,
+    });
+
+  it('runs the helper under flock, passing the whole decision in the payload', () => {
+    const spawn = fakeSpawn(() => ({ ...helperArgs, stdout: '{"result":"published"}\n' }));
+    expect(underFlock(spawn).publish()).toBe('published');
+
+    const args = spawn.calls[0]!;
+    expect(args.slice(0, 2)).toEqual(['-w', '3']);
+    expect(args[2]).toBe(lockPath());
+    expect(args[3]).toBe(process.execPath);
+    expect(args[4]).toBe('/fake/sparrow.mjs');
+    expect(args[5]).toBe('__arm-publish');
+    const payload = payloadOf(args);
+    expect(payload).toMatchObject({ kind: 'await:codex', thread: 'thread-mine', listenerPid: process.pid });
+    expect(payload.stateDir).toBe(stateDir);
+  });
+
+  it('turns the helper’s refusal into exit 1, verbatim, having published nothing', () => {
+    const spawn = fakeSpawn(() => ({
+      ...helperArgs,
+      stdout: `${JSON.stringify({ result: 'refused', message: 'a listener for Codex thread X (pid 9) …' })}\n`,
+    }));
+    const gen = underFlock(spawn);
+    expect(() => gen.publish()).toThrow('a listener for Codex thread X (pid 9) …');
+    expect(gen.published()).toBe(false);
+  });
+
+  it('refuses when the helper aborted — we are alive, so that is not a silent pass', () => {
+    const spawn = fakeSpawn(() => ({
+      ...helperArgs,
+      stdout: '{"result":"aborted","reason":"listener gone"}\n',
+    }));
+    expect(() => underFlock(spawn).publish()).toThrow(/helper aborted: listener gone/);
+  });
+
+  it('reads a bare flock timeout (exit 1, nothing said) as contention', () => {
+    const spawn = fakeSpawn(() => ({ ...helperArgs, status: 1 }));
+    expect(() => underFlock(spawn).publish()).toThrow(/is held by another publisher/);
+  });
+
+  it('refuses — never downgrades to advisory — when the lock file cannot be opened', () => {
+    const spawn = fakeSpawn(() => ({
+      ...helperArgs,
+      status: 66,
+      stderr: `flock: cannot open lock file ${lockPath()}: Permission denied\n`,
+    }));
+    const gen = underFlock(spawn);
+    expect(() => gen.publish()).toThrow(/could not be taken \(flock: cannot open lock file/);
+    expect(gen.published()).toBe(false);
+    expect(candidateRecord().lock).toBe('flock'); // still flock: the binary is there
+  });
+
+  /* A helper that renamed and then died says nothing — but the record is on
+   * disk, and the record is the authority. Never a blind retry. */
+  it('believes the RECORD when the helper dies after committing the rename', () => {
+    const spawn = fakeSpawn((args) => {
+      const p = payloadOf(args);
+      fs.writeFileSync(
+        awaitOwnerPath(env()),
+        `${JSON.stringify({ version: 1, nonce: p.nonce, pid: p.listenerPid, startedAt: new Date().toISOString(), kind: p.kind, thread: p.thread, lock: 'flock' })}\n`,
+      );
+      return { ...helperArgs, status: null, stdout: '' }; // killed before reporting
+    });
+    const gen = underFlock(spawn);
+    expect(gen.publish()).toBe('published');
+    expect(readAwaitOwner(env())!.nonce).toBe(gen.nonce());
+  });
+
+  it('refuses when the helper dies WITHOUT committing (no record, no line)', () => {
+    const spawn = fakeSpawn(() => ({ ...helperArgs, status: null, stdout: '' }));
+    const gen = underFlock(spawn);
+    expect(() => gen.publish()).toThrow(/could not be taken/);
+    expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
+    expect(gen.published()).toBe(false);
+  });
+
+  it('never spawns anything when the state dir cannot hold a record', () => {
+    const blocker = path.join(stateDir, 'not-a-dir');
+    fs.writeFileSync(blocker, 'x');
+    const spawn = fakeSpawn(() => ({ ...helperArgs, stdout: '{"result":"published"}\n' }));
+    const gen = prepareAwaitGeneration({
+      env: { SPARROW_STATE_DIR: path.join(blocker, 'nested') },
+      kind: 'await',
+      lock: { mechanism: 'flock', spawn, bundle: '/fake/sparrow.mjs' },
+    });
+    expect(gen.publish()).toBe('unfenced');
+    expect(spawn.calls).toEqual([]);
+  });
+});
+
+/* With the REAL binary: a lock file we cannot open is a hard failure, never a
+ * reason to fall back to advisory. (Skipped as root, who can open anything.) */
+describe.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)(
+  'flock mode against the real binary',
+  () => {
+    it('refuses when the lock file cannot be opened, and stays in flock mode', () => {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(awaitArmLockPath(env()), '');
+      fs.chmodSync(awaitArmLockPath(env()), 0o000);
+
+      const gen = prepareAwaitGeneration({
+        env: env(),
+        kind: 'await',
+        // A bundle that never runs: flock fails before it can exec anything.
+        lock: { mechanism: 'flock', bundle: '/nonexistent/sparrow.mjs' },
+      });
+      expect(() => gen.publish()).toThrow(/could not be taken/);
+      expect(gen.published()).toBe(false);
+      expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
+      expect(candidateRecord().lock).toBe('flock'); // never downgraded
+    });
+  },
+);
+
+describe('the helper itself (it IS the critical section)', () => {
+  const payload = (over: Record<string, unknown> = {}): string =>
+    encodeArmHelperPayload({
+      stateDir,
+      nonce: 'f00dcafef00dcafe',
+      listenerPid: process.pid,
+      kind: 'await:codex',
+      thread: 'thread-mine',
+      ...over,
+    } as any);
+
+  it('renames the record, stamps the mechanism, and retires the candidate', () => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      awaitCandidatePath(env()),
+      `${JSON.stringify({ version: 1, nonce: 'f00dcafef00dcafe', pid: process.pid, startedAt: new Date().toISOString() })}\n`,
+    );
+
+    const said = JSON.parse(runArmPublishHelper(payload()));
+    expect(said).toEqual({ result: 'published', nonce: 'f00dcafef00dcafe' });
+    const owner = readAwaitOwner(env())!;
+    expect(owner.nonce).toBe('f00dcafef00dcafe');
+    expect(owner.pid).toBe(process.pid); // the LISTENER's pid, never the helper's
+    expect(owner.lock).toBe('flock');
+    expect(fs.existsSync(awaitCandidatePath(env()))).toBe(false);
+  });
+
+  it('reports the ownership refusal instead of renaming', () => {
+    ownerRecord('thread-theirs', process.pid); // live, different thread
+    const said = JSON.parse(runArmPublishHelper(payload()));
+    expect(said.result).toBe('refused');
+    expect(said.message).toContain('Codex thread thread-theirs');
+    expect(readAwaitOwner(env())!.thread).toBe('thread-theirs');
+  });
+
+  /* A record naming a dead owner is worse than no record: every hook reads it
+   * as a live listener. The helper may have waited seconds for the lock. */
+  it('ABORTS rather than publish a record naming a listener that has gone', () => {
+    const said = JSON.parse(runArmPublishHelper(payload({ listenerPid: 4194305 })));
+    expect(said).toEqual({ result: 'aborted', reason: 'listener gone' });
+    expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
+  });
+
+  it('honours the operator take-over escape it was handed', () => {
+    ownerRecord('thread-theirs', process.pid);
+    const said = JSON.parse(runArmPublishHelper(payload({ takeOver: true })));
+    expect(said.result).toBe('published');
+    expect(readAwaitOwner(env())!.thread).toBe('thread-mine');
+  });
+
+  it('never throws, whatever it is handed', () => {
+    const said = JSON.parse(runArmPublishHelper('not-base64-json'));
+    expect(said.result).toBe('error');
   });
 });

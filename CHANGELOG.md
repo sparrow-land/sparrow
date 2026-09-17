@@ -16,20 +16,30 @@ versions that release shipped with.
 
 ### Fixed
 
-- Publishing a listener generation is now atomic across processes. 0.1.38
-  named a residual: its two ownership checks were advisory, so two candidates
-  bound to different Codex threads that both cleared the check inside one
-  publish window could both publish and lose a live incumbent. An exclusive
-  arming lock (`<state dir>/await-arming.lock`, created O_EXCL) now serialises
-  the re-check, the atomic record rename and the candidate cleanup — local
-  filesystem work, milliseconds, never the network round trip. A demonstrably
-  dead lock holder is reclaimed; a demonstrably alive one is waited on for up
-  to 3 s and then refused (exit 1, pid named) rather than stolen, because a
-  stopped holder could resume and rename over a thief; a malformed lock is
-  reclaimed only past 5 s of age; reclaim and release touch only bytes they
-  read or wrote. A two-process regression holds one publisher inside the
-  critical section, observes the second contending, and asserts a single
-  cross-thread winner.
+- Publishing a listener generation is now atomic across processes where a
+  `flock` binary exists. 0.1.38 named a residual: its two ownership checks were
+  advisory, so two candidates bound to different Codex threads that both
+  cleared the check inside one publish window could both publish and lose a
+  live incumbent. The re-check, the atomic record rename and the candidate
+  cleanup now run as ONE critical section inside a hidden helper process that
+  `flock` runs while holding `<state dir>/await-arming.lock` — the kernel
+  releases that lock however the holder ends (exit, SIGKILL, container stop),
+  so there is no stale lock, nothing to reclaim and no pid to reason about. The
+  helper also refuses to publish a record naming a listener that died while it
+  waited. Contention past 3 s, a lock file that cannot be opened, an unexpected
+  `flock` status or a helper that dies without committing all refuse (exit 1)
+  and publish nothing; a helper that committed the rename before dying is
+  detected from the record itself.
+- Where no `flock` binary exists (macOS, minimal images without util-linux or
+  busybox), arming stays ADVISORY and says so once on stderr: the preflight
+  guard, the publish-time re-check and newest-wins all behave exactly as in
+  0.1.38, but two SIMULTANEOUS publishers are not serialised. Refusing to arm
+  there would leave such an agent unable to listen at all. Advisory is chosen
+  only for a genuinely absent binary — never as a fallback from contention, a
+  permission error or a helper crash — and the mechanism is recorded in the
+  candidate and owner records as `lock: "flock" | "advisory"`. The sequential
+  ordering guarantee from 0.1.38 (a later arm supersedes an earlier one, and a
+  live different-thread incumbent is never replaced) holds in both modes.
 
 ## [0.1.38] — 2026-09-17
 

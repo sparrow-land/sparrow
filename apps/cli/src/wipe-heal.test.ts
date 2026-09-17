@@ -278,6 +278,11 @@ describe('sparrow CLI — persisted cursor self-heals across a journal wipe', ()
     HOME: os.homedir(),
     SPARROW_STATE_DIR: stateDir,
     XDG_CONFIG_HOME: configDir,
+    // `await` publishes its generation through a subprocess of the real CLI
+    // bundle under `flock`; a vitest worker driving `runCli` in-process is not
+    // that bundle. Advisory mode runs the same checks in-process (the kernel
+    // path has its own tests) — cursor healing is what this file is about.
+    SPARROW_ARM_LOCK: 'advisory',
     ...extra,
   });
 

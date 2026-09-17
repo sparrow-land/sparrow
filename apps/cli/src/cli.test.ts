@@ -103,6 +103,11 @@ beforeEach(async () => {
     // the answer; the preflight itself is driven deliberately — with an injected
     // probe — in its own tests (await-preflight.test.ts, and the block below).
     SPARROW_AWAIT_SANDBOX_CHECK: '0',
+    // Arming's critical section normally runs in a SUBPROCESS of the real CLI
+    // bundle, under `flock`; a vitest worker driving `runCli` in-process is not
+    // that bundle. Advisory mode runs the identical checks in-process, which is
+    // what these tests exercise — the kernel-lock path has its own file.
+    SPARROW_ARM_LOCK: 'advisory',
   };
 });
 

@@ -55,6 +55,7 @@
  * answers "which kind of listener wrote this?" without validating the
  * generation; the validating readers are `readHeartbeatState` and the hooks.)
  */
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -83,6 +84,13 @@ export interface AwaitOwnerRecord {
    * 0.1.38 — which all read as "no thread", i.e. freely superseded.
    */
   thread?: string;
+  /**
+   * How this record's publication was made atomic: `flock` (the kernel held the
+   * arming lock across the re-check and the rename) or `advisory` (no `flock`
+   * binary on the host — the checks ran, unserialised). Absent in records
+   * written before 0.1.39.
+   */
+  lock?: ArmLockMechanism;
 }
 
 /** `process.kill(pid, 0)`, injectable so the three answers are testable. */
@@ -146,8 +154,7 @@ export const differentThreadRefusal = (thread: string, pid: number): string =>
  */
 export function assertMayArm(env: Env, thread: string | undefined, kill?: PidSignal): void {
   if (!thread) return;
-  const v = env.SPARROW_AWAIT_TAKE_OVER?.trim().toLowerCase();
-  if (v !== undefined && v !== '' && v !== '0' && v !== 'false' && v !== 'no' && v !== 'off') return;
+  if (takingOver(env)) return;
   const owner = readAwaitOwner(env);
   if (owner?.thread === undefined || owner.thread === thread) return;
   if (!pidDemonstrablyAlive(owner.pid, kill)) return;
@@ -169,27 +176,6 @@ export function __setAwaitPublishHookForTests(fn: (() => void) | undefined): voi
 function runPublishHook(): void {
   try {
     afterPublishHook?.();
-  } catch {
-    /* a test seam must never break the listener */
-  }
-}
-
-/**
- * TEST-ONLY seam: run immediately after the arming lock is acquired and BEFORE
- * the ownership re-check, i.e. at the very top of the critical section.
- *
- * Its one job is the two-process regression (`await-owner-race.test.ts`): a
- * holder that pauses HERE is holding the lock with nothing yet renamed, which is
- * the only state in which a second process can be observed contending rather
- * than being refused by the pre-check. Nothing in production ever sets it.
- */
-let insideLockHook: (() => void) | undefined;
-export function __setAwaitLockedHookForTests(fn: (() => void) | undefined): void {
-  insideLockHook = fn;
-}
-function runInsideLockHook(): void {
-  try {
-    insideLockHook?.();
   } catch {
     /* a test seam must never break the listener */
   }
@@ -227,6 +213,8 @@ export interface AwaitCandidateRecord {
   nonce: string;
   pid: number;
   startedAt: string;
+  /** Which arming mechanism this host offers — see {@link ArmLockMechanism}. */
+  lock?: ArmLockMechanism;
 }
 
 /** How long a candidate marker may be believed. Readers enforce this. */
@@ -272,12 +260,13 @@ function clearAwaitCandidate(env: Env, nonce: string): void {
 }
 
 /** Best-effort, atomic, never throws: an unwritable state dir just skips it. */
-function writeAwaitCandidate(env: Env, nonce: string): void {
+function writeAwaitCandidate(env: Env, nonce: string, lock?: ArmLockMechanism): void {
   const record: AwaitCandidateRecord = {
     version: 1,
     nonce,
     pid: process.pid,
     startedAt: new Date().toISOString(),
+    ...(lock ? { lock } : {}),
   };
   let tmp: string | undefined;
   try {
@@ -316,6 +305,7 @@ export function readAwaitOwner(env: Env): AwaitOwnerRecord | undefined {
       kind: typeof raw.kind === 'string' ? raw.kind : 'await',
       ...(typeof raw.profile === 'string' ? { profile: raw.profile } : {}),
       ...(typeof raw.thread === 'string' && raw.thread ? { thread: raw.thread } : {}),
+      ...(raw.lock === 'flock' || raw.lock === 'advisory' ? { lock: raw.lock } : {}),
     };
   } catch {
     return undefined;
@@ -323,180 +313,297 @@ export function readAwaitOwner(env: Env): AwaitOwnerRecord | undefined {
 }
 
 /* ==================================================================
- * THE ARMING LOCK — `<state dir>/await-arming.lock`
+ * PUBLISHING ATOMICALLY — the arming lock
  *
- * WHY. {@link assertMayArm} and the rename are two operations, and between them
- * another process can publish: two different-thread candidates both passed the
- * guard, both renamed, and the live incumbent the guard exists to protect was
- * simply lost (reproduced with two real node processes, vm5, 2026-09-17). The
- * lock makes the RE-CHECK + rename + candidate cleanup one critical section.
+ * WHY. {@link assertMayArm} and the record rename are two operations, and
+ * between them another process can publish: two different-thread candidates
+ * both passed the guard, both renamed, and the live incumbent the guard exists
+ * to protect was lost (reproduced with two real node processes, vm5,
+ * 2026-09-17). The re-check and the rename have to be ONE critical section.
  *
- * WHAT IS INSIDE IT: only those. Never the network round trip — publish-late
- * already puts the whole round trip before publish() is even called — so the
- * section is milliseconds of local filesystem work.
+ * WHY NOT A LOCK FILE WE MANAGE OURSELVES. Every home-made protocol needs an
+ * answer to "the holder died holding it", and every answer is a guess: a pid
+ * can be recycled, `kill(pid, 0)` cannot tell the holder from whoever inherited
+ * its number, and any age-based reclaim steals from a holder that was merely
+ * paused — a 60-second stop resumes exactly like a 5-second one. Each rule we
+ * tried traded one wedge for another.
  *
- * WHO MAY TAKE IT FROM WHOM. Holder LIVENESS decides, never age alone:
+ * SO THE KERNEL HOLDS IT. `flock(2)` is released when the holding process ends,
+ * however it ends — exit, SIGKILL, container stop, power loss — so there is
+ * nothing to reclaim and no staleness to reason about. We reach it through
+ * `flock(1)` (util-linux 2.38.1 here and in the shipping Debian 12 image;
+ * busybox's flock has the same `-w` semantics — both are PROBED, never assumed).
  *
- *   - the holder's pid is demonstrably gone (ESRCH)  → reclaim it, however fresh
- *   - the holder is demonstrably alive (kill 0 / EPERM) → wait, then REFUSE
- *   - the lock is malformed or names no pid → nothing is proven about anyone, so
- *     age is all that is left: reclaim only once it is older than
- *     {@link ARM_LOCK_STALE_MS}, and otherwise wait exactly as for a live holder.
+ * AND THE LOCK HOLDER RUNS THE SECTION. `flock <file> <command>` holds the lock
+ * for exactly as long as `<command>` runs, so the command must BE the critical
+ * section: a helper that merely announces "acquired" and waits for its parent
+ * would release the moment it died, while the parent went on renaming. The
+ * helper is therefore a hidden CLI entry ({@link ARM_HELPER_COMMAND}) that does
+ * the re-check, the rename and the candidate cleanup itself and prints one JSON
+ * line back. The parent only interprets that line.
  *
- * REFUSING, NOT STEALING, is the point. An unfenced "proceed anyway" would be
- * worse than the race it papers over: a SIGSTOPed or descheduled holder resumes
- * and renames straight over the thief, restoring the very lost-incumbent bug.
- * Exit 1 with one line and a re-arm is honest and costs one command.
- *
- * RECLAIMING IS NEVER A LICENCE TO UNLINK. Between judging a lock stale and
- * removing it, the dead holder's file may have been replaced by a live one — so
- * the content is re-read immediately before the unlink and must be BYTE
- * IDENTICAL to what was judged; anything else means a new holder, i.e. wait.
- * Release is the same rule from the other side: unlink only a lock whose content
- * is ours, pid + startedAt + nonce.
+ * WHERE THERE IS NO `flock` (macOS, minimal images without util-linux or
+ * busybox), the mode is ADVISORY: exactly the 0.1.38 behaviour — the preflight
+ * guard plus the publish-time re-check, newest-wins — and one stderr line
+ * saying so. Refusing to arm there is not an option: a macOS Codex agent would
+ * never be able to listen at all. Advisory is chosen ONLY for a genuinely
+ * absent binary, NEVER as a fallback from contention, a permission error, a
+ * helper crash or an unexpected exit code — those refuse and publish nothing.
  * ================================================================== */
 
-/** A lock older than this whose holder cannot be identified is abandoned. */
-export const ARM_LOCK_STALE_MS = 5_000;
-/** How long to wait on a lock that is held by someone demonstrably there. */
+/** How long to wait for the arming lock before refusing. */
 export const ARM_LOCK_WAIT_MS = 3_000;
-/** How often to retry while waiting. */
-export const ARM_LOCK_POLL_MS = 50;
 
-/** `<state dir>/await-arming.lock`. */
+/** Which mechanism made this generation's publication atomic. */
+export type ArmLockMechanism = 'flock' | 'advisory';
+
+/** The hidden CLI entry that runs the critical section under the kernel lock. */
+export const ARM_HELPER_COMMAND = '__arm-publish';
+
+/**
+ * `<state dir>/await-arming.lock` — a STABLE INODE, never unlinked and never
+ * read: `flock` locks the file, it does not own its contents. Removing it would
+ * hand two processes two different inodes to lock, which is the one thing that
+ * breaks this.
+ */
 export function awaitArmLockPath(env: Env): string {
   return path.join(resolveStateDir(env), 'await-arming.lock');
 }
 
-/** Knobs for the lock. Production passes none; tests drive it deterministically. */
-export interface ArmLockTuning {
-  staleMs?: number;
+/** Everything injectable about arming. Production passes none of it. */
+export interface ArmLockOptions {
+  /** Force a mechanism instead of probing for `flock`. */
+  mechanism?: ArmLockMechanism;
   waitMs?: number;
-  pollMs?: number;
-  /** Blocking sleep between polls (the critical section is synchronous). */
-  sleep?(ms: number): void;
-  kill?: PidSignal;
-  /** TEST-ONLY: runs after a lock is judged reclaimable, before the unlink. */
-  onReclaim?(): void;
+  /** The `flock` binary (tests point this at a directory without one). */
+  flockPath?: string;
+  /** The CLI entry the helper is run from; `process.argv[1]` by default. */
+  bundle?: string;
+  /** Injected `spawnSync` for both the probe and the helper. */
+  spawn?: typeof spawnSync;
 }
 
-export const armLockRefusal = (pid: number | undefined, waitMs: number): string => {
+export const armLockContention = (path: string, waitMs: number): string => {
   const secs = Number((waitMs / 1000).toFixed(1)).toString();
   return (
-    `sparrow await could not arm: another listener (pid ${pid ?? 'unknown'}) is publishing in this ` +
-    `state dir and did not finish within ${secs} s; run \`sparrow await\` again`
+    `sparrow await could not arm: the arming lock ${path} is held by another publisher and did not ` +
+    `clear within ${secs} s; run \`sparrow await\` again`
   );
 };
 
-/** A blocking sleep — the critical section is synchronous by construction. */
-function sleepSync(ms: number): void {
-  try {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-  } catch {
-    /* no SharedArrayBuffer (never on Node 22): spin instead of crashing */
-    const until = Date.now() + ms;
-    while (Date.now() < until) {
-      /* … */
-    }
-  }
-}
+export const armLockUnavailable = (path: string, detail: string): string =>
+  `sparrow await could not arm: the arming lock ${path} could not be taken (${detail}); nothing was ` +
+  'published. Fix that path (or its permissions) and run `sparrow await` again.';
 
-interface LockHolder {
-  /** Exact bytes on disk — the only thing an unlink is ever judged against. */
-  raw: string;
-  pid?: number;
-  ageMs: number;
-}
+export const ADVISORY_LOCK_NOTE =
+  'arming lock unavailable (no flock on PATH): ownership checks are advisory on this host';
 
-function readLockHolder(file: string): LockHolder | undefined {
-  try {
-    const raw = fs.readFileSync(file, 'utf8');
-    const ageMs = Math.max(0, Date.now() - fs.statSync(file).mtimeMs);
-    let pid: number | undefined;
-    try {
-      const parsed = JSON.parse(raw) as { pid?: unknown };
-      if (Number.isInteger(parsed?.pid) && (parsed.pid as number) > 0) pid = parsed.pid as number;
-    } catch {
-      /* malformed: no pid, judged by age alone */
-    }
-    return pid === undefined ? { raw, ageMs } : { raw, pid, ageMs };
-  } catch {
-    return undefined; // gone between the EEXIST and this read: try again
-  }
-}
+/* ------------------------------ mechanism ------------------------------ */
 
-/** Is this lock's holder demonstrably gone (or, unknown and long abandoned)? */
-function reclaimable(holder: LockHolder, staleMs: number, kill?: PidSignal): boolean {
-  if (holder.pid === undefined) return holder.ageMs > staleMs;
-  return !pidDemonstrablyAlive(holder.pid, kill);
-}
+let probedMechanism: ArmLockMechanism | undefined;
 
-/** Unlink a lock ONLY while it is byte-identical to what we judged/wrote. */
-function unlinkLockIf(file: string, expected: string): boolean {
-  try {
-    if (fs.readFileSync(file, 'utf8') !== expected) return false;
-    fs.unlinkSync(file);
-    return true;
-  } catch {
-    return false; // already gone, or not ours to remove
-  }
+/** The operator/embedder override, when it names a mechanism we know. */
+function envForcedMechanism(env: Env): ArmLockMechanism | undefined {
+  const forced = env.SPARROW_ARM_LOCK?.trim().toLowerCase();
+  return forced === 'advisory' || forced === 'flock' ? forced : undefined;
 }
 
 /**
- * Enter the critical section, or throw {@link CliError} (exit 1) having changed
- * nothing. Never steals a live holder's lock, and never proceeds without one
- * except when the state dir cannot hold a lock at all (an unwritable dir, where
- * the publish that follows will fail into `unfenced` anyway).
+ * Is there a `flock` binary? Probed ONCE per process (an arm is not the moment
+ * to spawn twice), and only ever answering the question "does the binary
+ * exist" — every other failure mode is handled where it happens.
  */
-function acquireArmLock(env: Env, nonce: string, t: ArmLockTuning = {}): { release(): void } {
-  const file = awaitArmLockPath(env);
-  const body = `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), nonce })}\n`;
-  const staleMs = t.staleMs ?? ARM_LOCK_STALE_MS;
-  const waitMs = t.waitMs ?? ARM_LOCK_WAIT_MS;
-  const pollMs = t.pollMs ?? ARM_LOCK_POLL_MS;
-  const sleep = t.sleep ?? sleepSync;
-  const held = { release: (): void => void unlinkLockIf(file, body) };
-  const unlockable = { release: (): void => {} };
+export function detectArmLockMechanism(o: ArmLockOptions = {}, env: Env = {}): ArmLockMechanism {
+  if (o.mechanism !== undefined) return o.mechanism;
+  // OPERATOR/TEST OVERRIDE. `SPARROW_ARM_LOCK=advisory` is also what an embedder
+  // that has no CLI bundle to re-enter (the test suite driving `runCli`
+  // in-process) must set: the helper is a real subprocess of the real binary.
+  const forced = envForcedMechanism(env);
+  if (forced !== undefined) return forced;
+  if (probedMechanism !== undefined) return probedMechanism;
+  const run = o.spawn ?? spawnSync;
+  try {
+    const r = run(o.flockPath ?? 'flock', ['--version'], { stdio: 'ignore', timeout: 5_000 });
+    // busybox flock has no --version and exits non-zero; only a MISSING binary
+    // (spawn error) means advisory.
+    probedMechanism = r.error === undefined ? 'flock' : 'advisory';
+  } catch {
+    probedMechanism = 'advisory';
+  }
+  return probedMechanism;
+}
 
-  /** `wx` is the whole mutual exclusion: the kernel picks exactly one winner. */
-  const tryCreate = (): 'ours' | 'taken' | 'impossible' => {
-    try {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      const fd = fs.openSync(file, 'wx');
-      try {
-        fs.writeFileSync(fd, body);
-      } finally {
-        fs.closeSync(fd);
-      }
-      return 'ours';
-    } catch (e) {
-      return (e as NodeJS.ErrnoException)?.code === 'EEXIST' ? 'taken' : 'impossible';
-    }
+/** TEST-ONLY: forget the per-process probe. */
+export function __resetArmLockProbeForTests(): void {
+  probedMechanism = undefined;
+}
+
+/* ------------------------------- the helper ------------------------------ */
+
+/** What the parent hands the helper — everything, so it inherits no env. */
+interface ArmHelperPayload {
+  stateDir: string;
+  nonce: string;
+  listenerPid: number;
+  kind: string;
+  thread?: string;
+  profile?: string;
+  takeOver?: boolean;
+}
+
+export function encodeArmHelperPayload(p: ArmHelperPayload): string {
+  return Buffer.from(JSON.stringify(p), 'utf8').toString('base64url');
+}
+
+/**
+ * THE CRITICAL SECTION, running as the process that holds the kernel lock.
+ *
+ * Returns the ONE JSON line the parent reads. It never throws and always exits
+ * 0: the parent's decision is the line, never the status, so a status is free
+ * to mean "the helper never got to speak".
+ */
+export function runArmPublishHelper(payload: string): string {
+  const say = (o: Record<string, unknown>): string => JSON.stringify(o);
+  let p: ArmHelperPayload;
+  try {
+    p = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as ArmHelperPayload;
+  } catch (e) {
+    return say({ result: 'error', message: `unreadable payload: ${(e as Error)?.message}` });
+  }
+  const env: Env = {
+    SPARROW_STATE_DIR: p.stateDir,
+    ...(p.takeOver ? { SPARROW_AWAIT_TAKE_OVER: '1' } : {}),
   };
 
-  const first = tryCreate();
-  if (first === 'ours') return held;
-  // An unwritable/absent state dir cannot hold a lock OR a record: there is
-  // nothing to serialise and nothing to lose. The publish falls to `unfenced`.
-  if (first === 'impossible') return unlockable;
-
-  const deadline = Date.now() + waitMs;
-  for (;;) {
-    const holder = readLockHolder(file);
-    if (holder === undefined) {
-      if (tryCreate() === 'ours') return held; // vanished while we looked
-    } else if (reclaimable(holder, staleMs, t.kill)) {
-      t.onReclaim?.();
-      // Byte-identical or nothing: a replacement lock belongs to someone who is
-      // very much alive, and stealing it would restore the race.
-      if (unlinkLockIf(file, holder.raw) && tryCreate() === 'ours') return held;
-    } else if (tryCreate() === 'ours') {
-      return held; // released between the read and here
+  // TEST-ONLY: hold the section open so a test can kill something mid-flight.
+  const pause = process.env.SPARROW_ARM_HELPER_PAUSE;
+  if (pause) {
+    const ready = process.env.SPARROW_ARM_HELPER_READY;
+    if (ready) {
+      try {
+        fs.writeFileSync(ready, String(process.pid));
+      } catch {
+        /* the test will time out and say so */
+      }
     }
-    if (Date.now() >= deadline) break;
-    sleep(pollMs);
+    const until = Date.now() + 30_000;
+    while (!fs.existsSync(pause) && Date.now() < until) {
+      /* spin: this process holds the lock while it does */
+    }
   }
-  throw new CliError(armLockRefusal(readLockHolder(file)?.pid, waitMs));
+
+  try {
+    // THE LISTENER MUST STILL BE THERE. We may have waited seconds for the lock,
+    // and a record naming a dead owner is worse than no record: it tells every
+    // hook a listener is live when nothing is listening. (`flock` FORKS before
+    // exec — measured: our ppid is flock's, not the listener's — so the listener
+    // is identified by the pid we were given, not by `process.ppid`.)
+    if (!pidDemonstrablyAlive(p.listenerPid)) {
+      return say({ result: 'aborted', reason: 'listener gone' });
+    }
+    assertMayArm(env, p.thread);
+    const record: AwaitOwnerRecord = {
+      version: 1,
+      nonce: p.nonce,
+      pid: p.listenerPid,
+      startedAt: new Date().toISOString(),
+      kind: p.kind,
+      ...(p.profile ? { profile: p.profile } : {}),
+      ...(p.thread ? { thread: p.thread } : {}),
+      lock: 'flock',
+    };
+    const file = awaitOwnerPath(env);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${p.nonce}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(record)}\n`);
+    fs.renameSync(tmp, file); // atomic, and under the kernel lock
+    clearAwaitCandidate(env, p.nonce);
+    return say({ result: 'published', nonce: p.nonce });
+  } catch (e) {
+    if (e instanceof CliError) return say({ result: 'refused', message: e.message });
+    return say({ result: 'error', message: String((e as Error)?.message ?? e) });
+  }
+}
+
+/* ------------------------------ the parent ------------------------------- */
+
+interface HelperOutcome {
+  published: boolean;
+  /** Set when the parent must fail: the message to exit 1 with. */
+  refusal?: string;
+}
+
+/** Run the critical section under `flock` and interpret the one line it prints. */
+function publishUnderFlock(
+  env: Env,
+  payload: ArmHelperPayload,
+  o: ArmLockOptions,
+): HelperOutcome {
+  const lockFile = awaitArmLockPath(env);
+  const waitMs = o.waitMs ?? ARM_LOCK_WAIT_MS;
+  const run = o.spawn ?? spawnSync;
+  const bundle = o.bundle ?? process.argv[1];
+  if (!bundle) {
+    return { published: false, refusal: armLockUnavailable(lockFile, 'no CLI entry to run') };
+  }
+  const waitSecs = Math.max(1, Math.ceil(waitMs / 1000));
+  const r = run(
+    o.flockPath ?? 'flock',
+    [
+      '-w',
+      String(waitSecs),
+      lockFile,
+      process.execPath,
+      bundle,
+      ARM_HELPER_COMMAND,
+      encodeArmHelperPayload(payload),
+    ],
+    { encoding: 'utf8', timeout: waitMs + 10_000 },
+  );
+
+  const line = String(r.stdout ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('{'))
+    .pop();
+  if (line !== undefined) {
+    try {
+      const said = JSON.parse(line) as { result?: string; message?: string; reason?: string };
+      if (said.result === 'published') return { published: true };
+      if (said.result === 'refused') {
+        return { published: false, refusal: said.message ?? 'arming was refused' };
+      }
+      if (said.result === 'aborted') {
+        // We are demonstrably alive (we are reading this), so the helper judging
+        // otherwise means something is badly wrong — never a silent publish.
+        return {
+          published: false,
+          refusal: armLockUnavailable(lockFile, `helper aborted: ${said.reason ?? 'unknown'}`),
+        };
+      }
+      return {
+        published: false,
+        refusal: armLockUnavailable(lockFile, said.message ?? 'helper reported an error'),
+      };
+    } catch {
+      /* fall through to the no-line handling */
+    }
+  }
+
+  // NO LINE. The helper may still have committed the rename before it died, so
+  // the record is the authority — never a blind retry.
+  if (readAwaitOwner(env)?.nonce === payload.nonce) return { published: true };
+  const stderr = String(r.stderr ?? '').trim().split('\n')[0] ?? '';
+  if (r.error !== undefined) {
+    return { published: false, refusal: armLockUnavailable(lockFile, r.error.message) };
+  }
+  // util-linux exits 1 when `-w` expires, and 64+ (EX_*) when it cannot even
+  // open the lock file — measured: 66 with "cannot open lock file".
+  if (r.status === 1 && stderr === '') return { published: false, refusal: armLockContention(lockFile, waitMs) };
+  return {
+    published: false,
+    refusal: armLockUnavailable(lockFile, stderr || `flock exited ${String(r.status)}`),
+  };
 }
 
 /**
@@ -551,6 +658,29 @@ export interface AwaitGeneration {
 }
 
 /**
+ * Can this state dir hold the owner record at all? Probed by WRITING (and
+ * removing) a temp file: the question is never "does the directory exist" but
+ * "will the rename that follows work", and only an attempt answers that.
+ */
+function stateDirWritable(env: Env): boolean {
+  const probe = `${awaitOwnerPath(env)}.probe.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(probe), { recursive: true });
+    fs.writeFileSync(probe, '');
+    fs.unlinkSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Has an operator set the take-over escape? (Read once, passed to the helper.) */
+function takingOver(env: Env): boolean {
+  const v = env.SPARROW_AWAIT_TAKE_OVER?.trim().toLowerCase();
+  return v !== undefined && v !== '' && v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
+}
+
+/**
  * Prepare (but do not yet publish) this listener's generation.
  *
  * @param kind the heartbeat listener kind this listener will stamp (`await` /
@@ -568,14 +698,27 @@ export function prepareAwaitGeneration(opts: {
   thread?: string;
   /** Test seam: the `process.kill(pid, 0)` used by the publish-time recheck. */
   kill?: PidSignal;
-  /** Test seam: timings and probes for the arming lock. */
-  lock?: ArmLockTuning;
+  /** Injection for the arming lock (mechanism, binary, helper entry, spawn). */
+  lock?: ArmLockOptions;
+  /** One line at a time — `io.err`. Used once, to announce advisory mode. */
+  err?(s: string): void;
 }): AwaitGeneration {
-  const { env, kind, profile, thread, kill, lock: lockTuning } = opts;
+  const { env, kind, profile, thread, kill, lock: lockOpts = {}, err } = opts;
   const nonce = crypto.randomBytes(8).toString('hex');
+  // WHICH MECHANISM, decided once at arm time: it goes into both records, so a
+  // reader (a test, `sparrow skill status`, an operator) can see whether this
+  // listener's publication was kernel-serialised or merely advisory.
+  const mechanism = detectArmLockMechanism(lockOpts, env);
+  // The note explains an ABSENT binary, so it is not printed when an operator
+  // (or an embedder with no CLI bundle to re-enter) asked for advisory mode by
+  // name — saying "no flock on PATH" to someone who typed `SPARROW_ARM_LOCK`
+  // would simply be false.
+  if (mechanism === 'advisory' && envForcedMechanism(env) === undefined) {
+    err?.(`[await] ${ADVISORY_LOCK_NOTE}\n`);
+  }
   // IMMEDIATELY — before credentials, before the network, before publish-late.
   // This is what turns the arming window from "no listener" into "one starting".
-  writeAwaitCandidate(env, nonce);
+  writeAwaitCandidate(env, nonce, mechanism);
   let live = false;
   /** FALSE for an `unfenced` generation — one whose record never reached disk. */
   let onDisk = false;
@@ -590,16 +733,33 @@ export function prepareAwaitGeneration(opts: {
     fenced: () => onDisk,
     publish(): AwaitPublication {
       if (live) return onDisk ? 'published' : 'unfenced';
-      /* THE CRITICAL SECTION. Everything from the re-check to the rename runs
-       * under the arming lock, because a re-check that is not serialised with
-       * the rename is not a check at all: two candidates both read an empty
-       * state dir, then both write, and the last rename silently wins. */
-      const lock = acquireArmLock(env, nonce, lockTuning);
-      try {
-        return publishUnderLock();
-      } finally {
-        lock.release();
+      /* CAN THIS STATE DIR HOLD A RECORD AT ALL? Asked FIRST, because the answer
+       * decides which kind of failure we are looking at. A dir that cannot be
+       * written was always `unfenced` (pre-0.1.20 behaviour, never ownership)
+       * and stays so; a dir that CAN be written but whose lock cannot be taken
+       * is a real failure and refuses — it must never quietly degrade into an
+       * unfenced publish that evicts nobody but believes it is listening. */
+      if (!stateDirWritable(env)) return goLive('unfenced');
+      if (mechanism === 'flock') {
+        const outcome = publishUnderFlock(
+          env,
+          {
+            stateDir: resolveStateDir(env),
+            nonce,
+            listenerPid: process.pid,
+            kind,
+            ...(thread ? { thread } : {}),
+            ...(profile ? { profile } : {}),
+            ...(takingOver(env) ? { takeOver: true } : {}),
+          },
+          lockOpts,
+        );
+        if (!outcome.published) throw new CliError(outcome.refusal ?? 'arming was refused');
+        onDisk = true;
+        return goLive('published');
       }
+      // ADVISORY: 0.1.38 exactly — the re-check, then the rename, in-process.
+      return publishAdvisory();
     },
     clearCandidate(): void {
       clearAwaitCandidate(env, nonce);
@@ -620,11 +780,29 @@ export function prepareAwaitGeneration(opts: {
     },
   };
 
-  /** The locked half of {@link AwaitGeneration.publish}. */
-  function publishUnderLock(): AwaitPublication {
-    runInsideLockHook();
-    // THE LAST-MOMENT RECHECK, now genuinely last: no other candidate can be
-    // between its own check and its own rename while we hold the lock.
+  /** Go live, retire our candidate marker, and let the test seam observe it. */
+  function goLive(result: AwaitPublication): AwaitPublication {
+    live = true;
+    // The published record now makes the same announcement, with more
+    // authority — ours to retire, and only ours. (Under `flock` the helper has
+    // already done this; a second call is a no-op.)
+    clearAwaitCandidate(env, nonce);
+    runPublishHook();
+    return result;
+  }
+
+  /**
+   * ADVISORY MODE — no `flock` binary on this host.
+   *
+   * The re-check and the rename are the same two operations 0.1.38 shipped, and
+   * the same microsecond window sits between them. Everything the ordering
+   * guarantee rests on still holds (newest-wins, the different-thread refusal,
+   * publish-late); what is missing is the proof that two SIMULTANEOUS
+   * publishers cannot interleave. Saying so once on stderr is the honest
+   * treatment: refusing to arm would leave a macOS agent unable to listen at
+   * all, which is a certain failure in place of an unlikely one.
+   */
+  function publishAdvisory(): AwaitPublication {
     assertMayArm(env, thread, kill);
     const record: AwaitOwnerRecord = {
       version: 1,
@@ -634,6 +812,7 @@ export function prepareAwaitGeneration(opts: {
       kind,
       ...(profile ? { profile } : {}),
       ...(thread ? { thread } : {}),
+      lock: 'advisory',
     };
     try {
       const file = awaitOwnerPath(env);
@@ -645,11 +824,6 @@ export function prepareAwaitGeneration(opts: {
     } catch {
       /* best-effort: an unwritable state dir must not stop the listener */
     }
-    live = true;
-    // The published record now makes the same announcement, with more
-    // authority — ours to retire, and only ours.
-    clearAwaitCandidate(env, nonce);
-    runPublishHook();
-    return onDisk ? 'published' : 'unfenced';
+    return goLive(onDisk ? 'published' : 'unfenced');
   }
 }

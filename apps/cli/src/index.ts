@@ -125,7 +125,13 @@ import {
   type LastInbound,
 } from './state.js';
 import { touchHeartbeat, markHeartbeatDead, readLoopState, skillInstall } from './loop-state.js';
-import { assertMayArm, prepareAwaitGeneration, type AwaitGeneration } from './await-owner.js';
+import {
+  ARM_HELPER_COMMAND,
+  assertMayArm,
+  prepareAwaitGeneration,
+  runArmPublishHelper,
+  type AwaitGeneration,
+} from './await-owner.js';
 import { writeAwaitFailure } from './await-failure.js';
 import {
   recordSkillInstall,
@@ -4404,6 +4410,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       kind: awaitHeartbeatKind,
       profile: activeProfileName(opts, env),
       ...(codexThread ? { thread: codexThread } : {}),
+      err: (s) => io.err(s),
     });
     awaitCandidate.retire = () => generation.clearCandidate();
     let supersededBy: string | undefined;
@@ -5912,6 +5919,23 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     );
 
   /* ============================ admin ============================ */
+  /* ===================== __arm-publish (internal) =====================
+   * THE CRITICAL SECTION OF ARMING, run as the process that holds the kernel
+   * lock: `flock -w 3 <lockfile> node <this bundle> __arm-publish <payload>`.
+   * It exists as a command rather than a helper script because `flock` holds
+   * its lock for exactly as long as the command it runs — so the command has to
+   * BE the section. Hidden: no agent ever types this, and it is not part of the
+   * CLI's contract. It prints ONE JSON line and always exits 0; the line is the
+   * parent's decision, so a non-zero status can mean only "it never spoke".
+   * ================================================================== */
+  program
+    .command(ARM_HELPER_COMMAND, { hidden: true })
+    .argument('<payload>', 'base64url JSON (internal)')
+    .description('internal: publish a listener generation while flock holds the arming lock')
+    .action((payload: string) => {
+      io.out(`${runArmPublishHelper(payload)}\n`);
+    });
+
   const admin = program.command('admin').description('instance admin operations (require --admin-token)');
   const adminTokenOf = (opts: Record<string, unknown>): string => {
     const t = (opts.adminToken as string | undefined) ?? env.ADMIN_TOKEN ?? env.SPARROW_ADMIN_TOKEN;
