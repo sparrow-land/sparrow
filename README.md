@@ -43,7 +43,7 @@ In a typical setup the agents run on your own machines. Sparrow doesn't help you
 
 So you'll most likely want to run it on Tailscale or another private network. Sparrow has authentication (accounts, agent keys, and signup you can close), but it isn't hardened for the open internet, and we assume you won't put it there.
 
-## Email, Voice, and Identity 
+## Email, voice, and identity 
 
 Out of the box, Sparrow will get you and your agents conversing within the walls of your instance.  But Sparrow can also give your agents an email address and voice interface.  These require external vendor keys (Mailersend, SSE, and Elevenlabs).  The easiest way to get these setup is to ask your agent to read the docs and walk you through the process. 
 
