@@ -934,30 +934,122 @@ describe('sparrow-stop-check.sh', () => {
    * stale: the usage-limit status and the prompt-time line carry that story.
    * ------------------------------------------------------------------------- */
   describe('a listener standing by on a usage limit', () => {
+    const marker = (name = '20260917T180000-1.json'): void => {
+      fs.mkdirSync(path.join(stateDir, 'blocked'), { recursive: true });
+      fs.writeFileSync(
+        path.join(stateDir, 'blocked', name),
+        JSON.stringify({ version: 1, reason: 'rate_limit', at: '2026-09-17T18:00:00.900Z' }),
+      );
+    };
+    const owner = (pid: number): void =>
+      fs.writeFileSync(
+        path.join(stateDir, 'await-owner.json'),
+        JSON.stringify({ version: 1, nonce: 'f00d', pid, kind: 'await' }),
+      );
+    const deadPid = (): number =>
+      Number(
+        execFileSync('sh', ['-c', 'sh -c "exit 0" & p=$!; wait $!; printf %s "$p"'], {
+          encoding: 'utf8',
+        }),
+      );
+
     for (const stamp of ['blocked', 'blocked:rate_limit', 'blocked:billing_error']) {
-      it(`allows the stop silently for a FRESH ${stamp} heartbeat`, () => {
+      it(`allows the stop silently for ${stamp} while a marker stands and the listener lives`, () => {
         writeLoopState('engaged');
         writeHeartbeat(3, stamp);
-        const r = runHook();
-        expect(r.code).toBe(0);
-        expect(r.stdout.trim()).toBe('');
-      });
-
-      it(`allows it for a STALE ${stamp} heartbeat too`, () => {
-        writeLoopState('engaged');
-        writeHeartbeat(9999, stamp);
+        marker();
+        owner(process.pid);
         const r = runHook();
         expect(r.code).toBe(0);
         expect(r.stdout.trim()).toBe('');
       });
     }
 
+    /**
+     * FRESHNESS DOES NOT APPLY to a blocked stamp — a standing-by listener
+     * heartbeats only on transitions, so the stamp is ancient by design. That is
+     * exactly why the other two facts are required.
+     */
+    it('allows a very old blocked stamp while the evidence still holds', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(9999, 'blocked:rate_limit');
+      marker();
+      owner(process.pid);
+      expect(runHook().stdout.trim()).toBe('');
+    });
+
+    it('allows when no owner record names a pid at all (unknown is not absent)', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(500, 'blocked:rate_limit');
+      marker();
+      expect(runHook().stdout.trim()).toBe('');
+    });
+
+    /**
+     * THE YEAR-2000 REPRO. A blocked stamp with no marker left behind it is not
+     * a standby: `unblock` (or a resume) cleared the block, and the listener
+     * should have re-stamped `await` within a cadence. Allowing on the word
+     * alone let a killed listener bypass this hook indefinitely.
+     */
+    it('BLOCKS when the markers are gone: the standby should have ended', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(9999, 'blocked:rate_limit'); // stamped in the year 2000, so to speak
+      owner(process.pid);
+      const json = JSON.parse(runHook().stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('no listener is running');
+      expect(json.reason).not.toMatch(/killed/i); // nothing here says anything died
+      expect(json.reason).toContain(awaitCommand());
+    });
+
+    it('BLOCKS when the standing-by listener process is gone', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(300, 'blocked:rate_limit');
+      marker();
+      const pid = deadPid();
+      owner(pid);
+      const json = JSON.parse(runHook().stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('standing by on a usage limit');
+      expect(json.reason).toContain(`pid ${pid}`);
+      expect(json.reason).toContain('is gone');
+      expect(json.reason).toContain(`run ${awaitCommand()} as a tracked background task`);
+      expect(json.reason).toContain('stand by again until the limit clears');
+    });
+
     it('allows under Codex as well, where a plain await would be judged passive', () => {
       writeLoopState('engaged');
       writeHeartbeat(3, 'blocked:rate_limit');
+      marker();
+      owner(process.pid);
       const r = runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' });
       expect(r.code).toBe(0);
       expect(r.stdout.trim()).toBe('');
+    });
+
+    /**
+     * The other half of (5): allowing the stop hands off to
+     * `sparrow-auto-status.sh stop`, which posts `idle` — and that would erase
+     * the blocked explanation a human is relying on. The auto-status stop mode
+     * re-reads the marker directory and does nothing while a block stands.
+     */
+    it('allows WITHOUT painting the blocked agent idle', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(3, 'blocked:rate_limit');
+      marker();
+      owner(process.pid);
+      const curlLog = stubRecordingCurl();
+      const r = runHook('{}', {
+        SPARROW_SERVER: 'https://example.test',
+        SPARROW_TOKEN: 'agk_test',
+        CURL_LOG: curlLog,
+        ROOMS_JSON,
+      });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+      expect(idlePosts(curlLog)).toHaveLength(0);
+      const calls = fs.existsSync(curlLog) ? fs.readFileSync(curlLog, 'utf8') : '';
+      expect(calls).not.toContain('/me/presence');
     });
 
     it('ignores a SUPERSEDED generation blocked stamp exactly like any other', () => {

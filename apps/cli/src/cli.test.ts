@@ -4189,6 +4189,229 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
       }
     }, 30_000);
 
+    /* ================================================================
+     * A MARKER THAT ARRIVES MID-FLIGHT.
+     *
+     * Asking the queue takes a round trip, and a limit can be hit inside it.
+     * The answer that comes back is still TRUE — the item really is waiting —
+     * but acting on it is not: the turn it would start dies on the limit, and
+     * under Codex the queued turn dies with it. Stopping the reconcile poll
+     * cannot help, because that only cancels future ticks and never a request
+     * already in the air. So every path from a lookup to a wake re-reads the
+     * marker directory first and drops the answer. Nothing is consumed by
+     * dropping it: the item is still there when the agent comes back.
+     * ================================================================ */
+    interface HoldingProxy {
+      url: string;
+      /** While true, `GET /me/inbox` is parked instead of forwarded. */
+      hold: boolean;
+      /** Park inbox reads only from this one onward (1 = the first). */
+      holdFrom: number;
+      /** How many inbox reads have been seen in total. */
+      seen: number;
+      /** How many inbox reads are parked right now. */
+      held: number;
+      /** Let every parked read through (and stop parking new ones). */
+      release(): void;
+      close(): Promise<void>;
+    }
+
+    /** A pass-through relay that can hold the inbox read open on demand. */
+    async function startHoldingProxy(): Promise<HoldingProxy> {
+      const upstream = new URL(url);
+      const sockets = new Set<Socket>();
+      const state = { hold: false, holdFrom: 1, seen: 0, held: 0, waiters: [] as Array<() => void> };
+      const server = http.createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (d: Buffer) => chunks.push(d));
+        req.on('end', () => {
+          const raw = Buffer.concat(chunks);
+          const forward = (): void => {
+            const up = http.request(
+              {
+                host: upstream.hostname,
+                port: upstream.port,
+                path: req.url,
+                method: req.method,
+                headers: { ...req.headers, host: upstream.host, 'content-length': String(raw.length) },
+              },
+              (ur) => {
+                res.writeHead(ur.statusCode ?? 502, ur.headers);
+                ur.pipe(res);
+              },
+            );
+            up.on('error', () => {
+              res.writeHead(502);
+              res.end();
+            });
+            up.end(raw);
+          };
+          if ((req.url ?? '').startsWith('/api/v1/me/inbox')) state.seen += 1;
+          if (state.hold && state.seen >= state.holdFrom && (req.url ?? '').startsWith('/api/v1/me/inbox')) {
+            state.held += 1;
+            state.waiters.push(() => {
+              state.held -= 1;
+              forward();
+            });
+            return;
+          }
+          forward();
+        });
+      });
+      server.on('connection', (s) => {
+        sockets.add(s);
+        s.on('close', () => sockets.delete(s));
+      });
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+      const port = (server.address() as AddressInfo).port;
+      return {
+        url: `http://127.0.0.1:${port}`,
+        get hold() {
+          return state.hold;
+        },
+        set hold(v: boolean) {
+          state.hold = v;
+        },
+        get holdFrom() {
+          return state.holdFrom;
+        },
+        set holdFrom(v: number) {
+          state.holdFrom = v;
+        },
+        get seen() {
+          return state.seen;
+        },
+        get held() {
+          return state.held;
+        },
+        release() {
+          state.hold = false;
+          for (const w of state.waiters.splice(0)) w();
+        },
+        close() {
+          for (const s of sockets) s.destroy();
+          return new Promise<void>((r) => server.close(() => r()));
+        },
+      };
+    }
+
+    /** The one queued item, still unread — dropping an answer consumes nothing. */
+    async function stillUnread(id: string): Promise<void> {
+      const inbox = capture();
+      expect(await runCli(['inbox', '--json'], env, inbox.io)).toBe(0);
+      expect(JSON.parse(inbox.out()).items.map((i: any) => i.id)).toContain(id);
+    }
+
+    it('drops a PRE-STREAM answer when the marker lands while the queue is answering', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtblockflight1');
+      const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'waiting already' });
+      const proxy = await startHoldingProxy();
+      try {
+        proxy.hold = true;
+        const cap = capture();
+        const calls: string[] = [];
+        cap.io.notifyCodex = async (thread) => { calls.push(thread); };
+        const running = runCli(
+          ['await', '--timeout', '4', '--server', proxy.url],
+          quick({ CODEX_THREAD_ID: 'thread-inflight' }),
+          cap.io,
+        );
+
+        await until(() => proxy.held >= 1); // the pre-stream look is in the air…
+        block(); // …and the session hits its limit right there
+        proxy.release();
+
+        await until(() => heartbeat().startsWith('blocked:'));
+        expect(cap.out()).toBe(''); // no wake line for a turn that cannot run
+        expect(calls).toEqual([]); // and no Codex turn queued into the limit
+        expect(await running).toBe(2);
+        await stillUnread(sent.message.id);
+      } finally {
+        await proxy.close();
+      }
+    }, 30_000);
+
+    it('drops a MID-STREAM answer the same way (event/poll reconcile)', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtblockflight2');
+      const proxy = await startHoldingProxy();
+      try {
+        const cap = capture();
+        const calls: string[] = [];
+        cap.io.notifyCodex = async (thread) => { calls.push(thread); };
+        const running = runCli(
+          ['await', '--timeout', '5', '--server', proxy.url],
+          quick({ CODEX_THREAD_ID: 'thread-inflight2' }),
+          cap.io,
+        );
+        await until(async () => await ownerSeesOnline(owner, agentId)); // streaming
+
+        proxy.hold = true; // the NEXT inbox read is the one the event triggers
+        const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'arrives with the limit' });
+        await until(() => proxy.held >= 1);
+        block();
+        proxy.release();
+
+        await until(() => heartbeat().startsWith('blocked:'));
+        expect(cap.out()).toBe('');
+        expect(calls).toEqual([]);
+        expect(await running).toBe(2);
+        await stillUnread(sent.message.id);
+      } finally {
+        await proxy.close();
+      }
+    }, 30_000);
+
+    /* The gap path wakes on its OWN authority (a gap means "you may have missed
+     * something"), which makes it the easiest one to forget — and it asks the
+     * same queue, over the same round trip. */
+    it('drops a REPLAY-GAP answer when the marker lands during its lookup', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtblockflight3');
+      const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'behind a gap' });
+      const statePath = path.join(configDir, 'sparrow', 'state.json');
+      const profileName = Object.keys(credentials().profiles)[0]!;
+      // A cursor AHEAD of the journal is a gap on the real server, on the stream
+      // and the log alike — the same shape a pruned cursor produces.
+      const seedCursor = (): void =>
+        fs.writeFileSync(
+          statePath,
+          `${JSON.stringify({ profiles: { [profileName]: { lastEventId: '999999' } } })}\n`,
+        );
+      /* `--wake-on email --batch-after 0` keeps the PRE-STREAM look from waking
+       * on this chat item (it is deferred, not muted), so the wake that follows
+       * can only have come from the gap lookup, which ignores the filter by
+       * design — a gap means "you may have missed something", of any kind. */
+      const args = ['--wake-on', 'email', '--batch-after', '0'];
+
+      // CONTROL: unblocked, this fixture really does wake through the gap path.
+      seedCursor();
+      const control = capture();
+      expect(await runCli(['await', ...args, '--timeout', '6'], quick(), control.io)).toBe(0);
+      expect(wakeLine(control).reason).toBe('replay.gap');
+
+      const proxy = await startHoldingProxy();
+      try {
+        seedCursor(); // …and again, now with the limit arriving mid-lookup
+        proxy.holdFrom = 2; // let the pre-stream look through; hold the gap's
+        proxy.hold = true;
+        const cap = capture();
+        const running = runCli(
+          ['await', ...args, '--timeout', '5', '--server', proxy.url],
+          quick(),
+          cap.io,
+        );
+        await until(() => proxy.held >= 1);
+        block();
+        proxy.release();
+
+        await until(() => heartbeat().startsWith('blocked:'));
+        expect(cap.out()).toBe(''); // no gap wake either
+        expect(await running).toBe(2);
+        await stillUnread(sent.message.id);
+      } finally {
+        await proxy.close();
+      }
+    }, 40_000);
+
     it('an unreadable marker is ignored: junk never silences a listener', async () => {
       await awaitFixture('awtblockjunk');
       fs.mkdirSync(blockedDir, { recursive: true });

@@ -84,9 +84,11 @@
 #     provider can differ), so a successful turn elsewhere under this dir can
 #     clear a marker whose own session is still limited. `sparrow skill unblock`
 #     is the operator recovery when the limited session is closed.
-#   * The quota auto-resume notifications are the one unconditional clear --
-#     Claude Code is telling us the limit is over -- and they clear from a
-#     SNAPSHOT too. NAMED RESIDUAL, not a guarantee: a notification delivered
+#   * `quota_auto_resume_fired` is the one unconditional clear -- Claude Code is
+#     telling us it resumed the work itself -- and it clears from a SNAPSHOT too.
+#     `quota_auto_resume_stale` (it waited too long; a human must press Enter)
+#     and `quota_auto_resume_disabled` (auto-resume is off) both mean the agent
+#     still cannot run: markers stand, only the note changes. NAMED RESIDUAL, not a guarantee: a notification delivered
 #     late, after a newer limit episode began, clears that episode's markers.
 #     Recovery then depends on the actual wake/failure lifecycle -- the next
 #     ATTEMPTED turn failing and StopFailure writing a fresh marker -- not on any
@@ -227,6 +229,46 @@ write_blocked_marker() {
       "$_reason" "$_at" "$_session" "$_prompt" > "$_tmp" 2>/dev/null || return 0
   fi
   mv -f "$_tmp" "$_file" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
+}
+
+# NOW, with milliseconds -- the precision the transcript uses. GNU date first,
+# then node, and only as a last resort whole seconds (a clock that cannot express
+# ms is better than no timestamp; the comparison still works, it is just coarse).
+now_iso_ms() {
+  _t=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || echo "")
+  case "$_t" in
+    "" | *N*) ;;
+    *) printf '%s' "$_t"; return 0 ;;
+  esac
+  if command -v node >/dev/null 2>&1; then
+    _t=$(node -e 'process.stdout.write(new Date().toISOString())' 2>/dev/null || echo "")
+    [ -n "$_t" ] && { printf '%s' "$_t"; return 0; }
+  fi
+  date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true
+}
+
+# THE MARKER'S BOUNDARY COMES OUT OF THE TRANSCRIPT. Clearing compares a marker's
+# `at` against transcript timestamps, so both must come off the SAME CLOCK: a
+# marker stamped from `date` at whole seconds (18:00:00Z) loses to a success at
+# 18:00:00.100Z that actually happened BEFORE the 18:00:00.900Z error, and a
+# delayed PostToolUse from that older prompt would delete a live marker. So `at`
+# is the timestamp of the LAST API-ERROR entry -- the very entry that means this
+# turn failed -- read from the same file, in the same precision.
+transcript_last_error_at() {
+  _tp="$1"
+  [ -n "$_tp" ] && [ -r "$_tp" ] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+  tail -n 200 "$_tp" 2>/dev/null | node -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      let last = "";
+      for (const line of s.split("\n")) {
+        if (!line.trim()) continue;
+        let j; try { j = JSON.parse(line); } catch (e) { continue; }
+        if (!j || j.isApiErrorMessage !== true) continue;
+        if (typeof j.timestamp === "string" && !Number.isNaN(Date.parse(j.timestamp))) last = j.timestamp;
+      }
+      if (last) process.stdout.write(last);
+    });' 2>/dev/null || true
 }
 
 # Does the session transcript PROVE a successful assistant turn after <iso>?
@@ -421,7 +463,8 @@ case "$MODE" in
       # Retried by Claude Code, or our own bug: say nothing at all.
       *) exit 0 ;;
     esac
-    at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+    at=$(transcript_last_error_at "$(payload_value transcript_path)")
+    [ -n "$at" ] || at=$(now_iso_ms)
     resumes=$(payload_value resets_at)
     [ -n "$resumes" ] || resumes=$(payload_value resumes_at)
     [ -n "$resumes" ] || resumes=$(payload_value resetsAt)
@@ -447,8 +490,11 @@ case "$MODE" in
     ;;
   notification)
     case "$ntype" in
-      quota_auto_resume_fired | quota_auto_resume_stale)
-        # Claude Code says the limit is over. Clear from a snapshot, by name.
+      quota_auto_resume_fired)
+        # The ONLY notification that means work resumed. `_stale` and `_disabled`
+        # both mean the limit reset but Claude Code is NOT continuing on its own,
+        # so they leave the markers exactly where they are. Clear by name, from a
+        # snapshot.
         blocked_markers | while IFS= read -r _mk; do
           [ -n "$_mk" ] || continue
           rm -f "$_mk" 2>/dev/null || true
@@ -555,6 +601,30 @@ throttled() {
   return 0
 }
 
+# --- the blocked gate ------------------------------------------------------
+#
+# WHILE A MARKER STANDS, NOTHING MAY CLAIM OTHERWISE. A session that cannot run a
+# single turn must not advertise presence or a `working`/`idle` status: the
+# blocked note it just posted would be taken straight back down by the next hook
+# (a prompt posting `working` + a 300s presence heartbeat was exactly the bug),
+# and the CLI's presence clear is one-shot per standby, so nothing else undoes
+# it. The directory is re-read HERE, immediately before any write, so a hook that
+# overlapped the StopFailure cannot erase what it recorded.
+#
+# Exempt: `stop-failure` (it is the one writing the blocked note) and the
+# notification types that resolve the block, which have already cleared or
+# deliberately updated the note above.
+case "$MODE" in
+  stop-failure) ;;
+  notification)
+    case "$ntype" in
+      quota_auto_resume_fired | quota_auto_resume_stale | quota_auto_resume_disabled) ;;
+      *) [ -n "$(blocked_markers | head -n 1)" ] && exit 0 ;;
+    esac
+    ;;
+  *) [ -n "$(blocked_markers | head -n 1)" ] && exit 0 ;;
+esac
+
 # --- modes -----------------------------------------------------------------
 
 case "$MODE" in
@@ -580,7 +650,7 @@ case "$MODE" in
         post_status_all '{"state":"working","note":"blocked — needs your input","sticky":true}'
         rm -f "$IDLE_MARKER" 2>/dev/null || true
         ;;
-      quota_auto_resume_fired | quota_auto_resume_stale)
+      quota_auto_resume_fired)
         # Back to work. The markers are already gone (above); the resume
         # handshake in post-tool takes it from here.
         qt=$(payload_value quota_type)
@@ -590,10 +660,15 @@ case "$MODE" in
         post_status_all "{\"state\":\"working\",\"note\":\"$note\",\"sticky\":true}"
         rm -f "$IDLE_MARKER" 2>/dev/null || true
         ;;
+      quota_auto_resume_stale)
+        # NOT resumed work: Claude Code waited too long and is now waiting for
+        # the user to press Enter. The agent still cannot run, so the markers
+        # stand, no presence is claimed, and the note names what has to happen.
+        post_status_all '{"state":"working","note":"blocked — usage limit reset while asleep; needs a human to press Enter to continue","sticky":true}'
+        ;;
       quota_auto_resume_disabled)
-        # The limit reset, but Claude Code will NOT continue on its own. The
-        # markers stand, and the note says who has to act.
-        refresh_presence
+        # Auto-resume is off, so nothing will continue on its own. Claims nothing
+        # about the limit having reset -- only that a human has to act.
         post_status_all '{"state":"working","note":"blocked — usage limit reached; auto-resume is off, needs a human to continue","sticky":true}'
         ;;
       idle_prompt)
@@ -630,12 +705,11 @@ case "$MODE" in
     refresh_presence
     ;;
   stop-failure)
-    # Presence stays refreshed on purpose: the listener really is holding the
-    # stream, so the honest picture is online WITH a blocked note, not a silent
-    # disappearance. StopFailure's stdout is discarded by Claude Code, so this
-    # writes nothing to it.
+    # NO PRESENCE HEARTBEAT. The CLI takes this profile off presence when it
+    # stands by, and that clear is one-shot -- re-greening it here would undo the
+    # only honest signal there is. The sticky note carries the story instead.
+    # StopFailure's stdout is discarded by Claude Code, so this writes none.
     [ -n "$blocked_note" ] || exit 0
-    refresh_presence
     post_status_all "{\"state\":\"working\",\"note\":\"$blocked_note\",\"sticky\":true}"
     rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;

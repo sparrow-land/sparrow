@@ -4442,6 +4442,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
 
     const queueCodexWake = async (reason: 'work' | 'gap' | 'upgrade'): Promise<void> => {
       if (!codexThread || readLoopState(env) === 'paused' || !owned()) return;
+      // RECHECK POINT 4 — the last gate in front of the bridge itself, so no
+      // path anywhere can queue a turn into a session that cannot take one.
+      if (blockedSinceAsking()) return;
       try {
         await queueCodexAwaitWake(codexThread, env, io, reason, listenerScope(opts, env));
       } catch (e) {
@@ -4748,6 +4751,21 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     /** The live stream, so a checkpoint can close it and fall into standby. */
     let liveHandle: EventStreamHandle | undefined;
 
+    /**
+     * A queue lookup has just come back — may this listener still act on it?
+     *
+     * ASKING THE QUEUE TAKES A ROUND TRIP, and a marker can appear inside it.
+     * The answer is still TRUE (the item really is waiting), but waking on it is
+     * no longer allowed: the turn it would start dies on the limit, and under
+     * Codex the queued turn dies with it. Stopping the reconcile poll does not
+     * help — that only cancels FUTURE ticks, never a request already in flight —
+     * so every path that turns a lookup into a wake, a Codex queue or an exit 0
+     * re-reads the marker directory first and drops the result on the floor.
+     * Nothing is consumed by dropping it: the item stays unread, and the resume
+     * asks again.
+     */
+    const blockedSinceAsking = (): boolean => standingBy || readBlocked(env) !== undefined;
+
     const abortableNap = (ms: number): Promise<void> =>
       new Promise((resolve) => {
         if (controller.signal.aborted) return resolve();
@@ -4867,6 +4885,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       }
       throw e;
     }
+    // RECHECK POINT 1 — the pre-stream look. A marker written while the queue was
+    // answering means this listener must stand by instead of handing off; the
+    // gate below (the runner's `beforeOpen`) is where that happens.
+    if (alreadyWaiting && blockedSinceAsking()) alreadyWaiting = undefined;
     if (alreadyWaiting && 'item' in alreadyWaiting) {
       // Handing off without ever opening a stream: publish first, because the
       // wake line, the presence mark and the Codex queue below are all owner-only.
@@ -4939,6 +4961,12 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           do {
             recheck = false;
             const decision = await nextWake();
+            // RECHECK POINT 2 — an event or poll tick asked the queue and a
+            // marker arrived mid-flight. Drop the answer and stand by.
+            if (blockedSinceAsking()) {
+              checkBlockedWhileStreaming();
+              return;
+            }
             if (decision && 'item' in decision) {
               wake(reason, decision.item, { matched: decision.matched });
               controller.abort(); // the wake IS the exit
@@ -4995,6 +5023,12 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           item = await oldestWaiting();
         } catch (e) {
           if (terminateForUpgrade(e)) return;
+          // RECHECK POINT 3a — even the conservative "wake so the turn can
+          // retry" is a turn, and a blocked agent cannot take one.
+          if (blockedSinceAsking()) {
+            checkBlockedWhileStreaming();
+            return;
+          }
           // A transient failure leaves the gap unresolved; wake so the turn can
           // drain/retry rather than silently assuming there was no missed work.
           wake('replay.gap', null, {
@@ -5007,6 +5041,11 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           return;
         }
         if (item === null) return;
+        // RECHECK POINT 3b — the gap lookup's answer, same rule as the others.
+        if (blockedSinceAsking()) {
+          checkBlockedWhileStreaming();
+          return;
+        }
         wake('replay.gap', item, {
           matched: 'gap',
           since: since ?? null,

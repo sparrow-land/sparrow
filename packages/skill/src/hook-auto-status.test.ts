@@ -724,6 +724,26 @@ function stopFailure(errorType: string | null, extra = ''): string {
   );
 }
 
+/** Append raw JSONL entries (exact ISO strings) to the session transcript. */
+function writeTranscriptRaw(entries: { type: string; iso: string; apiError?: boolean }[]): string {
+  const p = path.join(stateDir, 'transcript.jsonl');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    p,
+    entries
+      .map((e) =>
+        JSON.stringify({
+          type: e.type,
+          timestamp: e.iso,
+          ...(e.apiError ? { isApiErrorMessage: true, error: 'rate_limit' } : {}),
+          message: { role: e.type, content: 'text we must never read' },
+        }),
+      )
+      .join('\n') + '\n',
+  );
+  return p;
+}
+
 /** Write a JSONL transcript of `{type,timestamp,isApiErrorMessage}` entries. */
 function writeTranscript(entries: { type: string; at: Date; apiError?: boolean }[]): string {
   const p = path.join(stateDir, 'transcript.jsonl');
@@ -939,7 +959,7 @@ describe('sparrow-auto-status.sh — clearing a marker takes EVIDENCE', () => {
 });
 
 describe('sparrow-auto-status.sh — quota auto-resume notifications', () => {
-  for (const type of ['quota_auto_resume_fired', 'quota_auto_resume_stale']) {
+  for (const type of ['quota_auto_resume_fired']) {
     it(`clears the markers and goes back to working on ${type}`, () => {
       writeLoopState('engaged');
       writeMarker('20260917T000600-8.json', { at: new Date().toISOString() });
@@ -965,6 +985,23 @@ describe('sparrow-auto-status.sh — quota auto-resume notifications', () => {
       '{"hook_event_name":"Notification","notification_type":"quota_auto_resume_fired","notification_data":{"quota_type":"five_hour","resume_after_seconds":120}}',
     );
     expect(statusPosts()[0]!.body).toContain('quota five_hour resumed');
+  });
+
+  /**
+   * `_stale` is NOT resumed work: Claude Code waited too long and is now waiting
+   * for the user to press Enter. Treating it as a resume would clear a live
+   * block and post `working` for a session that still cannot run.
+   */
+  it('KEEPS the markers on _stale and says a human must press Enter', () => {
+    writeLoopState('engaged');
+    writeMarker('20260917T000650-8b.json', { at: new Date().toISOString() });
+    stubCurl();
+    runHook('notification', notify('quota_auto_resume_stale'));
+    expect(markerFiles()).toHaveLength(1);
+    expect(presencePosts()).toEqual([]);
+    expect(statusPosts()[0]!.body).toContain(
+      'blocked — usage limit reset while asleep; needs a human to press Enter to continue',
+    );
   });
 
   it('KEEPS the markers and says a human is needed when auto-resume is disabled', () => {
@@ -1079,5 +1116,180 @@ describe('sparrow-auto-status.sh — debug capture', () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('notification_type=quota_auto_resume_fired');
     expect(lines[1]).toContain('mode=stop');
+  });
+});
+
+/* ===================== ORDERING PRECISION (review, f9a6ebb) ================= *
+ * The clearing rule compares a marker's `at` against transcript timestamps, so
+ * the two have to come off the SAME CLOCK. A marker stamped from `date` at whole
+ * seconds (18:00:00Z) against a transcript in milliseconds loses: a success at
+ * 18:00:00.100Z — which happened BEFORE the 18:00:00.900Z rate-limit error —
+ * reads as later than the marker, and a delayed PostToolUse from that older
+ * prompt deletes a marker that is still live.
+ *
+ * So the boundary is taken from the transcript itself: `at` is the timestamp of
+ * the LAST API-error entry, the very entry that means "this turn failed". Same
+ * file, same clock, same precision as the evidence that will be weighed against
+ * it. Only when the transcript cannot supply one do we fall back to the current
+ * time — and then with milliseconds.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — where the marker boundary comes from', () => {
+  const base = '2026-09-17T18:00:00';
+
+  it("takes `at` from the transcript's last API-error entry", () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeTranscriptRaw([
+      { type: 'assistant', iso: `${base}.100Z` },
+      { type: 'assistant', iso: `${base}.900Z`, apiError: true },
+    ]);
+    runHook('stop-failure', stopFailure('rate_limit'));
+    expect(markers()[0]!.at).toBe(`${base}.900Z`);
+  });
+
+  it("does NOT let the older success clear it (the reviewer's repro)", () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeTranscriptRaw([
+      { type: 'assistant', iso: `${base}.100Z` },
+      { type: 'assistant', iso: `${base}.900Z`, apiError: true },
+    ]);
+    runHook('stop-failure', stopFailure('rate_limit'));
+    expect(markerFiles()).toHaveLength(1);
+    // A PostToolUse delayed out of the older prompt, reading the same transcript.
+    runHook('post-tool', stopFailure(null));
+    expect(markerFiles()).toHaveLength(1);
+  });
+
+  it('clears once a success lands AFTER the failure, by milliseconds', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeTranscriptRaw([
+      { type: 'assistant', iso: `${base}.100Z` },
+      { type: 'assistant', iso: `${base}.900Z`, apiError: true },
+    ]);
+    runHook('stop-failure', stopFailure('rate_limit'));
+    writeTranscriptRaw([
+      { type: 'assistant', iso: `${base}.100Z` },
+      { type: 'assistant', iso: `${base}.900Z`, apiError: true },
+      { type: 'assistant', iso: `${base}.950Z` },
+    ]);
+    runHook('post-tool', stopFailure(null));
+    expect(markerFiles()).toEqual([]);
+  });
+
+  it('falls back to the current time WITH milliseconds when the transcript cannot say', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop-failure', '{"session_id":"ses_1","hook_event_name":"StopFailure","error_type":"rate_limit","transcript_path":"/nope/missing.jsonl"}');
+    const at = markers()[0]!.at as string;
+    expect(at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    expect(new Date(at).getTime()).toBeGreaterThan(Date.now() - 60_000);
+  });
+});
+
+/* ================= PRESENCE AND STATUS WHILE BLOCKED ======================== *
+ * The half of the bug that made the whole feature cosmetic: the blocked note
+ * went up, and then the very next hook took it straight back down. A
+ * UserPromptSubmit posted `working` + a 300s presence heartbeat, PostToolUse
+ * refreshed presence, and the quota-DISABLED notification refreshed it too — so
+ * a session that could not run a single turn advertised itself as online and
+ * working, which is exactly the state this feature exists to end. The CLI's
+ * presence clear is one-shot per standby, so it cannot undo any of that.
+ *
+ * The rule now: while a marker stands, nothing claims otherwise. No presence, no
+ * status write, from any mode except the one recording the block and the
+ * notifications that clear it. The directory is re-read immediately before any
+ * write, so a hook that overlapped the StopFailure cannot undo it either.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — silence while blocked', () => {
+  const marker = (): string =>
+    writeMarker('20260917T180000-1.json', { at: '2026-09-17T18:00:00.900Z', prompt: 'pr_1' });
+
+  it('a prompt says its line and writes NOTHING to the server', () => {
+    writeLoopState('engaged');
+    marker();
+    stubCurl();
+    const r = runHook('prompt', '{"prompt":"hi"}');
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('hit its usage limit');
+    expect(presencePosts()).toEqual([]);
+    expect(statusPosts()).toEqual([]);
+  });
+
+  it('a PostToolUse with no evidence stays silent too', () => {
+    writeLoopState('engaged');
+    marker();
+    writeTranscriptRaw([{ type: 'assistant', iso: '2026-09-17T17:59:00.000Z' }]);
+    stubCurl();
+    runHook('post-tool', stopFailure(null));
+    expect(markerFiles()).toHaveLength(1);
+    expect(presencePosts()).toEqual([]);
+    expect(statusPosts()).toEqual([]);
+  });
+
+  it('a PostToolUse WITH evidence clears the marker and then works normally', () => {
+    writeLoopState('engaged');
+    marker();
+    fs.writeFileSync(path.join(stateDir, 'auto-status-idle'), ''); // resume handshake
+    writeTranscriptRaw([{ type: 'assistant', iso: '2026-09-17T18:00:01.000Z' }]);
+    stubCurl();
+    runHook('post-tool', stopFailure(null));
+    expect(markerFiles()).toEqual([]);
+    expect(presencePosts().length).toBeGreaterThan(0);
+    expect(statusPosts()[0]!.body).toContain('"state":"working"');
+  });
+
+  it('the quota-disabled notification updates the note and nothing else', () => {
+    writeLoopState('engaged');
+    marker();
+    stubCurl();
+    runHook('notification', notify('quota_auto_resume_disabled'));
+    expect(presencePosts()).toEqual([]);
+    expect(statusPosts()[0]!.body).toContain('auto-resume is off, needs a human to continue');
+  });
+
+  it('an input-needed or idle notification is a no-op while blocked', () => {
+    for (const type of ['permission_prompt', 'idle_prompt']) {
+      fs.rmSync(curlLog, { force: true });
+      writeLoopState('engaged');
+      marker();
+      stubCurl();
+      runHook('notification', notify(type));
+      expect(presencePosts()).toEqual([]);
+      expect(statusPosts()).toEqual([]);
+    }
+  });
+
+  it('a stop does not paint the blocked agent idle', () => {
+    writeLoopState('engaged');
+    marker();
+    stubCurl();
+    runHook('stop', '{"hook_event_name":"Stop"}');
+    expect(statusPosts()).toEqual([]);
+    expect(presencePosts()).toEqual([]);
+  });
+
+  it('the StopFailure note itself claims no presence', () => {
+    // Recording the block must not re-green a session the CLI has just taken
+    // off presence for its standby.
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop-failure', stopFailure('rate_limit'));
+    expect(statusPosts().length).toBeGreaterThan(0);
+    expect(presencePosts()).toEqual([]);
+  });
+
+  it('a marker written between the StopFailure and a later hook still silences it', () => {
+    // The overlap case: the gate re-reads the directory immediately before any
+    // write, so a hook that started before the block landed still sees it.
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop-failure', stopFailure('rate_limit'));
+    fs.rmSync(curlLog, { force: true });
+    stubCurl();
+    runHook('prompt', '{"prompt":"hi"}');
+    expect(presencePosts()).toEqual([]);
+    expect(statusPosts()).toEqual([]);
   });
 });

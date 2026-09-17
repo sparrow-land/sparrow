@@ -44,7 +44,11 @@ versions that release shipped with.
   died on the limit, so the agent read as ONLINE and the server's owner
   watchdog (which needs "no open stream and unread work") could never fire:
   the listener's own health hid the outage. Standby consumes nothing, queues no
-  Codex wake and makes no network calls; waiting work is still waiting when the
+  Codex wake and makes no network calls. A marker that appears WHILE a queue
+  lookup is in flight is honoured too: every path from a lookup to a wake, a
+  Codex turn or an exit 0 re-reads the marker first and drops the answer, since
+  stopping the reconcile poll cancels only future ticks and never a request
+  already in the air. Waiting work is still waiting when the
   marker goes, and resuming asks the queue immediately — a stream reopened
   without a cursor cannot replay what arrived while the listener was away, so
   waiting for the next reconcile poll (or, with `--poll-seconds 0`, for the next

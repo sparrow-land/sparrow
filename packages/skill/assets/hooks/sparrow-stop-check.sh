@@ -89,6 +89,7 @@ passive_await=""
 dead_word=""
 dead_signal=""
 gone_pid=""
+standby_pid=""
 # BOTH runtimes now re-arm the same way: plain, unbounded `sparrow await`. The
 # CLI owns its own liveness (stale-stream detection, periodic re-establish,
 # resuming reconnects), so nothing here hands back a bounded command whose only
@@ -221,6 +222,17 @@ json_nonce() {
 
 owner_pid() { [ -r "$STATE_DIR/await-owner.json" ] && json_pid "$STATE_DIR/await-owner.json"; }
 
+# Does a usage-limit marker still stand? (One file per block, written by the
+# auto-status StopFailure hook; cleared on evidence, by Claude Code's resume
+# notification, or by `sparrow skill unblock`.)
+blocked_marker_exists() {
+  [ -d "$STATE_DIR/blocked" ] || return 1
+  for _bm in "$STATE_DIR"/blocked/*.json; do
+    [ -f "$_bm" ] && return 0
+  done
+  return 1
+}
+
 # Is a listener currently ARMING? (live + fresh + a generation that has not
 # published yet). Answers with an exit status; prints nothing.
 listener_arming() {
@@ -282,7 +294,8 @@ mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 # otherwise wave through a replacement that comes up as a PASSIVE plain `await`.)
 #
 #   alive        fresh wake path whose process exists (or nobody claims one)
-#   blocked      standing by on a usage limit: it cannot run, so let it stop
+#   blocked      standing by on a usage limit, with a marker and a live listener
+#   standby-gone standing by, but the listener process behind it is gone
 #   unjudgeable  fresh heartbeat we cannot read (legacy, third-party, superseded)
 #   dead         a killed:/stopped: stamp from the live generation
 #   passive      fresh plain `await` under Codex: no verified queue bridge
@@ -293,7 +306,7 @@ mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 cls=""
 arming_pid=""
 classify() {
-  cls=""; dead_word=""; dead_signal=""; hold_kind=""; passive_await=""; gone_pid=""; arming_pid=""
+  cls=""; dead_word=""; dead_signal=""; hold_kind=""; passive_await=""; gone_pid=""; arming_pid=""; standby_pid=""
   now=$(date +%s 2>/dev/null || echo 0)
 
   [ -f "$HEARTBEAT_FILE" ] || { cls="drift"; return 0; }
@@ -301,12 +314,30 @@ classify() {
 
   # STANDING BY ON A USAGE LIMIT. The CLI closes the stream and stamps `blocked`
   # / `blocked:<reason>` when this session cannot run at all. Blocking the stop
-  # would help nobody: the agent cannot take a turn, so it cannot re-arm
-  # anything, and the nudge would be wrong in the details too (the listener is
-  # fine; the account is out of quota). Fresh or stale, allow — the usage-limit
-  # status and the prompt-time line carry that story instead.
+  # would help nobody THEN: the agent cannot take a turn, so it cannot re-arm
+  # anything, and the nudge would be wrong in its details (the listener is fine;
+  # the account is out of quota).
+  #
+  # But the WORD ALONE PROVES NOTHING, and freshness cannot help here: a standing
+  # by listener heartbeats only on transitions, so its stamp is ancient by
+  # design. A `blocked:rate_limit` stamp dated years ago, with the block long
+  # since cleared and the listener long since killed, would otherwise disable
+  # this hook forever. So a blocked stamp allows only on two live facts:
+  #   * a usage-limit MARKER still stands (else the standby is over -- the
+  #     listener should have resumed and re-stamped `await` within a cadence, so
+  #     this is ordinary drift, and nothing here says anything was killed); and
+  #   * the recorded listener process is demonstrably ALIVE (unknown counts as
+  #     alive, exactly as in the gone check -- EPERM means it exists).
   case "$content" in
-    blocked | blocked:*) cls="blocked"; return 0 ;;
+    blocked | blocked:*)
+      blocked_marker_exists || { cls="drift"; return 0; }
+      _bpid=$(owner_pid)
+      if [ -n "${_bpid:-}" ] && [ "$_bpid" -gt 0 ] 2>/dev/null && pid_absent "$_bpid"; then
+        cls="standby-gone"; standby_pid="$_bpid"; return 0
+      fi
+      cls="blocked"
+      return 0
+      ;;
   esac
 
   # A TERMINAL stamp is not subject to the freshness window: the listener told us
@@ -427,7 +458,9 @@ suffix=""
 if [ -n "$unread" ] && [ "$unread" -gt 0 ] 2>/dev/null; then
   suffix=" (+ $unread unread)"
 fi
-if [ -n "$gone_pid" ]; then
+if [ -n "$standby_pid" ]; then
+  reason="Sparrow loop is engaged and this session is standing by on a usage limit, but the standing-by listener (pid $standby_pid) is gone${suffix} -- re-arm it: run $await_command as a tracked background task, then drain with $pop_command when work wakes you; it will stand by again until the limit clears. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+elif [ -n "$gone_pid" ]; then
   reason="Sparrow loop is engaged, but the recorded listener process (pid $gone_pid) is no longer running although its heartbeat is still fresh${suffix}. Await normally exits when work arrives; re-arm it before ending this turn: run $await_command as a tracked background task, then drain with $pop_command. If a freshly armed listener keeps disappearing at once, whatever started it is probably being torn down with the command (a sandboxed shell); run it where it outlives the command. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 elif [ -n "$dead_word" ]; then
   if [ "$dead_word" = killed ]; then
