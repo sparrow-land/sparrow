@@ -85,7 +85,10 @@
 #     clear a marker whose own session is still limited. `sparrow skill unblock`
 #     is the operator recovery when the limited session is closed.
 #   * `quota_auto_resume_fired` is the one unconditional clear -- Claude Code is
-#     telling us it resumed the work itself -- and it clears from a SNAPSHOT too.
+#     telling us it resumed the work itself -- and it clears from a SNAPSHOT too,
+#     so a block recorded while it ran survives it. When one does, the recovery
+#     side effects are skipped as well: no presence, no `working`, and the
+#     surviving marker's note stands.
 #     `quota_auto_resume_stale` (it waited too long; a human must press Enter)
 #     and `quota_auto_resume_disabled` (auto-resume is off) both mean the agent
 #     still cannot run: markers stand, only the note changes. NAMED RESIDUAL, not a guarantee: a notification delivered
@@ -231,9 +234,23 @@ write_blocked_marker() {
   mv -f "$_tmp" "$_file" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
 }
 
-# NOW, with milliseconds -- the precision the transcript uses. GNU date first,
-# then node, and only as a last resort whole seconds (a clock that cannot express
-# ms is better than no timestamp; the comparison still works, it is just coarse).
+# THE MARKER BOUNDARY: now, with MILLISECONDS -- the precision the transcript
+# uses. The original bug was truncation, not the source of time: a whole-second
+# marker (18:00:00Z) lost to a success at 18:00:00.100Z that happened BEFORE the
+# 18:00:00.900Z error, so a delayed PostToolUse cleared a live marker.
+#
+# Wall clock, deliberately, NOT a timestamp read out of the transcript: nothing
+# ties the last error entry there to THIS StopFailure, so a transcript still
+# holding yesterday's episode (this turn's entry not yet flushed) would date the
+# marker yesterday, and yesterday's success would clear it at once. Reading the
+# clock here is conservative by construction -- every entry already in the file
+# was written on this machine before this hook ran, so any pre-existing success
+# is strictly older than the boundary.
+#
+# GNU date first, then node, and only as a last resort whole seconds: on a system
+# with neither, the boundary degrades to second precision and a success recorded
+# inside the same second as the failure can clear the marker one turn early. The
+# next failed turn re-writes it.
 now_iso_ms() {
   _t=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || echo "")
   case "$_t" in
@@ -245,30 +262,6 @@ now_iso_ms() {
     [ -n "$_t" ] && { printf '%s' "$_t"; return 0; }
   fi
   date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true
-}
-
-# THE MARKER'S BOUNDARY COMES OUT OF THE TRANSCRIPT. Clearing compares a marker's
-# `at` against transcript timestamps, so both must come off the SAME CLOCK: a
-# marker stamped from `date` at whole seconds (18:00:00Z) loses to a success at
-# 18:00:00.100Z that actually happened BEFORE the 18:00:00.900Z error, and a
-# delayed PostToolUse from that older prompt would delete a live marker. So `at`
-# is the timestamp of the LAST API-ERROR entry -- the very entry that means this
-# turn failed -- read from the same file, in the same precision.
-transcript_last_error_at() {
-  _tp="$1"
-  [ -n "$_tp" ] && [ -r "$_tp" ] || return 0
-  command -v node >/dev/null 2>&1 || return 0
-  tail -n 200 "$_tp" 2>/dev/null | node -e '
-    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
-      let last = "";
-      for (const line of s.split("\n")) {
-        if (!line.trim()) continue;
-        let j; try { j = JSON.parse(line); } catch (e) { continue; }
-        if (!j || j.isApiErrorMessage !== true) continue;
-        if (typeof j.timestamp === "string" && !Number.isNaN(Date.parse(j.timestamp))) last = j.timestamp;
-      }
-      if (last) process.stdout.write(last);
-    });' 2>/dev/null || true
 }
 
 # Does the session transcript PROVE a successful assistant turn after <iso>?
@@ -463,8 +456,7 @@ case "$MODE" in
       # Retried by Claude Code, or our own bug: say nothing at all.
       *) exit 0 ;;
     esac
-    at=$(transcript_last_error_at "$(payload_value transcript_path)")
-    [ -n "$at" ] || at=$(now_iso_ms)
+    at=$(now_iso_ms)
     resumes=$(payload_value resets_at)
     [ -n "$resumes" ] || resumes=$(payload_value resumes_at)
     [ -n "$resumes" ] || resumes=$(payload_value resetsAt)
@@ -618,8 +610,18 @@ case "$MODE" in
   stop-failure) ;;
   notification)
     case "$ntype" in
-      quota_auto_resume_fired | quota_auto_resume_stale | quota_auto_resume_disabled) ;;
-      *) [ -n "$(blocked_markers | head -n 1)" ] && exit 0 ;;
+      quota_auto_resume_stale | quota_auto_resume_disabled)
+        # These SAY the agent is still blocked, so they only make sense while a
+        # marker stands. If the block cleared meanwhile, say nothing at all.
+        [ -n "$(blocked_markers | head -n 1)" ] || exit 0
+        ;;
+      *)
+        # `quota_auto_resume_fired` included, deliberately: its clear works from
+        # a snapshot, so a marker written while it ran SURVIVES -- and that
+        # marker is a live block that its `working` + presence would contradict.
+        # Re-read, and let the survivor's note stand.
+        [ -n "$(blocked_markers | head -n 1)" ] && exit 0
+        ;;
     esac
     ;;
   *) [ -n "$(blocked_markers | head -n 1)" ] && exit 0 ;;

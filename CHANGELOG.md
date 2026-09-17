@@ -48,7 +48,12 @@ versions that release shipped with.
   lookup is in flight is honoured too: every path from a lookup to a wake, a
   Codex turn or an exit 0 re-reads the marker first and drops the answer, since
   stopping the reconcile poll cancels only future ticks and never a request
-  already in the air. Waiting work is still waiting when the
+  already in the air. The same holds for the HANDOFF itself: a wake is the turn
+  the line starts (the queued Codex bridge, or — under Claude Code — this
+  process exiting), so a marker that lands between printing the line and
+  completing the handoff means the listener stands by instead of exiting 0, and
+  finishes the handoff when the limit lifts. A suppressed bridge is never
+  reported as a successful wake. Waiting work is still waiting when the
   marker goes, and resuming asks the queue immediately — a stream reopened
   without a cursor cannot replay what arrived while the listener was away, so
   waiting for the next reconcile poll (or, with `--poll-seconds 0`, for the next

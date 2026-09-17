@@ -978,11 +978,34 @@ describe('sparrow-stop-check.sh', () => {
       expect(runHook().stdout.trim()).toBe('');
     });
 
-    it('allows when no owner record names a pid at all (unknown is not absent)', () => {
+    /**
+     * A standby with NO recorded listener is not a standby — it is a marker and
+     * a word, with nothing holding the stream. "Unknown counts as alive" applies
+     * to a pid we are not allowed to signal, never to a pid nobody wrote down.
+     */
+    it('BLOCKS when there is no owner record at all (the reviewer case)', () => {
       writeLoopState('engaged');
       writeHeartbeat(500, 'blocked:rate_limit');
       marker();
-      expect(runHook().stdout.trim()).toBe('');
+      const json = JSON.parse(runHook().stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('standing by on a usage limit');
+      expect(json.reason).toContain('no standing-by listener is recorded');
+      expect(json.reason).toContain(`run ${awaitCommand()} as a tracked background task`);
+      expect(json.reason).toContain('stand by again until the limit clears');
+    });
+
+    it('BLOCKS when the owner record has a non-numeric pid', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(500, 'blocked:rate_limit');
+      marker();
+      fs.writeFileSync(
+        path.join(stateDir, 'await-owner.json'),
+        JSON.stringify({ version: 1, nonce: 'f00d', pid: 'x', kind: 'await' }),
+      );
+      const json = JSON.parse(runHook().stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('no standing-by listener is recorded');
     });
 
     /**

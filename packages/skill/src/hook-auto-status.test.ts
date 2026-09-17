@@ -3,7 +3,7 @@
  * real POSIX `sh` in an isolated HOME/state dir with a stub `curl` on PATH that
  * RECORDS every request (method + url + body) and answers `GET /me/rooms`.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -977,6 +977,59 @@ describe('sparrow-auto-status.sh — quota auto-resume notifications', () => {
     });
   }
 
+  /**
+   * A marker recorded WHILE the clear runs survives it (unique names, snapshot
+   * delete) — and then it contradicts the `working` + presence the recovery
+   * would post. So the fired branch re-reads the directory before writing
+   * anything, and stays silent while any block stands.
+   *
+   * The injection is deterministic rather than timed: a spinning writer waits
+   * for the old marker to disappear — which can only happen after the snapshot
+   * was taken — and writes the new one right then.
+   */
+  it('posts nothing when a NEW marker survives its snapshot clear', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const old = writeMarker('20260917T000900-11.json', { at: new Date().toISOString() });
+    const fresh = path.join(BLOCKED_DIR(), '20260917T001000-12.json');
+    const body = JSON.stringify({ version: 1, reason: 'rate_limit', at: new Date().toISOString() });
+    const writer = spawn(
+      'sh',
+      ['-c', `while [ -f '${old}' ]; do :; done; printf '%s' '${body}' > '${fresh}'`],
+      { stdio: 'ignore', detached: true },
+    );
+    writer.unref();
+    // No env creds: the credential lookup spawns node between the clear and the
+    // gate, so the injected marker is comfortably inside the window.
+    const xdg = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-as-xdg-r-'));
+    fs.mkdirSync(path.join(xdg, 'sparrow'), { recursive: true });
+    fs.writeFileSync(
+      path.join(xdg, 'sparrow', 'credentials.json'),
+      JSON.stringify({ profiles: { a: { server: 'https://example.test', token: 'agk_a' } }, defaultProfile: 'a' }),
+    );
+    runHook('notification', notify('quota_auto_resume_fired'), {
+      SPARROW_SERVER: '',
+      SPARROW_TOKEN: '',
+      XDG_CONFIG_HOME: xdg,
+    });
+    expect(fs.existsSync(old)).toBe(false); // the snapshot's marker is gone
+    expect(fs.existsSync(fresh)).toBe(true); // the newcomer survived
+    expect(presencePosts()).toEqual([]);
+    expect(statusPosts()).toEqual([]);
+    fs.rmSync(xdg, { recursive: true, force: true });
+  });
+
+  it('says nothing at all when _stale or _disabled arrive with no block standing', () => {
+    for (const type of ['quota_auto_resume_stale', 'quota_auto_resume_disabled']) {
+      fs.rmSync(curlLog, { force: true });
+      writeLoopState('engaged');
+      stubCurl();
+      runHook('notification', notify(type));
+      expect(statusPosts()).toEqual([]);
+      expect(presencePosts()).toEqual([]);
+    }
+  });
+
   it('names the quota type in the note when the payload carries one', () => {
     writeLoopState('engaged');
     stubCurl();
@@ -1119,35 +1172,37 @@ describe('sparrow-auto-status.sh — debug capture', () => {
   });
 });
 
-/* ===================== ORDERING PRECISION (review, f9a6ebb) ================= *
- * The clearing rule compares a marker's `at` against transcript timestamps, so
- * the two have to come off the SAME CLOCK. A marker stamped from `date` at whole
- * seconds (18:00:00Z) against a transcript in milliseconds loses: a success at
- * 18:00:00.100Z — which happened BEFORE the 18:00:00.900Z rate-limit error —
- * reads as later than the marker, and a delayed PostToolUse from that older
- * prompt deletes a marker that is still live.
+/* ===================== THE MARKER BOUNDARY (review) ========================= *
+ * Clearing compares a marker's `at` against transcript timestamps, so the two
+ * must be comparable at full precision. The original bug was TRUNCATION: a
+ * marker stamped at whole seconds (18:00:00Z) lost to a success at
+ * 18:00:00.100Z that actually happened BEFORE the 18:00:00.900Z error, and a
+ * delayed PostToolUse from that older prompt deleted a live marker.
  *
- * So the boundary is taken from the transcript itself: `at` is the timestamp of
- * the LAST API-error entry, the very entry that means "this turn failed". Same
- * file, same clock, same precision as the evidence that will be weighed against
- * it. Only when the transcript cannot supply one do we fall back to the current
- * time — and then with milliseconds.
+ * The fix is millisecond precision, NOT a different clock. Reading the boundary
+ * out of the transcript looked tempting and is worse: nothing ties the last
+ * error entry there to THIS StopFailure, so a transcript still holding
+ * yesterday's error (this turn's entry not yet flushed) would date the marker
+ * yesterday — and yesterday's success would then clear it immediately.
+ *
+ * Wall-clock at StopFailure time is conservative by construction: every entry
+ * already in the transcript was written on this machine before this hook ran, so
+ * any pre-existing success is strictly older than the boundary.
  * ========================================================================== */
 describe('sparrow-auto-status.sh — where the marker boundary comes from', () => {
   const base = '2026-09-17T18:00:00';
 
-  it("takes `at` from the transcript's last API-error entry", () => {
+  it('stamps `at` from the wall clock, with milliseconds', () => {
     writeLoopState('engaged');
     stubCurl();
-    writeTranscriptRaw([
-      { type: 'assistant', iso: `${base}.100Z` },
-      { type: 'assistant', iso: `${base}.900Z`, apiError: true },
-    ]);
     runHook('stop-failure', stopFailure('rate_limit'));
-    expect(markers()[0]!.at).toBe(`${base}.900Z`);
+    const at = markers()[0]!.at as string;
+    expect(at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    expect(new Date(at).getTime()).toBeGreaterThan(Date.now() - 60_000);
+    expect(new Date(at).getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
   });
 
-  it("does NOT let the older success clear it (the reviewer's repro)", () => {
+  it("does NOT let an earlier success clear it (the .100/.900 repro)", () => {
     writeLoopState('engaged');
     stubCurl();
     writeTranscriptRaw([
@@ -1155,36 +1210,52 @@ describe('sparrow-auto-status.sh — where the marker boundary comes from', () =
       { type: 'assistant', iso: `${base}.900Z`, apiError: true },
     ]);
     runHook('stop-failure', stopFailure('rate_limit'));
-    expect(markerFiles()).toHaveLength(1);
-    // A PostToolUse delayed out of the older prompt, reading the same transcript.
-    runHook('post-tool', stopFailure(null));
+    expect(new Date(markers()[0]!.at as string).getTime()).toBeGreaterThan(Date.parse(`${base}.900Z`));
+    runHook('post-tool', stopFailure(null)); // delayed, from the older prompt
     expect(markerFiles()).toHaveLength(1);
   });
 
-  it('clears once a success lands AFTER the failure, by milliseconds', () => {
+  it('clears once a success lands after the boundary, by milliseconds', () => {
     writeLoopState('engaged');
     stubCurl();
-    writeTranscriptRaw([
-      { type: 'assistant', iso: `${base}.100Z` },
-      { type: 'assistant', iso: `${base}.900Z`, apiError: true },
-    ]);
     runHook('stop-failure', stopFailure('rate_limit'));
+    const at = Date.parse(markers()[0]!.at as string);
     writeTranscriptRaw([
-      { type: 'assistant', iso: `${base}.100Z` },
-      { type: 'assistant', iso: `${base}.900Z`, apiError: true },
-      { type: 'assistant', iso: `${base}.950Z` },
+      { type: 'assistant', iso: new Date(at - 50).toISOString() },
+      { type: 'assistant', iso: new Date(at + 50).toISOString() },
     ]);
     runHook('post-tool', stopFailure(null));
     expect(markerFiles()).toEqual([]);
   });
 
-  it('falls back to the current time WITH milliseconds when the transcript cannot say', () => {
+  /**
+   * THE REVIEWER'S CASE. The transcript still holds only YESTERDAY's episode —
+   * this turn's error entry has not landed yet. A boundary read from the file
+   * would be dated yesterday, and yesterday's success would clear the marker on
+   * the very next tool call.
+   */
+  it("ignores the transcript's own history: yesterday cannot clear today", () => {
     writeLoopState('engaged');
     stubCurl();
-    runHook('stop-failure', '{"session_id":"ses_1","hook_event_name":"StopFailure","error_type":"rate_limit","transcript_path":"/nope/missing.jsonl"}');
-    const at = markers()[0]!.at as string;
-    expect(at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
-    expect(new Date(at).getTime()).toBeGreaterThan(Date.now() - 60_000);
+    const yesterday = Date.now() - 24 * 3600_000;
+    writeTranscriptRaw([
+      { type: 'assistant', iso: new Date(yesterday).toISOString(), apiError: true },
+      { type: 'assistant', iso: new Date(yesterday + 60_000).toISOString() },
+    ]);
+    runHook('stop-failure', stopFailure('rate_limit'));
+    expect(new Date(markers()[0]!.at as string).getTime()).toBeGreaterThan(Date.now() - 60_000);
+    runHook('post-tool', stopFailure(null));
+    expect(markerFiles()).toHaveLength(1);
+  });
+
+  it('stamps a boundary even with no transcript at all', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook(
+      'stop-failure',
+      '{"session_id":"ses_1","hook_event_name":"StopFailure","error_type":"rate_limit","transcript_path":"/nope/missing.jsonl"}',
+    );
+    expect(markers()[0]!.at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
   });
 });
 

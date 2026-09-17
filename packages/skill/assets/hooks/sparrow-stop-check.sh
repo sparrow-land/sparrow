@@ -326,13 +326,19 @@ classify() {
   #   * a usage-limit MARKER still stands (else the standby is over -- the
   #     listener should have resumed and re-stamped `await` within a cadence, so
   #     this is ordinary drift, and nothing here says anything was killed); and
-  #   * the recorded listener process is demonstrably ALIVE (unknown counts as
-  #     alive, exactly as in the gone check -- EPERM means it exists).
+  #   * the owner record names a VALID numeric pid, and that process is
+  #     demonstrably ALIVE. "Unknown counts as alive" applies to a pid we are not
+  #     allowed to signal (EPERM means it exists) -- never to a pid nobody wrote
+  #     down: a standby with no recorded listener is a marker and a word, with
+  #     nothing holding the stream.
   case "$content" in
     blocked | blocked:*)
       blocked_marker_exists || { cls="drift"; return 0; }
       _bpid=$(owner_pid)
-      if [ -n "${_bpid:-}" ] && [ "$_bpid" -gt 0 ] 2>/dev/null && pid_absent "$_bpid"; then
+      if [ -z "${_bpid:-}" ] || ! [ "$_bpid" -gt 0 ] 2>/dev/null; then
+        cls="standby-gone"; standby_pid=""; return 0
+      fi
+      if pid_absent "$_bpid"; then
         cls="standby-gone"; standby_pid="$_bpid"; return 0
       fi
       cls="blocked"
@@ -458,8 +464,13 @@ suffix=""
 if [ -n "$unread" ] && [ "$unread" -gt 0 ] 2>/dev/null; then
   suffix=" (+ $unread unread)"
 fi
-if [ -n "$standby_pid" ]; then
-  reason="Sparrow loop is engaged and this session is standing by on a usage limit, but the standing-by listener (pid $standby_pid) is gone${suffix} -- re-arm it: run $await_command as a tracked background task, then drain with $pop_command when work wakes you; it will stand by again until the limit clears. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
+if [ "$cls" = standby-gone ]; then
+  if [ -n "$standby_pid" ]; then
+    standby_what="the standing-by listener (pid $standby_pid) is gone"
+  else
+    standby_what="no standing-by listener is recorded"
+  fi
+  reason="Sparrow loop is engaged and this session is standing by on a usage limit, but $standby_what${suffix} -- re-arm it: run $await_command as a tracked background task, then drain with $pop_command when work wakes you; it will stand by again until the limit clears. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 elif [ -n "$gone_pid" ]; then
   reason="Sparrow loop is engaged, but the recorded listener process (pid $gone_pid) is no longer running although its heartbeat is still fresh${suffix}. Await normally exits when work arrives; re-arm it before ending this turn: run $await_command as a tracked background task, then drain with $pop_command. If a freshly armed listener keeps disappearing at once, whatever started it is probably being torn down with the command (a sandboxed shell); run it where it outlives the command. To step away on purpose run 'sparrow skill pause' (or 'sparrow-skill pause')."
 elif [ -n "$dead_word" ]; then

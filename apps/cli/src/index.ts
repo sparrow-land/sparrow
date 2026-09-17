@@ -139,7 +139,7 @@ import {
   type AwaitGeneration,
 } from './await-owner.js';
 import { writeAwaitFailure } from './await-failure.js';
-import { readBlocked } from './await-blocked.js';
+import { readBlocked, type BlockedRecord } from './await-blocked.js';
 import {
   recordSkillInstall,
   forgetSkillInstall,
@@ -4440,11 +4440,14 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       return false;
     };
 
-    const queueCodexWake = async (reason: 'work' | 'gap' | 'upgrade'): Promise<void> => {
-      if (!codexThread || readLoopState(env) === 'paused' || !owned()) return;
+    const queueCodexWake = async (reason: 'work' | 'gap' | 'upgrade'): Promise<'done' | 'blocked'> => {
+      if (!codexThread || readLoopState(env) === 'paused' || !owned()) return 'done';
       // RECHECK POINT 4 — the last gate in front of the bridge itself, so no
       // path anywhere can queue a turn into a session that cannot take one.
-      if (blockedSinceAsking()) return;
+      // REPORTED, not swallowed: a caller that has already printed the wake line
+      // must learn that no turn is coming, or it exits 0 on a handoff that never
+      // happened and leaves nobody listening.
+      if (blockedSinceAsking()) return 'blocked';
       try {
         await queueCodexAwaitWake(codexThread, env, io, reason, listenerScope(opts, env));
       } catch (e) {
@@ -4454,7 +4457,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         // "no turn was queued" diagnostic is stale news — the successor queues
         // for whatever is still waiting. (The stamp is generation-tagged too,
         // so even a stamp written inside that window is discarded by readers.)
-        if (!owned()) return;
+        if (!owned()) return 'done';
         markHeartbeatDead(env, 'killed', 'CODEX_QUEUE', generation.nonce());
         // The stderr line below is about to scroll into a shell nobody will read
         // again — the turn that armed this listener is over. Leave the same
@@ -4478,7 +4481,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
          * by `owned()` above: a superseded listener says nothing about the
          * successor's state dir, and changes no exit code on its behalf. */
         ctx.exitCode = 1;
+        return 'done'; // the failure is reported; the block did not cause it
       }
+      return 'done';
     };
 
     /* ------------------------- wake granularity -------------------------
@@ -4685,6 +4690,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       () => (generation.published() && owned() ? generation.nonce() : false),
     );
     let timedOut = false;
+    /** The wall-clock deadline `--timeout` names, for waits the timer cannot reach. */
+    const handoffDeadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : undefined;
     /* ARMED BEFORE THE FIRST NETWORK CALL, not just around the stream: standby
      * can begin before this listener has asked the queue anything, and a
      * `--timeout` that only covered the streaming phase would never fire there —
@@ -4785,18 +4792,96 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      * otherwise holds until the marker is gone, the timeout fires, or this
      * listener is superseded.
      */
+    /** Go quiet: one stamp, one presence drop, one line — however we got here. */
+    const enterStandby = async (blocked: BlockedRecord): Promise<void> => {
+      if (standingBy) return;
+      standingBy = true;
+      /* PUBLISH-LATE, THE THIRD EXCEPTION. A standing-by listener owns the
+       * state dir exactly as a streaming one does — it is this agent's wake
+       * path, merely a declared-deaf one — and the stamp below is only
+       * judgeable when it names a generation. (The other two: holding the
+       * stream, and the preflight hand-off.) */
+      generation.publish();
+      if (!owned()) return; // superseded mid-publish: the caller exits 4
+      stopPoll(); // standby is a LOCAL poll of one directory: no network
+      markHeartbeatBlocked(env, blocked.reason, generation.nonce());
+      await dropPresenceMark();
+      const at = new Date(blocked.at);
+      const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+      io.err(
+        `[await] standing by: this session hit its usage limit (${blocked.reason}) at ${hhmm}; ` +
+          'the stream is closed until Claude Code resumes\n',
+      );
+    };
+
+    /** Come back: the ordinary claim, the poll, and one line. */
+    const leaveStandby = (): void => {
+      if (!standingBy) return;
+      standingBy = false;
+      // Back to an ordinary listener claim: the stamp is how the hooks learn
+      // the wake path is live again.
+      if (owned()) touchHeartbeat(env, awaitHeartbeatKind, true, generation.nonce());
+      presenceCleared = false; // a fresh block would drop the mark again
+      restartPoll(); // …and the reconcile poll comes back with us
+      io.err('[await] resuming: usage limit cleared\n');
+    };
+
+    /* ======================== THE HANDOFF RULE ========================
+     * A wake is not the line on stdout — it is the TURN that line starts. For
+     * Codex that turn is the queued bridge; under Claude Code it is this
+     * process EXITING, which is what re-invokes the agent. Either way, a marker
+     * that lands between printing the line and completing the handoff means the
+     * turn would die on the limit — so this process must not treat the wake as
+     * delivered, and above all must not exit 0 and leave nobody listening.
+     *
+     * Instead it stands by, still holding the item (unread, in the queue), and
+     * finishes the handoff when the limit lifts. The printed line is harmless
+     * until then: nothing has acted on it, because nothing runs until we exit.
+     * ================================================================== */
+
+    /** Cover the turn and ring the bridge. False = a block got in first. */
+    const completeHandoff = async (reason: 'work' | 'gap'): Promise<boolean> => {
+      if (blockedSinceAsking()) return false;
+      await markTurn();
+      // The presence POST is a round trip of its own, and under Claude Code the
+      // bridge below is a no-op — so this is the check that catches a marker
+      // written while the turn mark was being planted.
+      if (blockedSinceAsking()) return false;
+      return (await queueCodexWake(reason)) !== 'blocked';
+    };
+
+    /**
+     * The wake line is out and the handoff could not complete. Stand by until
+     * the limit lifts, then finish it. True = handed off (exit 0); false = the
+     * wait ended another way, and the caller reports that instead.
+     */
+    const handoffAfterBlock = async (reason: 'work' | 'gap'): Promise<boolean> => {
+      for (;;) {
+        if (!owned()) return false; // superseded: exit 4, never a bare 0
+        const blocked = readBlocked(env);
+        if (blocked === undefined) {
+          leaveStandby();
+          if (await completeHandoff(reason)) return true;
+          continue; // a second marker raced in — back to standing by
+        }
+        await enterStandby(blocked);
+        if (!owned()) return false;
+        // The listener's own deadline still applies: exit 2 with the item
+        // unread is a re-arm, and the next listener finds it exactly as it is.
+        if (handoffDeadline !== undefined && Date.now() >= handoffDeadline) {
+          timedOut = true;
+          return false;
+        }
+        await sleep(blockedPollMs);
+      }
+    };
+
     const standbyGate = async (): Promise<void> => {
       for (;;) {
         const blocked = readBlocked(env);
         if (blocked === undefined) {
           if (standingBy) {
-            standingBy = false;
-            // Back to an ordinary listener claim: the stamp is how the hooks
-            // learn the wake path is live again.
-            if (owned()) touchHeartbeat(env, awaitHeartbeatKind, true, generation.nonce());
-            presenceCleared = false; // a fresh block would drop the mark again
-            restartPoll(); // …and the reconcile poll comes back with us
-            io.err('[await] resuming: usage limit cleared\n');
+            leaveStandby();
             // Whatever arrived while we were away is waiting NOW, not at the
             // next poll tick: the reopened stream cannot replay what it has no
             // cursor for. Wakes (and exits 0) when it finds work.
@@ -4804,25 +4889,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           }
           return;
         }
-        if (!standingBy) {
-          standingBy = true;
-          /* PUBLISH-LATE, THE THIRD EXCEPTION. A standing-by listener owns the
-           * state dir exactly as a streaming one does — it is this agent's wake
-           * path, merely a declared-deaf one — and the stamp below is only
-           * judgeable when it names a generation. (The other two: holding the
-           * stream, and the preflight hand-off.) */
-          generation.publish();
-          if (!owned()) return; // superseded mid-publish: the caller exits 4
-          stopPoll(); // standby is a LOCAL poll of one directory: no network
-          markHeartbeatBlocked(env, blocked.reason, generation.nonce());
-          await dropPresenceMark();
-          const at = new Date(blocked.at);
-          const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
-          io.err(
-            `[await] standing by: this session hit its usage limit (${blocked.reason}) at ${hhmm}; ` +
-              'the stream is closed until Claude Code resumes\n',
-          );
-        }
+        await enterStandby(blocked);
         if (!owned()) return; // exit 4 — the successor is the wake path now
         await abortableNap(blockedPollMs);
         if (controller.signal.aborted) return; // --timeout (exit 2) or stand-down
@@ -4898,14 +4965,21 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         reportSuperseded(); // superseded in the instant between the two
         return;
       }
-      await markTurn();
-      await queueCodexWake('work');
+      // THE HANDOFF, not merely the line: exit 0 only once the turn is really
+      // coming (see completeHandoff).
+      if (await completeHandoff('work')) return;
+      if (await handoffAfterBlock('work')) return;
+      if (!owned()) {
+        reportSuperseded(); // exit 4 — never a 0 over a suppressed bridge
+        return;
+      }
+      ctx.exitCode = 2; // the deadline passed while standing by; the item waits
       return;
     }
     if (alreadyWaiting) firstDeferMs = alreadyWaiting.deferMs;
 
     let terminalError: unknown;
-    let upgradeWake: Promise<void> | undefined;
+    let upgradeWake: Promise<unknown> | undefined;
     const terminateForUpgrade = (e: unknown): boolean => {
       if (!isUpgradeRequired(e)) return false;
       // A 426 is a HAND-OFF, exactly like the preflight one: it queues a repair
@@ -5232,9 +5306,17 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       // The wake line is already on stdout; cover the turn it starts. Exit 0 —
       // UNLESS the Codex queue is refused, in which case `queueCodexWake` sets
       // exit 1: no turn was started for work that is still unread, and saying
-      // "handled" there is how a workspace goes quietly deaf.
-      await markTurn();
-      await queueCodexWake(emittedReason === 'replay.gap' ? 'gap' : 'work');
+      // "handled" there is how a workspace goes quietly deaf. A BLOCK is the
+      // other way the handoff can fail to happen, and it is recoverable: stand
+      // by, then finish it.
+      const reason = emittedReason === 'replay.gap' ? 'gap' : 'work';
+      if (await completeHandoff(reason)) return;
+      if (await handoffAfterBlock(reason)) return;
+      if (!owned()) {
+        reportSuperseded();
+        return;
+      }
+      ctx.exitCode = 2;
       return;
     }
     // Superseded (detected at a checkpoint, or right here before the timeout

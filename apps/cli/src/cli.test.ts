@@ -4207,6 +4207,10 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
       hold: boolean;
       /** Park inbox reads only from this one onward (1 = the first). */
       holdFrom: number;
+      /** While true, `POST /me/presence` is parked instead of forwarded. */
+      holdPresence: boolean;
+      /** How many presence posts are parked right now. */
+      presenceHeld: number;
       /** How many inbox reads have been seen in total. */
       seen: number;
       /** How many inbox reads are parked right now. */
@@ -4220,7 +4224,15 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     async function startHoldingProxy(): Promise<HoldingProxy> {
       const upstream = new URL(url);
       const sockets = new Set<Socket>();
-      const state = { hold: false, holdFrom: 1, seen: 0, held: 0, waiters: [] as Array<() => void> };
+      const state = {
+        hold: false,
+        holdFrom: 1,
+        seen: 0,
+        held: 0,
+        holdPresence: false,
+        presenceHeld: 0,
+        waiters: [] as Array<() => void>,
+      };
       const server = http.createServer((req, res) => {
         const chunks: Buffer[] = [];
         req.on('data', (d: Buffer) => chunks.push(d));
@@ -4246,6 +4258,18 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
             });
             up.end(raw);
           };
+          if (
+            state.holdPresence &&
+            req.method === 'POST' &&
+            (req.url ?? '').startsWith('/api/v1/me/presence')
+          ) {
+            state.presenceHeld += 1;
+            state.waiters.push(() => {
+              state.presenceHeld -= 1;
+              forward();
+            });
+            return;
+          }
           if ((req.url ?? '').startsWith('/api/v1/me/inbox')) state.seen += 1;
           if (state.hold && state.seen >= state.holdFrom && (req.url ?? '').startsWith('/api/v1/me/inbox')) {
             state.held += 1;
@@ -4281,11 +4305,21 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
         get seen() {
           return state.seen;
         },
+        get holdPresence() {
+          return state.holdPresence;
+        },
+        set holdPresence(v: boolean) {
+          state.holdPresence = v;
+        },
+        get presenceHeld() {
+          return state.presenceHeld;
+        },
         get held() {
           return state.held;
         },
         release() {
           state.hold = false;
+          state.holdPresence = false;
           for (const w of state.waiters.splice(0)) w();
         },
         close() {
@@ -4411,6 +4445,75 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
         await proxy.close();
       }
     }, 40_000);
+
+    /* ================================================================
+     * THE HANDOFF ITSELF, interrupted.
+     *
+     * The wake line is printed; the turn it announces has not started yet. Under
+     * Codex that turn is the queued bridge, under Claude Code it is this
+     * process EXITING. A marker that lands in between means the turn would die
+     * on the limit — so exiting 0 would report a handoff that never happened
+     * and leave nobody listening at all. The listener stands by instead, still
+     * holding the item, and finishes the handoff when the limit lifts.
+     * ================================================================ */
+    for (const mode of ['Codex', 'Claude'] as const) {
+      for (const where of ['initial', 'tail'] as const) {
+        it(`${where} handoff, ${mode}: a marker during the turn mark never exits 0`, async () => {
+          const { owner, roomId, agentId } = await awaitFixture(
+            `awtho${where === 'initial' ? 'i' : 't'}${mode === 'Codex' ? 'c' : 'k'}`,
+          );
+          const proxy = await startHoldingProxy();
+          try {
+            const cap = capture();
+            const calls: string[] = [];
+            cap.io.notifyCodex = async (thread) => { calls.push(thread); };
+            const codexEnv = mode === 'Codex' ? { CODEX_THREAD_ID: 'thread-handoff' } : {};
+
+            // INITIAL: the item is already queued, so the pre-stream look wakes.
+            // TAIL: nothing is queued yet — the wake comes from the live stream.
+            let sent = where === 'initial'
+              ? await owner.client.sendMessage(roomId, { to: agentId, body: 'handoff item' })
+              : undefined;
+            if (where === 'initial') proxy.holdPresence = true;
+
+            const running = runCli(
+              ['await', '--timeout', '25', '--server', proxy.url],
+              quick(codexEnv),
+              cap.io,
+            );
+
+            if (where === 'tail') {
+              await until(async () => await ownerSeesOnline(owner, agentId));
+              proxy.holdPresence = true;
+              sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'handoff item' });
+            }
+
+            // The wake line is out and the turn mark is in flight…
+            await until(() => proxy.presenceHeld >= 1);
+            expect(cap.out()).toContain('await.item');
+            block(); // …and the session hits its limit right there
+            proxy.release();
+
+            await until(() => heartbeat().startsWith('blocked:'));
+            expect(calls).toEqual([]); // no bridge rung into a limited session
+            // STILL RUNNING: the exit IS the wake under Claude Code, and a
+            // suppressed bridge is not a handoff under Codex.
+            expect(await Promise.race([running.then((c) => c), nap(150).then(() => 'alive')])).toBe(
+              'alive',
+            );
+            await stillUnread(sent!.message.id);
+
+            // The limit lifts: the handoff finishes and the wake is delivered.
+            fs.rmSync(blockedDir, { recursive: true, force: true });
+            expect(await running).toBe(0);
+            expect(wakeLine(cap).item.id).toBe(sent!.message.id);
+            expect(calls).toEqual(mode === 'Codex' ? ['thread-handoff'] : []);
+          } finally {
+            await proxy.close();
+          }
+        }, 40_000);
+      }
+    }
 
     it('an unreadable marker is ignored: junk never silences a listener', async () => {
       await awaitFixture('awtblockjunk');
