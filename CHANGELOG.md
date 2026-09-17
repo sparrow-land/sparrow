@@ -12,7 +12,7 @@ even a silent listener is told to run `sparrow upgrade` within one stream cycle.
 "client floor" note on each release below records the minimum and recommended
 versions that release shipped with.
 
-## [Unreleased]
+## [0.1.38] — 2026-09-17
 
 ### Fixed
 
@@ -26,8 +26,13 @@ versions that release shipped with.
 - The listener generation record now names the Codex thread it bridges to, and
   a candidate refuses (exit 1) to supersede an incumbent that is bound to a
   DIFFERENT thread and is demonstrably alive — checked both before anything is
-  written and again immediately before the record is published, so two
-  concurrent starters cannot slip past. Newest-wins is otherwise unchanged: a
+  written and again immediately before the record is published, which closes
+  every sequential ordering. KNOWN RESIDUAL: two candidates that both clear the
+  second check inside the same publish window can still both publish, and the
+  later write then supersedes a live listener bound to another thread; the
+  checks are advisory, not atomic. Reproduced deliberately with a barrier
+  between check and write; atomic exclusion around check-and-publish follows in
+  the next release. Newest-wins is otherwise unchanged: a
   dead pid, no pid, an unreadable record, an incumbent with no thread, or the
   same thread re-arming all supersede exactly as before, and
   `SPARROW_AWAIT_TAKE_OVER=1` overrides the refusal.
