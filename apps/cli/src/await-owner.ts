@@ -174,6 +174,27 @@ function runPublishHook(): void {
   }
 }
 
+/**
+ * TEST-ONLY seam: run immediately after the arming lock is acquired and BEFORE
+ * the ownership re-check, i.e. at the very top of the critical section.
+ *
+ * Its one job is the two-process regression (`await-owner-race.test.ts`): a
+ * holder that pauses HERE is holding the lock with nothing yet renamed, which is
+ * the only state in which a second process can be observed contending rather
+ * than being refused by the pre-check. Nothing in production ever sets it.
+ */
+let insideLockHook: (() => void) | undefined;
+export function __setAwaitLockedHookForTests(fn: (() => void) | undefined): void {
+  insideLockHook = fn;
+}
+function runInsideLockHook(): void {
+  try {
+    insideLockHook?.();
+  } catch {
+    /* a test seam must never break the listener */
+  }
+}
+
 /** `<state dir>/await-owner.json` — the same state dir the heartbeat uses. */
 export function awaitOwnerPath(env: Env): string {
   return path.join(resolveStateDir(env), 'await-owner.json');
@@ -301,6 +322,183 @@ export function readAwaitOwner(env: Env): AwaitOwnerRecord | undefined {
   }
 }
 
+/* ==================================================================
+ * THE ARMING LOCK — `<state dir>/await-arming.lock`
+ *
+ * WHY. {@link assertMayArm} and the rename are two operations, and between them
+ * another process can publish: two different-thread candidates both passed the
+ * guard, both renamed, and the live incumbent the guard exists to protect was
+ * simply lost (reproduced with two real node processes, vm5, 2026-09-17). The
+ * lock makes the RE-CHECK + rename + candidate cleanup one critical section.
+ *
+ * WHAT IS INSIDE IT: only those. Never the network round trip — publish-late
+ * already puts the whole round trip before publish() is even called — so the
+ * section is milliseconds of local filesystem work.
+ *
+ * WHO MAY TAKE IT FROM WHOM. Holder LIVENESS decides, never age alone:
+ *
+ *   - the holder's pid is demonstrably gone (ESRCH)  → reclaim it, however fresh
+ *   - the holder is demonstrably alive (kill 0 / EPERM) → wait, then REFUSE
+ *   - the lock is malformed or names no pid → nothing is proven about anyone, so
+ *     age is all that is left: reclaim only once it is older than
+ *     {@link ARM_LOCK_STALE_MS}, and otherwise wait exactly as for a live holder.
+ *
+ * REFUSING, NOT STEALING, is the point. An unfenced "proceed anyway" would be
+ * worse than the race it papers over: a SIGSTOPed or descheduled holder resumes
+ * and renames straight over the thief, restoring the very lost-incumbent bug.
+ * Exit 1 with one line and a re-arm is honest and costs one command.
+ *
+ * RECLAIMING IS NEVER A LICENCE TO UNLINK. Between judging a lock stale and
+ * removing it, the dead holder's file may have been replaced by a live one — so
+ * the content is re-read immediately before the unlink and must be BYTE
+ * IDENTICAL to what was judged; anything else means a new holder, i.e. wait.
+ * Release is the same rule from the other side: unlink only a lock whose content
+ * is ours, pid + startedAt + nonce.
+ * ================================================================== */
+
+/** A lock older than this whose holder cannot be identified is abandoned. */
+export const ARM_LOCK_STALE_MS = 5_000;
+/** How long to wait on a lock that is held by someone demonstrably there. */
+export const ARM_LOCK_WAIT_MS = 3_000;
+/** How often to retry while waiting. */
+export const ARM_LOCK_POLL_MS = 50;
+
+/** `<state dir>/await-arming.lock`. */
+export function awaitArmLockPath(env: Env): string {
+  return path.join(resolveStateDir(env), 'await-arming.lock');
+}
+
+/** Knobs for the lock. Production passes none; tests drive it deterministically. */
+export interface ArmLockTuning {
+  staleMs?: number;
+  waitMs?: number;
+  pollMs?: number;
+  /** Blocking sleep between polls (the critical section is synchronous). */
+  sleep?(ms: number): void;
+  kill?: PidSignal;
+  /** TEST-ONLY: runs after a lock is judged reclaimable, before the unlink. */
+  onReclaim?(): void;
+}
+
+export const armLockRefusal = (pid: number | undefined, waitMs: number): string => {
+  const secs = Number((waitMs / 1000).toFixed(1)).toString();
+  return (
+    `sparrow await could not arm: another listener (pid ${pid ?? 'unknown'}) is publishing in this ` +
+    `state dir and did not finish within ${secs} s; run \`sparrow await\` again`
+  );
+};
+
+/** A blocking sleep — the critical section is synchronous by construction. */
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    /* no SharedArrayBuffer (never on Node 22): spin instead of crashing */
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      /* … */
+    }
+  }
+}
+
+interface LockHolder {
+  /** Exact bytes on disk — the only thing an unlink is ever judged against. */
+  raw: string;
+  pid?: number;
+  ageMs: number;
+}
+
+function readLockHolder(file: string): LockHolder | undefined {
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const ageMs = Math.max(0, Date.now() - fs.statSync(file).mtimeMs);
+    let pid: number | undefined;
+    try {
+      const parsed = JSON.parse(raw) as { pid?: unknown };
+      if (Number.isInteger(parsed?.pid) && (parsed.pid as number) > 0) pid = parsed.pid as number;
+    } catch {
+      /* malformed: no pid, judged by age alone */
+    }
+    return pid === undefined ? { raw, ageMs } : { raw, pid, ageMs };
+  } catch {
+    return undefined; // gone between the EEXIST and this read: try again
+  }
+}
+
+/** Is this lock's holder demonstrably gone (or, unknown and long abandoned)? */
+function reclaimable(holder: LockHolder, staleMs: number, kill?: PidSignal): boolean {
+  if (holder.pid === undefined) return holder.ageMs > staleMs;
+  return !pidDemonstrablyAlive(holder.pid, kill);
+}
+
+/** Unlink a lock ONLY while it is byte-identical to what we judged/wrote. */
+function unlinkLockIf(file: string, expected: string): boolean {
+  try {
+    if (fs.readFileSync(file, 'utf8') !== expected) return false;
+    fs.unlinkSync(file);
+    return true;
+  } catch {
+    return false; // already gone, or not ours to remove
+  }
+}
+
+/**
+ * Enter the critical section, or throw {@link CliError} (exit 1) having changed
+ * nothing. Never steals a live holder's lock, and never proceeds without one
+ * except when the state dir cannot hold a lock at all (an unwritable dir, where
+ * the publish that follows will fail into `unfenced` anyway).
+ */
+function acquireArmLock(env: Env, nonce: string, t: ArmLockTuning = {}): { release(): void } {
+  const file = awaitArmLockPath(env);
+  const body = `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), nonce })}\n`;
+  const staleMs = t.staleMs ?? ARM_LOCK_STALE_MS;
+  const waitMs = t.waitMs ?? ARM_LOCK_WAIT_MS;
+  const pollMs = t.pollMs ?? ARM_LOCK_POLL_MS;
+  const sleep = t.sleep ?? sleepSync;
+  const held = { release: (): void => void unlinkLockIf(file, body) };
+  const unlockable = { release: (): void => {} };
+
+  /** `wx` is the whole mutual exclusion: the kernel picks exactly one winner. */
+  const tryCreate = (): 'ours' | 'taken' | 'impossible' => {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const fd = fs.openSync(file, 'wx');
+      try {
+        fs.writeFileSync(fd, body);
+      } finally {
+        fs.closeSync(fd);
+      }
+      return 'ours';
+    } catch (e) {
+      return (e as NodeJS.ErrnoException)?.code === 'EEXIST' ? 'taken' : 'impossible';
+    }
+  };
+
+  const first = tryCreate();
+  if (first === 'ours') return held;
+  // An unwritable/absent state dir cannot hold a lock OR a record: there is
+  // nothing to serialise and nothing to lose. The publish falls to `unfenced`.
+  if (first === 'impossible') return unlockable;
+
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const holder = readLockHolder(file);
+    if (holder === undefined) {
+      if (tryCreate() === 'ours') return held; // vanished while we looked
+    } else if (reclaimable(holder, staleMs, t.kill)) {
+      t.onReclaim?.();
+      // Byte-identical or nothing: a replacement lock belongs to someone who is
+      // very much alive, and stealing it would restore the race.
+      if (unlinkLockIf(file, holder.raw) && tryCreate() === 'ours') return held;
+    } else if (tryCreate() === 'ours') {
+      return held; // released between the read and here
+    }
+    if (Date.now() >= deadline) break;
+    sleep(pollMs);
+  }
+  throw new CliError(armLockRefusal(readLockHolder(file)?.pid, waitMs));
+}
+
 /**
  * How a publish landed.
  *
@@ -370,8 +568,10 @@ export function prepareAwaitGeneration(opts: {
   thread?: string;
   /** Test seam: the `process.kill(pid, 0)` used by the publish-time recheck. */
   kill?: PidSignal;
+  /** Test seam: timings and probes for the arming lock. */
+  lock?: ArmLockTuning;
 }): AwaitGeneration {
-  const { env, kind, profile, thread, kill } = opts;
+  const { env, kind, profile, thread, kill, lock: lockTuning } = opts;
   const nonce = crypto.randomBytes(8).toString('hex');
   // IMMEDIATELY — before credentials, before the network, before publish-late.
   // This is what turns the arming window from "no listener" into "one starting".
@@ -390,37 +590,16 @@ export function prepareAwaitGeneration(opts: {
     fenced: () => onDisk,
     publish(): AwaitPublication {
       if (live) return onDisk ? 'published' : 'unfenced';
-      // THE LAST-MOMENT RECHECK. The preflight guard ran before this process
-      // touched anything, which two concurrent starters would both pass: each
-      // reads an empty (or dead) state dir, then both write. Re-reading here —
-      // immediately before the rename — is what makes the loser stand down
-      // instead of evicting a live listener it cannot speak for.
-      assertMayArm(env, thread, kill);
-      const record: AwaitOwnerRecord = {
-        version: 1,
-        nonce,
-        pid: process.pid,
-        startedAt: new Date().toISOString(),
-        kind,
-        ...(profile ? { profile } : {}),
-        ...(thread ? { thread } : {}),
-      };
+      /* THE CRITICAL SECTION. Everything from the re-check to the rename runs
+       * under the arming lock, because a re-check that is not serialised with
+       * the rename is not a check at all: two candidates both read an empty
+       * state dir, then both write, and the last rename silently wins. */
+      const lock = acquireArmLock(env, nonce, lockTuning);
       try {
-        const file = awaitOwnerPath(env);
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        const tmp = `${file}.${process.pid}.${nonce}.tmp`;
-        fs.writeFileSync(tmp, `${JSON.stringify(record)}\n`);
-        fs.renameSync(tmp, file); // atomic: no reader ever sees half a record
-        onDisk = true;
-      } catch {
-        /* best-effort: an unwritable state dir must not stop the listener */
+        return publishUnderLock();
+      } finally {
+        lock.release();
       }
-      live = true;
-      // The published record now makes the same announcement, with more
-      // authority — ours to retire, and only ours.
-      clearAwaitCandidate(env, nonce);
-      runPublishHook();
-      return onDisk ? 'published' : 'unfenced';
     },
     clearCandidate(): void {
       clearAwaitCandidate(env, nonce);
@@ -440,4 +619,37 @@ export function prepareAwaitGeneration(opts: {
       return lost;
     },
   };
+
+  /** The locked half of {@link AwaitGeneration.publish}. */
+  function publishUnderLock(): AwaitPublication {
+    runInsideLockHook();
+    // THE LAST-MOMENT RECHECK, now genuinely last: no other candidate can be
+    // between its own check and its own rename while we hold the lock.
+    assertMayArm(env, thread, kill);
+    const record: AwaitOwnerRecord = {
+      version: 1,
+      nonce,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      kind,
+      ...(profile ? { profile } : {}),
+      ...(thread ? { thread } : {}),
+    };
+    try {
+      const file = awaitOwnerPath(env);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.${nonce}.tmp`;
+      fs.writeFileSync(tmp, `${JSON.stringify(record)}\n`);
+      fs.renameSync(tmp, file); // atomic: no reader ever sees half a record
+      onDisk = true;
+    } catch {
+      /* best-effort: an unwritable state dir must not stop the listener */
+    }
+    live = true;
+    // The published record now makes the same announcement, with more
+    // authority — ours to retire, and only ours.
+    clearAwaitCandidate(env, nonce);
+    runPublishHook();
+    return onDisk ? 'published' : 'unfenced';
+  }
 }

@@ -12,6 +12,25 @@ even a silent listener is told to run `sparrow upgrade` within one stream cycle.
 "client floor" note on each release below records the minimum and recommended
 versions that release shipped with.
 
+## [Unreleased]
+
+### Fixed
+
+- Publishing a listener generation is now atomic across processes. 0.1.38
+  named a residual: its two ownership checks were advisory, so two candidates
+  bound to different Codex threads that both cleared the check inside one
+  publish window could both publish and lose a live incumbent. An exclusive
+  arming lock (`<state dir>/await-arming.lock`, created O_EXCL) now serialises
+  the re-check, the atomic record rename and the candidate cleanup — local
+  filesystem work, milliseconds, never the network round trip. A demonstrably
+  dead lock holder is reclaimed; a demonstrably alive one is waited on for up
+  to 3 s and then refused (exit 1, pid named) rather than stolen, because a
+  stopped holder could resume and rename over a thief; a malformed lock is
+  reclaimed only past 5 s of age; reclaim and release touch only bytes they
+  read or wrote. A two-process regression holds one publisher inside the
+  critical section, observes the second contending, and asserts a single
+  cross-thread winner.
+
 ## [0.1.38] — 2026-09-17
 
 ### Fixed

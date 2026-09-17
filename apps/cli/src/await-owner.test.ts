@@ -3,12 +3,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  ARM_LOCK_STALE_MS,
   assertMayArm,
+  awaitArmLockPath,
   awaitCandidatePath,
   awaitOwnerPath,
   prepareAwaitGeneration,
   readAwaitOwner,
 } from './await-owner.js';
+import { __setAwaitPublishHookForTests } from './await-owner.js';
 import { CliError } from './util.js';
 
 /* ==================================================================
@@ -311,5 +314,193 @@ describe('publish() re-checks ownership at the last possible moment', () => {
 
     expect(gen.publish()).toBe('published');
     expect(readAwaitOwner(env())!.nonce).toBe(gen.nonce());
+  });
+});
+
+/* ==================================================================
+ * THE ARMING LOCK — `<state dir>/await-arming.lock`.
+ *
+ * `assertMayArm` and the rename are two operations, so two different-thread
+ * candidates could both pass the guard and both publish, the last rename
+ * winning and a live incumbent vanishing (reproduced with two real processes,
+ * vm5, 2026-09-17). The lock serialises the RE-CHECK + rename + candidate
+ * cleanup — milliseconds, always after the network round trip publish-late
+ * already forces.
+ *
+ * HOLDER LIVENESS DECIDES, NEVER AGE ALONE. A dead holder's lock is reclaimed;
+ * a live holder's lock is waited on and then REFUSED (exit 1), never stolen: a
+ * SIGSTOPed or descheduled holder can resume and rename straight over the
+ * thief, which is the race this exists to close.
+ * ================================================================== */
+
+const lockPath = (): string => awaitArmLockPath(env());
+const lockBody = (pid: number): string =>
+  `${JSON.stringify({ pid, startedAt: new Date().toISOString(), nonce: 'someoneelses1234' })}\n`;
+const ageFile = (file: string, ms: number): void => {
+  const when = new Date(Date.now() - ms);
+  fs.utimesSync(file, when, when);
+};
+
+describe('the arming lock', () => {
+  it('is taken and released around the publish, leaving nothing behind', () => {
+    const gen = prepareAwaitGeneration({ env: env(), kind: 'await' });
+    expect(fs.existsSync(lockPath())).toBe(false);
+    expect(gen.publish()).toBe('published');
+    expect(fs.existsSync(lockPath())).toBe(false);
+  });
+
+  it('holds it across the record write (the publish seam runs inside)', () => {
+    const seen: boolean[] = [];
+    __setAwaitPublishHookForTests(() => seen.push(fs.existsSync(lockPath())));
+    try {
+      prepareAwaitGeneration({ env: env(), kind: 'await' }).publish();
+    } finally {
+      __setAwaitPublishHookForTests(undefined);
+    }
+    expect(seen).toEqual([true]);
+    expect(fs.existsSync(lockPath())).toBe(false); // …and released on the way out
+  });
+
+  it('reclaims a lock whose holder is demonstrably gone (ESRCH), however fresh', () => {
+    fs.writeFileSync(lockPath(), lockBody(4242));
+    const gen = prepareAwaitGeneration({ env: env(), kind: 'await', lock: { kill: esrch } });
+    expect(gen.publish()).toBe('published');
+    expect(readAwaitOwner(env())!.nonce).toBe(gen.nonce());
+    expect(fs.existsSync(lockPath())).toBe(false);
+  });
+
+  /* THE UNKNOWN POLICY: a lock we cannot read a pid out of proves nothing about
+   * its holder, so age is all that is left — and only real age (5 s) counts. */
+  it('reclaims a MALFORMED lock only once it is older than the stale window', () => {
+    fs.writeFileSync(lockPath(), 'not json at all\n');
+    ageFile(lockPath(), ARM_LOCK_STALE_MS + 1000);
+    const gen = prepareAwaitGeneration({ env: env(), kind: 'await' });
+    expect(gen.publish()).toBe('published');
+  });
+
+  it('waits on a FRESH malformed lock, then refuses rather than stealing it', () => {
+    fs.writeFileSync(lockPath(), 'not json at all\n');
+    const gen = prepareAwaitGeneration({
+      env: env(),
+      kind: 'await',
+      lock: { waitMs: 10, pollMs: 1, sleep: () => {} },
+    });
+    expect(() => gen.publish()).toThrow(CliError);
+    expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
+  });
+
+  it('refuses after the wait window when the holder is alive, naming its pid', () => {
+    fs.writeFileSync(lockPath(), lockBody(4242));
+    const gen = prepareAwaitGeneration({
+      env: env(),
+      kind: 'await:codex',
+      thread: 'thread-mine',
+      lock: { waitMs: 10, pollMs: 1, sleep: () => {}, kill: alive },
+    });
+
+    let thrown: unknown;
+    try {
+      gen.publish();
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(CliError);
+    const message = (thrown as Error).message;
+    expect(message.split('\n')).toHaveLength(1);
+    expect(message).toContain('another listener (pid 4242) is publishing in this state dir');
+    expect(message).toContain('run `sparrow await` again');
+    // NOTHING was touched: not ownership, not the foreign lock.
+    expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
+    expect(gen.published()).toBe(false);
+    expect(fs.readFileSync(lockPath(), 'utf8')).toContain('4242');
+  });
+
+  it('EPERM is a live holder too — refused, not reclaimed', () => {
+    fs.writeFileSync(lockPath(), lockBody(4242));
+    const gen = prepareAwaitGeneration({
+      env: env(),
+      kind: 'await',
+      lock: { waitMs: 10, pollMs: 1, sleep: () => {}, kill: eperm },
+    });
+    expect(() => gen.publish()).toThrow(CliError);
+  });
+
+  it('publishes as soon as a live holder lets go mid-wait', () => {
+    fs.writeFileSync(lockPath(), lockBody(4242));
+    let polls = 0;
+    const gen = prepareAwaitGeneration({
+      env: env(),
+      kind: 'await',
+      lock: {
+        waitMs: 5000,
+        pollMs: 1,
+        kill: alive,
+        sleep: () => {
+          if (++polls === 3) fs.rmSync(lockPath(), { force: true });
+        },
+      },
+    });
+    expect(gen.publish()).toBe('published');
+    expect(polls).toBe(3);
+  });
+
+  /* RECLAIM IS NOT A LICENCE TO UNLINK. Between judging a lock stale and
+   * removing it, its holder may have finished and a NEW holder taken the file. */
+  it('never unlinks a lock that was replaced between the read and the unlink', () => {
+    fs.writeFileSync(lockPath(), lockBody(4242)); // judged dead below…
+    const replacement = `${JSON.stringify({ pid: 5151, startedAt: 'later', nonce: 'newholder000000' })}\n`;
+    const gen = prepareAwaitGeneration({
+      env: env(),
+      kind: 'await',
+      lock: {
+        waitMs: 10,
+        pollMs: 1,
+        sleep: () => {},
+        // 4242 is gone; the holder that replaces it very much is not.
+        kill: (pid: number) => {
+          if (pid === 4242) esrch();
+        },
+        // …and a live holder takes the file in the instant before the unlink.
+        onReclaim: () => fs.writeFileSync(lockPath(), replacement),
+      },
+    });
+
+    expect(() => gen.publish()).toThrow(CliError); // contended, so refused
+    expect(fs.readFileSync(lockPath(), 'utf8')).toBe(replacement); // untouched
+    expect(fs.existsSync(awaitOwnerPath(env()))).toBe(false);
+  });
+
+  it('releases only OUR lock — a foreign one written meanwhile is left alone', () => {
+    const foreign = `${JSON.stringify({ pid: 5151, startedAt: 'later', nonce: 'newholder000000' })}\n`;
+    __setAwaitPublishHookForTests(() => fs.writeFileSync(lockPath(), foreign));
+    try {
+      expect(prepareAwaitGeneration({ env: env(), kind: 'await' }).publish()).toBe('published');
+    } finally {
+      __setAwaitPublishHookForTests(undefined);
+    }
+    expect(fs.readFileSync(lockPath(), 'utf8')).toBe(foreign);
+  });
+
+  it('propagates a refusal raised INSIDE the lock, and still releases it', () => {
+    const gen = prepareAwaitGeneration({
+      env: env(),
+      kind: 'await:codex',
+      thread: 'thread-mine',
+      kill: alive,
+    });
+    ownerRecord('thread-theirs', 4242);
+
+    expect(() => gen.publish()).toThrow(CliError);
+    expect(fs.existsSync(lockPath())).toBe(false); // released in `finally`
+    expect(gen.published()).toBe(false); // never an unfenced publish
+    expect(readAwaitOwner(env())!.thread).toBe('thread-theirs');
+  });
+
+  it('stays unfenced (and silent) when the state dir cannot be written at all', () => {
+    const blocker = path.join(stateDir, 'not-a-dir');
+    fs.writeFileSync(blocker, 'x');
+    const broken = { SPARROW_STATE_DIR: path.join(blocker, 'nested') };
+    const gen = prepareAwaitGeneration({ env: broken, kind: 'await' });
+    expect(gen.publish()).toBe('unfenced');
   });
 });
