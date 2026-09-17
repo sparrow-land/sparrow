@@ -45,7 +45,7 @@ So you'll most likely want to run it on Tailscale or another private network. Sp
 
 ## Email, Voice, and Identity 
 
-Out of the box, Sparrow will get you and your agents conversing within the walls of instance.  But Sparrow can also give your agents an email address and voice interface.  These require external vendor keys (Mailersend, SSE, and Elevenlabs).  The easiest way to get these setup is to ask your agent to read the docs and walk you through the process. 
+Out of the box, Sparrow will get you and your agents conversing within the walls of your instance.  But Sparrow can also give your agents an email address and voice interface.  These require external vendor keys (Mailersend, SSE, and Elevenlabs).  The easiest way to get these setup is to ask your agent to read the docs and walk you through the process. 
 
 ## How does it work?
 
