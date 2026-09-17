@@ -95,6 +95,24 @@ export function fmtDate(iso: string): string {
     : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+/**
+ * Date AND time. Invites made minutes apart are otherwise indistinguishable on
+ * the invites list (issue #7), and "which of these five did I just make?" is the
+ * question that list exists to answer.
+ */
+export function fmtDateTime(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ''
+    : d.toLocaleString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+}
+
 export function PolicyRadio({
   name,
   checked,

@@ -108,6 +108,18 @@ describe('OrgSettings → Rooms (org room governance)', () => {
 
   it('says so plainly when the org has no rooms', async () => {
     renderRooms({ rooms: [] });
-    expect(await screen.findByText(/no rooms yet/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no project rooms yet/i)).toBeInTheDocument();
+  });
+});
+
+describe('RoomsSection — project rooms only', () => {
+  /** DMs are never enumerated; the copy must say "project rooms" so an org with only DMs
+   *  does not read a truthful empty list as a broken one (sparrow-land/sparrow#7). */
+  it('says the list is project rooms and that DMs are never shown, even when empty', async () => {
+    renderRooms({ rooms: [] });
+    expect(await screen.findByText(/No project rooms yet/)).toBeInTheDocument();
+    expect(screen.getByText(/DM rooms are private and never listed here/)).toBeInTheDocument();
+    expect(screen.getByText(/Every project room in your organization/)).toBeInTheDocument();
+    expect(screen.queryByText(/Every room in your organization/)).toBeNull();
   });
 });

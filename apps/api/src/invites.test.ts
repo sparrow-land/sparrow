@@ -118,6 +118,47 @@ describe('invites', () => {
     expect(list.json().items[0].revokedAt).not.toBeNull();
   });
 
+  /**
+   * Issue #5: the invite dialog reuses a blank, unused invite instead of minting
+   * a live door every time it opens — so the list has to say whether ANYBODY has
+   * come through a given invite. `useCount` counts enrollments, whatever their
+   * outcome; a fresh invite is 0.
+   */
+  it('list reports useCount — 0 for a fresh invite, 1 once somebody knocks', async () => {
+    const inv = await createInvite(ts.app, ownerToken, orgId);
+    const create = await ts.app.inject({
+      method: 'POST',
+      url: `/api/v1/orgs/${orgId}/invites`,
+      headers: auth(ownerToken),
+      payload: {},
+    });
+    expect(create.json().invite.useCount).toBe(0);
+
+    const listBefore = await ts.app.inject({
+      method: 'GET',
+      url: `/api/v1/orgs/${orgId}/invites`,
+      headers: auth(ownerToken),
+    });
+    for (const item of listBefore.json().items) expect(item.useCount).toBe(0);
+
+    // An anonymous knock = an agent enrollment against THAT invite only.
+    const knock = await ts.app.inject({
+      method: 'POST',
+      url: `/api/v1/invite/${inv.token}/enroll`,
+      payload: { name: 'scout' },
+    });
+    expect(knock.statusCode).toBe(202);
+
+    const listAfter = await ts.app.inject({
+      method: 'GET',
+      url: `/api/v1/orgs/${orgId}/invites`,
+      headers: auth(ownerToken),
+    });
+    const items = listAfter.json().items as { id: string; useCount: number }[];
+    expect(items.find((i) => i.id === inv.id)?.useCount).toBe(1);
+    expect(items.find((i) => i.id === create.json().invite.id)?.useCount).toBe(0);
+  });
+
   it('invites.who=admins blocks a plain member from creating', async () => {
     await ts.app.inject({
       method: 'PATCH',

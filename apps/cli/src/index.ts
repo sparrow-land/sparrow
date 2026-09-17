@@ -903,12 +903,19 @@ function formatRooms(rooms: MeRoom[]): string {
 }
 
 /**
- * `sparrow rooms --all` — the org owner/admin's governance table. Deliberately
- * structural (who many members, alive or archived, since when) and never a
- * preview: enumeration is not readership.
+ * `sparrow rooms --all` — the org owner/admin's governance table over the org's
+ * PROJECT rooms. Deliberately structural (how many members, alive or archived,
+ * since when) and never a preview: enumeration is not readership.
+ *
+ * DM rooms are absent by design — the existence of a DM is itself the private
+ * fact (SPEC → "Org room governance"), so the server never enumerates them. The
+ * empty line says "project rooms" and names the omission, because an org whose
+ * only rooms are DMs otherwise reads a truthful list as a broken one (issue #7).
  */
 function formatOrgRooms(items: OrgRoomSummary[]): string {
-  if (items.length === 0) return 'No rooms in this org.';
+  if (items.length === 0) {
+    return 'No project rooms in this org. (DM rooms are private and never listed here.)';
+  }
   return table(
     ['ROOM ID', 'NAME', 'KIND', 'MEMBERS', 'ARCHIVED', 'CREATED'],
     items.map((r) => [
@@ -1128,6 +1135,24 @@ function emailLanded(e: { disposition: string }): boolean {
  * `thread` is null when the caller fetched ONE email by id and never loaded its
  * thread; the header then names the thread by id alone.
  */
+/**
+ * ONE entry of a transcript (`sparrow log` for a room, `sparrow email read
+ * <ethId>` for a thread): the `head` ("time  sender: "), the body WHOLE, and a
+ * `tail` of metadata (an attachment count, a disposition tag) that belongs to
+ * the message rather than to its last sentence.
+ *
+ * A multi-line body keeps every line: the first continues the head, the rest
+ * hang under it indented two spaces. The old renderer printed the first line
+ * plus an ellipsis, so everything an agent wrote after its first newline was
+ * lost from the human view while `-j` still had it — a transcript must not lie
+ * about what was said. Blank lines in the body stay blank rather than becoming
+ * two spaces, so no line carries trailing whitespace.
+ */
+function transcriptEntry(head: string, body: string, tail = ''): string {
+  const [first = '', ...rest] = body.split('\n');
+  return [`${head}${first}${tail}`, ...rest.map((l) => (l === '' ? '' : `  ${l}`))].join('\n');
+}
+
 function formatEmail(email: Email, thread: EmailThreadRef | null): string {
   const label = thread ? `${thread.id} · ${thread.subject}` : email.threadId;
   const lines = [
@@ -1182,7 +1207,8 @@ function formatEmailThreads(items: EmailThreadRef[]): string {
  * `sparrow email read <ethId>` — a whole thread as an oldest-first transcript,
  * the same shape `sparrow log` gives a room. Each line carries the email's id
  * (so `sparrow email read <emlId>` / `email reply --to` can target it), the
- * direction, the other party, and the first line of the body.
+ * direction, the other party, and the body in full (multi-line bodies hang
+ * indented under their first line, exactly as `sparrow log` renders a room).
  *
  * Emails that did NOT land — `quarantined`, `held`, `rejected`, `send-failed` —
  * are tagged inline rather than hidden: the route includes them precisely so an
@@ -1200,12 +1226,10 @@ function formatEmailThreadTranscript(thread: EmailThread, items: Email[]): strin
   const lines = items.map((e) => {
     const arrow = e.direction === 'in' ? '←' : '→';
     const who = e.direction === 'in' ? party(e.from) : e.to.map((t) => t.email).join(', ');
-    const firstLine = e.text.split('\n')[0] ?? '';
-    const body = firstLine.length < e.text.length ? `${firstLine} …` : firstLine;
     const n = e.attachments.length;
     const att = n > 0 ? ` (${n} attachment${n === 1 ? '' : 's'})` : '';
     const tag = emailLanded(e) ? '' : ` [${e.disposition}${e.reason ? `: ${e.reason}` : ''}]`;
-    return `${e.createdAt}  ${e.id}  ${arrow} ${who}: ${body}${att}${tag}`;
+    return transcriptEntry(`${e.createdAt}  ${e.id}  ${arrow} ${who}: `, e.text, `${att}${tag}`);
   });
   return [...head, ...lines].join('\n');
 }
@@ -1374,8 +1398,9 @@ function formatOutbox(items: Message[]): string {
 /**
  * A compact chronological transcript of a room's history. The server returns
  * messages newest-first; render them oldest-first (reading order) as
- * `time  sender: body`, with a voice tag and an attachment count. Multi-line
- * bodies collapse to the first line (with an ellipsis); short bodies show whole.
+ * `time  sender: body`, with a voice tag and an attachment count. A multi-line
+ * body prints WHOLE, its continuation lines indented under the first
+ * ({@link transcriptEntry}) — the transcript never drops a word.
  */
 function formatLog(items: Message[]): string {
   if (items.length === 0) return 'No messages.';
@@ -1383,11 +1408,9 @@ function formatLog(items: Message[]): string {
     .reverse()
     .map((m) => {
       const voice = m.origin === 'voice' ? ' [voice]' : '';
-      const firstLine = m.body.split('\n')[0] ?? '';
-      const body = firstLine.length < m.body.length ? `${firstLine} …` : firstLine;
       const n = m.attachments.length;
       const att = n > 0 ? ` (${n} attachment${n === 1 ? '' : 's'})` : '';
-      return `${m.createdAt}  ${m.from.displayName}${voice}: ${body}${att}`;
+      return transcriptEntry(`${m.createdAt}  ${m.from.displayName}${voice}: `, m.body, att);
     });
   // A transcript is one line per message, so the register note rides it ONCE,
   // as a footnote — repeating 144 characters under every spoken turn would
@@ -2854,12 +2877,18 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
 
   /* ============================ rooms ============================ */
   withOrg(program.command('rooms'))
-    .description('list your room memberships (--all: every room in the org, for owners/admins)')
-    .option('--all', 'every room in the org, joined or not (org owner/admin only)')
+    .description(
+      'list your room memberships (--all: every project room in the org, for owners/admins)',
+    )
+    .option(
+      '--all',
+      'every project room in the org, joined or not — DMs are never listed (org owner/admin only)',
+    )
     .action(
       action(async (opts) => {
         const { client } = buildClient(opts, env);
-        // Governance view: the org's whole room list, membership irrelevant. It
+        // Governance view: every PROJECT room of the org, membership irrelevant
+        // (DMs are never enumerated — their existence is the private fact). It
         // carries no messages — archiving a room is cleanup, not surveillance.
         if (opts.all) {
           const orgId = await resolveOrg(client, opts, env);
@@ -3840,12 +3869,20 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const enrollments = await client.listEnrollments(orgId, { mine: true });
 
     // The email half is the only half that can be missing: with the medium off
-    // its route 404s while enrollments keep answering. On such an instance we
-    // still PRINT the enrollments — a human reading a short list must never
-    // conclude "nothing needs me" — and then exit 1, because the email half did
-    // not answer (SPEC → CLI: "the email half of `sparrow approvals` exits 1
-    // with 'email is not enabled on this server'"). `approve`/`deny` are pure
-    // email, so they refuse outright with nothing to show.
+    // its route 404s while enrollments keep answering. The LIST still SUCCEEDS
+    // there (SPEC → CLI, the email-disabled rule): it answers the human's
+    // question — "what needs me?" — with everything this instance has, says
+    // plainly that the email half is unavailable, and carries the same signal
+    // as `email: null` in the `-j` envelope. Exiting 1 after a good answer made
+    // every `approvals` in a script look like a failure, and `-j` printed a
+    // valid envelope followed by a second `{"error":…}` document that broke the
+    // `| jq` it was written for (issue #3).
+    //
+    // A run NARROWED to the email half alone (`--agent` / `--direction`) is a
+    // different question — it asks only for mail — so it fails, exits 1, and
+    // prints NOTHING: an error never lands after an envelope that contradicts
+    // it. `approve`/`deny` are pure email and refuse outright, as before.
+    const emailOnly = opts.agent !== undefined || opts.direction !== undefined;
     let emailItems: EmailApprovalItem[] | null = null;
     let disabled = false;
     try {
@@ -3863,8 +3900,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       if (e instanceof CliError && e.message === EMAIL_DISABLED) disabled = true;
       else throw e;
     }
+    if (disabled && emailOnly) throw new CliError(EMAIL_DISABLED);
     print({ enrollments, email: emailItems }, formatApprovals(enrollments, emailItems));
-    if (disabled) throw new CliError(EMAIL_DISABLED);
   });
   withApprovals(approvals).action(listApprovals);
   withApprovals(approvals.command('list'))
