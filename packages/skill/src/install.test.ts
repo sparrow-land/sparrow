@@ -88,8 +88,14 @@ describe('install (project scope)', () => {
     // prompt (which sets idle). A matcher of '' would fire for every type.
     expect(s.hooks.Notification[0].hooks[0].command).toMatch(/sparrow-auto-status\.sh notification$/);
     expect(s.hooks.Notification[0].matcher).toBe(
-      'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt',
+      'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt|' +
+        'quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled',
     );
+    // StopFailure: the usage-limit hook. The plain Stop hook does NOT fire when
+    // a turn ends on an API error, so without this a rate-limited session ends
+    // every turn silently while still looking online.
+    expect(s.hooks.StopFailure[0].hooks[0].command).toMatch(/sparrow-auto-status\.sh stop-failure$/);
+    expect(s.hooks.StopFailure[0].hooks[0].command).toContain('$CLAUDE_PROJECT_DIR');
     // Stop stays a SINGLE stop-check entry (it invokes auto-status idle itself).
     expect(commandsFor(s, 'Stop').some((c) => c.includes('sparrow-auto-status.sh'))).toBe(false);
 
@@ -101,9 +107,31 @@ describe('install (project scope)', () => {
     await run(['install']);
     const s = readSettings(cwd);
     expect(commandsFor(s, 'Stop').filter((c) => c.includes('sparrow-stop-check.sh'))).toHaveLength(1);
-    for (const event of ['UserPromptSubmit', 'PostToolUse', 'Notification']) {
+    for (const event of ['UserPromptSubmit', 'PostToolUse', 'Notification', 'StopFailure']) {
       expect(commandsFor(s, event).filter((c) => c.includes('sparrow-auto-status.sh'))).toHaveLength(1);
     }
+  });
+
+  /**
+   * An install that predates the usage-limit work has no StopFailure entry and
+   * the old Notification matcher. Re-running must MIGRATE it — that is the only
+   * way an existing agent ever gets the new coverage.
+   */
+  it('upgrades an older install: adds StopFailure, widens the Notification matcher', async () => {
+    await run(['install']);
+    const file = settingsFile(cwd, 'settings.local.json');
+    const before = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, any>;
+    delete before.hooks.StopFailure;
+    before.hooks.Notification[0].matcher =
+      'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt';
+    fs.writeFileSync(file, JSON.stringify(before, null, 2));
+
+    await run(['install']);
+    const s = readSettings(cwd);
+    expect(commandsFor(s, 'StopFailure').filter((c) => c.includes('sparrow-auto-status.sh'))).toHaveLength(1);
+    expect(s.hooks.Notification).toHaveLength(1);
+    expect(s.hooks.Notification[0].matcher).toContain('quota_auto_resume_fired');
+    expect(commandsFor(s, 'Notification')).toHaveLength(1);
   });
 
   it('preserves unrelated settings and unrelated hooks on install', async () => {
@@ -539,6 +567,7 @@ describe('uninstall', () => {
     expect(s.hooks.UserPromptSubmit).toBeUndefined();
     expect(s.hooks.PostToolUse).toBeUndefined();
     expect(s.hooks.Notification).toBeUndefined();
+    expect(s.hooks.StopFailure).toBeUndefined();
   });
 
   it('round-trips the settings file back to empty hooks when we were the only hooks', async () => {
@@ -557,7 +586,7 @@ describe('uninstall', () => {
     // command still in settings.json must still resolve to a file on disk.
     expect(fs.existsSync(skillFile(cwd))).toBe(true);
     const shared = readSettings(cwd, 'settings.json');
-    for (const event of ['Stop', 'UserPromptSubmit', 'PostToolUse', 'Notification']) {
+    for (const event of ['Stop', 'UserPromptSubmit', 'PostToolUse', 'Notification', 'StopFailure']) {
       for (const command of commandsFor(shared, event)) {
         const script = /sparrow-[a-z-]+\.sh/.exec(command)![0];
         expect(fs.existsSync(path.join(cwd, '.claude', 'skills', 'sparrow', 'hooks', script))).toBe(true);
@@ -731,6 +760,91 @@ describe('pause / resume / status', () => {
     expect(await statusOut()).not.toContain('listener died:');
   });
 
+  /* -------------------------- usage-limit markers -------------------------- *
+   * A limited session looks online and cannot run. `status` is where a human
+   * (or the agent itself, next turn) finds out why, and `unblock` is the
+   * operator recovery for the case nothing else can cover: the limited session
+   * is closed, so no transcript evidence and no quota-resume notification will
+   * ever arrive to clear the marker.
+   * ------------------------------------------------------------------------ */
+  const writeMarker = (name: string, fields: Record<string, unknown>): string => {
+    const dir = path.join(stateDir, 'blocked');
+    fs.mkdirSync(dir, { recursive: true });
+    const f = path.join(dir, name);
+    fs.writeFileSync(f, JSON.stringify({ version: 1, reason: 'rate_limit', ...fields }));
+    return f;
+  };
+  const clock = (d: Date): string =>
+    `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+  it('status names the usage limit, when it started, and how it clears', async () => {
+    await run(['install']);
+    const at = new Date(Date.now() - 3600_000);
+    writeMarker('20260917T090000-1.json', { at: at.toISOString() });
+    expect(await statusOut()).toContain(
+      `blocked:    usage limit since ${clock(at)} (rate_limit); clears on the next successful turn, or run sparrow skill unblock`,
+    );
+  });
+
+  it('status reports the NEWEST marker when several stand', async () => {
+    await run(['install']);
+    const older = new Date(Date.now() - 7200_000);
+    const newer = new Date(Date.now() - 600_000);
+    writeMarker('20260917T080000-1.json', { at: older.toISOString(), reason: 'rate_limit' });
+    writeMarker('20260917T093000-2.json', { at: newer.toISOString(), reason: 'billing_error' });
+    const out = await statusOut();
+    expect(out).toContain(`usage limit since ${clock(newer)} (billing_error)`);
+    expect(out).not.toContain(clock(older));
+  });
+
+  it('status says nothing about blocking when no marker stands', async () => {
+    await run(['install']);
+    expect(await statusOut()).not.toContain('blocked:');
+  });
+
+  it('status keeps reporting an OLD marker: age is not evidence quota came back', async () => {
+    await run(['install']);
+    const at = new Date(Date.now() - 40 * 3600_000);
+    writeMarker('20260915T090000-1.json', { at: at.toISOString() });
+    expect(await statusOut()).toContain('usage limit since');
+  });
+
+  it('status survives a malformed marker instead of failing the command', async () => {
+    await run(['install']);
+    fs.mkdirSync(path.join(stateDir, 'blocked'), { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'blocked', 'junk.json'), '{not json');
+    logs.length = 0;
+    expect(await run(['status'])).toBe(0);
+  });
+
+  it('unblock removes every marker and says what it removed', async () => {
+    await run(['install']);
+    writeMarker('20260917T090000-1.json', { at: new Date().toISOString() });
+    writeMarker('20260917T093000-2.json', { at: new Date().toISOString() });
+    logs.length = 0;
+    expect(await run(['unblock'])).toBe(0);
+    const out = logs.join('\n');
+    expect(out).toMatch(/2 usage-limit marker/);
+    expect(out).toContain(path.join(stateDir, 'blocked'));
+    expect(fs.readdirSync(path.join(stateDir, 'blocked'))).toEqual([]);
+    expect(await statusOut()).not.toContain('blocked:');
+  });
+
+  it('unblock is a no-op that says so when nothing is blocked', async () => {
+    await run(['install']);
+    logs.length = 0;
+    expect(await run(['unblock'])).toBe(0);
+    expect(logs.join('\n')).toMatch(/no usage-limit marker/i);
+  });
+
+  it('unblock leaves a file it never listed alone (and other files entirely)', async () => {
+    await run(['install']);
+    writeMarker('20260917T090000-1.json', { at: new Date().toISOString() });
+    fs.writeFileSync(path.join(stateDir, 'blocked', 'notes.txt'), 'keep me');
+    await run(['unblock']);
+    expect(fs.readdirSync(path.join(stateDir, 'blocked'))).toEqual(['notes.txt']);
+  });
+
   it('rejects an unknown subcommand with a nonzero code', async () => {
     expect(await run(['frobnicate'])).toBe(1);
   });
@@ -866,7 +980,8 @@ describe('re-install — matcher migration inside the target file', () => {
     );
     // Exactly one registration, under the new matcher only.
     expect(ours).toEqual([
-      'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt',
+      'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt|' +
+        'quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled',
     ]);
     // Someone else's hook in the old group is untouched.
     const others = groups.flatMap((g) =>

@@ -35,6 +35,14 @@ export interface ReconnectRunnerOptions {
   /** Called after each SUCCESSFUL reconnect (never for the initial connect). */
   onReconnect?: () => void;
   /**
+   * Awaited before EVERY connection attempt, including the first. A gate, not a
+   * callback: while it is pending no socket is opened, no watchdog is armed and
+   * nothing is dialled, which is what lets a caller stand by (a listener whose
+   * agent cannot take a turn must drop presence, not hold a stream open — see
+   * `await-blocked.ts`) without the runner racing it back online.
+   */
+  beforeOpen?: () => Promise<void>;
+  /**
    * Cap (ms) on the CONTINUOUS-failure window (time since the last successful
    * connect, or since the first attempt if never connected). Exceeding it ends
    * with `exhausted`. Undefined = retry forever.
@@ -162,6 +170,14 @@ export async function runReconnectingStream(opts: ReconnectRunnerOptions): Promi
         handle?.close(); // abort the half-open socket → `closed` resolves → reconnect
       }, opts.staleMs);
     };
+
+    // The gate comes FIRST: a caller standing by holds it, and nothing may be
+    // armed or dialled while it does. Re-check the signal after it — the wait
+    // can be long, and the run may have been stopped meanwhile.
+    if (opts.beforeOpen !== undefined) {
+      await opts.beforeOpen();
+      if (signal.aborted) return { reason: 'stopped' };
+    }
 
     // Arm before opening: the watchdog must cover the establishment phase (a
     // stalled response never fires onOpen/onActivity, and only this timer can

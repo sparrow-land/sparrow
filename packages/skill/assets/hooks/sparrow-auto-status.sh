@@ -44,6 +44,85 @@
 #   stop          (Stop) → idle across every room. Invoked by sparrow-stop-check.sh
 #                 ONLY on its allow (non-blocking) paths, so a blocked stop (loop
 #                 drift) never flickers you idle.
+#   stop-failure  (StopFailure) → the USAGE-LIMIT mode. Claude Code fires
+#                 StopFailure — NOT the plain Stop hook — when a turn ends on an
+#                 API error, naming it in `error_type`. A session that has hit
+#                 its usage limit otherwise looks perfectly online: the
+#                 background `sparrow await` still holds the stream and presence
+#                 stays green, while every wake dies on the limit and nobody is
+#                 told. So for the errors that mean THIS AGENT CANNOT RUN until
+#                 something changes -- rate_limit, billing_error,
+#                 authentication_failed, account_on_hold, oauth_org_not_allowed,
+#                 cloud_credential_error -- this records a marker under
+#                 <state dir>/blocked/ and posts a sticky `blocked — ...` note
+#                 across the rooms. Every other value (overloaded, server_error,
+#                 max_output_tokens, invalid_request, model_not_found, unknown,
+#                 or no error at all) is retried by Claude Code or is our own
+#                 bug: no-op, because a sticky status is expensive to get wrong.
+#                 StopFailure output is discarded by Claude Code, so this mode is
+#                 a pure side effect -- it never writes stdout and never blocks.
+#
+# THE MARKER PROTOCOL (and why it is not one file).
+#   * Each block is its OWN file: <state dir>/blocked/<compact-iso>-<random>.json
+#     holding {"version":1,"reason","at","session","prompt","resumesAt"?}. A
+#     reader is "blocked" while ANY file is there: age is not evidence that a
+#     quota recovered, so markers never expire — only evidence, the resume
+#     notification, or `sparrow skill unblock` removes them.
+#   * A clearing hook deletes exactly the files IT READ, by name. A replacement
+#     written between the read and the delete has a different name, so a new
+#     block can never be erased by a hook that never saw it.
+#   * Clearing needs EVIDENCE OF A NEWER SUCCESSFUL TURN, never chronology from
+#     ids: prompt ids do not order (a delayed PostToolUse from prompt A differs
+#     from a newer marker for prompt B just as much as a genuinely older one
+#     does). So `post-tool` deletes a marker only when the session transcript
+#     shows an assistant entry that is NOT an API error with a timestamp later
+#     than that marker's `at`. Missing prompt id, missing, unreadable or
+#     ambiguous transcript, no node: FAIL CLOSED, the marker STAYS. The evidence
+#     is tied to this STATE DIR, not to the marker's session id. NAMED RESIDUAL:
+#     that is a recovery HEURISTIC, not proof -- sharing a state dir does not
+#     establish that two sessions share one quota bucket (account, model or
+#     provider can differ), so a successful turn elsewhere under this dir can
+#     clear a marker whose own session is still limited. `sparrow skill unblock`
+#     is the operator recovery when the limited session is closed.
+#   * The quota auto-resume notifications are the one unconditional clear --
+#     Claude Code is telling us the limit is over -- and they clear from a
+#     SNAPSHOT too. NAMED RESIDUAL, not a guarantee: a notification delivered
+#     late, after a newer limit episode began, clears that episode's markers.
+#     Recovery then depends on the actual wake/failure lifecycle -- the next
+#     ATTEMPTED turn failing and StopFailure writing a fresh marker -- not on any
+#     presumed hook ordering; if no turn is attempted, nothing re-blocks.
+#   * NO EXPIRY. A marker's age is not evidence that quota recovered, so nothing
+#     here times one out: markers stand until transcript evidence, a quota-resume
+#     notification, or `sparrow skill unblock` removes them.
+#   * `prompt` does not clear anything: a prompt proves an ATTEMPT, not restored
+#     quota. It prints the standing-by line while a marker stands.
+#   * Cost of being wrong, bounded: an attempted turn that fails again re-writes
+#     a marker (new name, new `at`), so the worst case is ONE bounce of presence
+#     per attempted turn, and the CLI is back in standby within a cadence.
+#
+# PAYLOAD FIELDS THIS HOOK READS, and nothing else. StopFailure: `error_type`
+# (falling back to `error`), `session_id`, `prompt_id`, `transcript_path`,
+# `hook_event_name`. Notification: `notification_type`, `quota_type`.
+# UserPromptSubmit: `prompt`, only under SPARROW_STATUS_NOTES=verbose. Plus a
+# reset timestamp if a future Claude Code supplies one (`resets_at` /
+# `resumes_at` / `resetsAt`) -- none is documented today, so `resumesAt` is
+# optional everywhere. Everything else in the payload is undocumented and
+# treated as optional: a missing field is a no-op, never an error.
+#
+# SCOPE IS THE PROFILE'S OWN STATE DIR. The markers, like every other file here,
+# live in the SPARROW_STATE_DIR this hook command was stamped with, and the
+# status fan-out posts as the stamped SPARROW_PROFILE to the rooms that profile
+# belongs to. One session hitting its usage limit therefore cannot take a
+# neighbouring agent offline -- an isolation that assumes the existing model:
+# unrelated profiles use separate state dirs (what a project-scope install
+# writes, and what `SPARROW_STATE_DIR` exists to pin).
+#
+# DEBUG CAPTURE (off by default). With SPARROW_HOOK_DEBUG=1 every invocation
+# appends one line to <state dir>/hook-debug.log: the time, the mode, the hook
+# event, the `notification_type`/`error_type` when present, and the SORTED
+# TOP-LEVEL KEY NAMES of the payload. Names only -- no prompt text, no message
+# bodies, no paths -- so a real usage-limit event can be reported without
+# leaking content.
 #
 # Contract: this hook is a pure side-effect with ONE exception. Every mode but
 # `prompt` writes NOTHING to stdout (a Stop hook's stdout is a decision channel,
@@ -67,6 +146,8 @@ POST_STAMP="$STATE_DIR/auto-status-post"
 # Written by `stop`, consumed by the first hook of the NEXT turn — the
 # idle→working resume handshake for turns that begin without a user prompt.
 IDLE_MARKER="$STATE_DIR/auto-status-idle"
+# One file per block (see THE MARKER PROTOCOL above).
+BLOCKED_DIR="$STATE_DIR/blocked"
 POST_THROTTLE="${SPARROW_STATUS_POST_THROTTLE:-20}"
 MAX_ROOMS="${SPARROW_STATUS_MAX_ROOMS:-10}"
 PRESENCE_TTL="${SPARROW_PRESENCE_TTL:-300}"
@@ -80,9 +161,124 @@ if [ -z "$MODE" ]; then
     *'"hook_event_name":"UserPromptSubmit"'* | *'"hook_event_name": "UserPromptSubmit"'*) MODE=prompt ;;
     *'"hook_event_name":"PostToolUse"'* | *'"hook_event_name": "PostToolUse"'*) MODE=post-tool ;;
     *'"hook_event_name":"Notification"'* | *'"hook_event_name": "Notification"'*) MODE=notification ;;
+    *'"hook_event_name":"StopFailure"'* | *'"hook_event_name": "StopFailure"'*) MODE=stop-failure ;;
     *'"hook_event_name":"Stop"'* | *'"hook_event_name": "Stop"'*) MODE=stop ;;
     *) exit 0 ;;
   esac
+fi
+
+# First string value for `key` in the payload (no jq): the text after the first
+# occurrence of "<key>", past its colon, up to the closing quote. Whitespace
+# tolerant; a missing key or a non-string value yields nothing, which every
+# caller treats as "not supplied".
+payload_value() {
+  _k="$1"
+  case "$input" in
+    *"\"$_k\""*) ;;
+    *) return 0 ;;
+  esac
+  _rest=${input#*"\"$_k\""}
+  _rest=${_rest#*:}
+  case "$_rest" in
+    *'"'*)
+      _rest=${_rest#*'"'}
+      printf '%s' "${_rest%%'"'*}"
+      ;;
+  esac
+}
+
+# Strip anything that would break our hand-rolled JSON, and cap the length.
+safe_field() { printf '%s' "$1" | tr -d '"\\' | tr '\r\n\t' '   ' | cut -c1-"${2:-120}"; }
+
+# Local HH:MM for an ISO timestamp. GNU `date -d` when it is really GNU (BSD's
+# -d means something else entirely), else the ISO string's own clock field.
+clock_of() {
+  _iso="$1"
+  [ -n "$_iso" ] || return 0
+  if date --version >/dev/null 2>&1; then
+    _c=$(date -d "$_iso" +%H:%M 2>/dev/null || true)
+    [ -n "$_c" ] && { printf '%s' "$_c"; return 0; }
+  fi
+  printf '%s' "$_iso" | sed -n 's/.*T\([0-9][0-9]:[0-9][0-9]\).*/\1/p'
+}
+
+# Every usage-limit marker, oldest first (the filename starts with a compact
+# timestamp, so the glob's own order is chronological).
+blocked_markers() {
+  [ -d "$BLOCKED_DIR" ] || return 0
+  for _f in "$BLOCKED_DIR"/*.json; do
+    [ -f "$_f" ] && printf '%s\n' "$_f"
+  done
+}
+
+# Record ONE block under its own name. Never overwrites another marker, so a
+# clearing hook that is holding an older snapshot cannot delete this one.
+write_blocked_marker() {
+  _reason="$1"; _session="$2"; _prompt="$3"; _resumes="$4"; _at="$5"
+  mkdir -p "$BLOCKED_DIR" 2>/dev/null || true
+  _name="$(printf '%s' "$_at" | tr -cd '0-9')-$$"
+  _file="$BLOCKED_DIR/$_name.json"
+  _tmp="$_file.tmp"
+  if [ -n "$_resumes" ]; then
+    printf '{"version":1,"reason":"%s","at":"%s","session":"%s","prompt":"%s","resumesAt":"%s"}\n' \
+      "$_reason" "$_at" "$_session" "$_prompt" "$_resumes" > "$_tmp" 2>/dev/null || return 0
+  else
+    printf '{"version":1,"reason":"%s","at":"%s","session":"%s","prompt":"%s"}\n' \
+      "$_reason" "$_at" "$_session" "$_prompt" > "$_tmp" 2>/dev/null || return 0
+  fi
+  mv -f "$_tmp" "$_file" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
+}
+
+# Does the session transcript PROVE a successful assistant turn after <iso>?
+# Only `type`, `timestamp` and `isApiErrorMessage` are read from each line, and
+# only the tail is read. Anything we cannot establish answers no (fail closed):
+# no transcript, unreadable, no node, unparseable timestamps.
+transcript_newer_than() {
+  _tp="$1"; _iso="$2"
+  [ -n "$_tp" ] && [ -n "$_iso" ] && [ -r "$_tp" ] || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  _proof=$(tail -n 200 "$_tp" 2>/dev/null | SPARROW_MARKER_AT="$_iso" node -e '
+    let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+      try {
+        const at = Date.parse(process.env.SPARROW_MARKER_AT || "");
+        if (Number.isNaN(at)) return;
+        for (const line of s.split("\n")) {
+          if (!line.trim()) continue;
+          let j; try { j = JSON.parse(line); } catch (e) { continue; }
+          if (!j || j.type !== "assistant" || j.isApiErrorMessage === true) continue;
+          const t = Date.parse(j.timestamp || "");
+          if (!Number.isNaN(t) && t > at) { process.stdout.write("1"); return; }
+        }
+      } catch (e) {}
+    });' 2>/dev/null || true)
+  [ "$_proof" = 1 ]
+}
+
+# One string field out of one of our own small JSON records.
+json_field() {
+  sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | head -n 1
+}
+
+# The Notification event's type, read once (see the notification mode below).
+ntype=$(payload_value notification_type)
+
+# --- debug capture (SPARROW_HOOK_DEBUG=1; names, never content) -------------
+if [ "${SPARROW_HOOK_DEBUG:-}" = 1 ]; then
+  dbg_keys=""
+  if command -v node >/dev/null 2>&1; then
+    dbg_keys=$(printf '%s' "$input" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(j&&typeof j==="object")process.stdout.write(Object.keys(j).sort().join(","))}catch(e){}})' 2>/dev/null || true)
+  fi
+  dbg_extra=""
+  dbg_nt="$ntype"
+  dbg_er=$(payload_value error_type)
+  [ -n "$dbg_er" ] || dbg_er=$(payload_value error)
+  [ -n "$dbg_nt" ] && dbg_extra=" notification_type=$(safe_field "$dbg_nt" 60)"
+  [ -n "$dbg_er" ] && dbg_extra="$dbg_extra error_type=$(safe_field "$dbg_er" 60)"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s mode=%s event=%s%s keys=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" \
+    "${MODE:-none}" "$(safe_field "$(payload_value hook_event_name)" 40)" \
+    "$dbg_extra" "${dbg_keys:-unknown}" >> "$STATE_DIR/hook-debug.log" 2>/dev/null || true
 fi
 
 # Loop switch: only act while explicitly engaged (paused/absent = stay silent).
@@ -189,11 +385,78 @@ listener_nudge() {
   printf 'Sparrow: your listener %s. Before anything else, re-arm it: run `%s` as a tracked background task, then continue. (To step away on purpose: sparrow skill pause.)\n' "$cause" "$command"
 }
 
+# The standing-by line: while a usage-limit marker stands, the re-arm nudge is
+# the WRONG advice -- the listener is fine, the session cannot run, and there is
+# nothing to re-arm. Printing this does not clear anything: a prompt proves an
+# attempt, not restored quota.
+blocked_line() {
+  _m=$(blocked_markers | tail -n 1)
+  [ -n "$_m" ] || return 1
+  _reason=$(json_field "$_m" reason)
+  _at=$(json_field "$_m" at)
+  _clock=$(clock_of "$_at")
+  printf 'Sparrow: this session hit its usage limit at %s (%s); the listener is standing by and will reconnect when Claude Code resumes. Nothing to re-arm.\n' \
+    "${_clock:-an unknown time}" "${_reason:-unknown}"
+  return 0
+}
+
 # Speak BEFORE the credential checks below: a killed listener is worth saying out
 # loud even on a box where the status fan-out cannot run.
 if [ "$MODE" = prompt ]; then
-  listener_nudge || true
+  blocked_line || listener_nudge || true
 fi
+
+# --- usage-limit side effects, BEFORE the credential gate -------------------
+#
+# The local record has to land whether or not this box can reach the server: the
+# Stop hook, the next prompt and `sparrow skill status` all read it.
+blocked_note=""
+case "$MODE" in
+  stop-failure)
+    # `error_type` is the documented field; `error` is honored as a fallback.
+    err=$(payload_value error_type)
+    [ -n "$err" ] || err=$(payload_value error)
+    case "$err" in
+      rate_limit | billing_error | authentication_failed | account_on_hold | oauth_org_not_allowed | cloud_credential_error) ;;
+      # Retried by Claude Code, or our own bug: say nothing at all.
+      *) exit 0 ;;
+    esac
+    at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+    resumes=$(payload_value resets_at)
+    [ -n "$resumes" ] || resumes=$(payload_value resumes_at)
+    [ -n "$resumes" ] || resumes=$(payload_value resetsAt)
+    resumes=$(safe_field "$resumes" 40)
+    write_blocked_marker "$(safe_field "$err" 60)" "$(safe_field "$(payload_value session_id)" 80)" \
+      "$(safe_field "$(payload_value prompt_id)" 80)" "$resumes" "$at"
+    if [ "$err" = rate_limit ]; then
+      blocked_note="blocked — usage limit reached"
+      _c=$(clock_of "$resumes")
+      [ -n "$_c" ] && blocked_note="$blocked_note; resumes $_c"
+    else
+      blocked_note="blocked — $(safe_field "$err" 40)"
+    fi
+    ;;
+  post-tool)
+    # Snapshot the markers, then delete only the ones this run can PROVE are
+    # over. A marker written after this listing has a name we never saw.
+    tpath=$(payload_value transcript_path)
+    blocked_markers | while IFS= read -r _mk; do
+      [ -n "$_mk" ] || continue
+      transcript_newer_than "$tpath" "$(json_field "$_mk" at)" && rm -f "$_mk" 2>/dev/null
+    done
+    ;;
+  notification)
+    case "$ntype" in
+      quota_auto_resume_fired | quota_auto_resume_stale)
+        # Claude Code says the limit is over. Clear from a snapshot, by name.
+        blocked_markers | while IFS= read -r _mk; do
+          [ -n "$_mk" ] || continue
+          rm -f "$_mk" 2>/dev/null || true
+        done
+        ;;
+    esac
+    ;;
+esac
 
 # Resolve creds (identical ladder to sparrow-stop-check.sh): SPARROW_SERVER +
 # SPARROW_TOKEN from the env, else the credentials.json profile named by
@@ -310,29 +573,28 @@ case "$MODE" in
     rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;
   notification)
-    # Best-effort `notification_type` extraction (no jq): take the text after the
-    # FIRST "notification_type" key, past its colon, and read the quoted value.
-    # Whitespace-tolerant; a non-string value simply yields something we do not
-    # recognize, which lands in the no-op branch.
-    ntype=""
-    case "$input" in
-      *'"notification_type"'*)
-        rest=${input#*'"notification_type"'}
-        rest=${rest#*:}
-        case "$rest" in
-          *'"'*)
-            rest=${rest#*'"'}
-            ntype=${rest%%'"'*}
-            ;;
-        esac
-        ;;
-    esac
     case "$ntype" in
       permission_prompt | elicitation_dialog | elicitation_url_dialog | agent_needs_input)
         # A human is being asked something — we are stuck until they answer.
         refresh_presence
         post_status_all '{"state":"working","note":"blocked — needs your input","sticky":true}'
         rm -f "$IDLE_MARKER" 2>/dev/null || true
+        ;;
+      quota_auto_resume_fired | quota_auto_resume_stale)
+        # Back to work. The markers are already gone (above); the resume
+        # handshake in post-tool takes it from here.
+        qt=$(payload_value quota_type)
+        note="working"
+        [ -n "$qt" ] && note="working (quota $(safe_field "$qt" 30) resumed)"
+        refresh_presence
+        post_status_all "{\"state\":\"working\",\"note\":\"$note\",\"sticky\":true}"
+        rm -f "$IDLE_MARKER" 2>/dev/null || true
+        ;;
+      quota_auto_resume_disabled)
+        # The limit reset, but Claude Code will NOT continue on its own. The
+        # markers stand, and the note says who has to act.
+        refresh_presence
+        post_status_all '{"state":"working","note":"blocked — usage limit reached; auto-resume is off, needs a human to continue","sticky":true}'
         ;;
       idle_prompt)
         # Claude Code nudging the HUMAN that the session is sitting idle. The
@@ -366,6 +628,16 @@ case "$MODE" in
     # Throttled presence refresh only — never rewrite the status (keeps sinceAt).
     throttled "$POST_STAMP" "$POST_THROTTLE" || exit 0
     refresh_presence
+    ;;
+  stop-failure)
+    # Presence stays refreshed on purpose: the listener really is holding the
+    # stream, so the honest picture is online WITH a blocked note, not a silent
+    # disappearance. StopFailure's stdout is discarded by Claude Code, so this
+    # writes nothing to it.
+    [ -n "$blocked_note" ] || exit 0
+    refresh_presence
+    post_status_all "{\"state\":\"working\",\"note\":\"$blocked_note\",\"sticky\":true}"
+    rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;
   stop)
     post_status_all '{"state":"idle"}'

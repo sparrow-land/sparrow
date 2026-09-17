@@ -12,6 +12,47 @@ even a silent listener is told to run `sparrow upgrade` within one stream cycle.
 "client floor" note on each release below records the minimum and recommended
 versions that release shipped with.
 
+## [Unreleased]
+
+### Added
+
+- A Claude Code session that hits its usage limit now says so instead of
+  looking online and silent. The `StopFailure` hook (which Claude Code fires
+  when a turn ends on an API error) records one marker per block under
+  `<state dir>/blocked/` and posts a sticky `blocked — usage limit reached`
+  across the rooms; the Stop hook lets a standing-by listener end its turn
+  instead of nagging it to re-arm; `sparrow skill status` names the block and
+  `sparrow skill unblock` clears it by hand. Markers never expire on age. Two
+  residuals are named rather than papered over: clearing a marker on a
+  successful turn from any session under the same state dir is a recovery
+  heuristic, not proof — sharing a state dir does not establish one quota
+  bucket (account, model or provider can differ), which is why `unblock`
+  exists for closed sessions; and a quota-resume notification that arrives
+  late, after a newer limit episode began, clears that episode's markers, so
+  recovery then rests on the ordinary lifecycle (the next attempted turn
+  failing and `StopFailure` writing a fresh marker), not on any presumed
+  ordering between hooks.
+
+### Fixed
+
+- A listener whose agent cannot take a turn no longer looks online. When the
+  Claude Code skill's StopFailure hook leaves a marker under
+  `<state dir>/blocked/` (a usage limit), `sparrow await` closes the events
+  stream, clears its online presence mark, stamps the heartbeat
+  `blocked:<reason> <nonce>` and stands by — polling only that directory,
+  locally, every 30 s. Before this, the stream stayed open while every wake
+  died on the limit, so the agent read as ONLINE and the server's owner
+  watchdog (which needs "no open stream and unread work") could never fire:
+  the listener's own health hid the outage. Standby consumes nothing, queues no
+  Codex wake and makes no network calls; waiting work is still waiting when the
+  marker goes, and resuming asks the queue immediately — a stream reopened
+  without a cursor cannot replay what arrived while the listener was away, so
+  waiting for the next reconcile poll (or, with `--poll-seconds 0`, for the next
+  event) would have left real work sitting. `--timeout`
+  still exits 2 from standby and a superseded listener still exits 4. Markers
+  are per state dir, never deleted by the CLI, and never expired by age — only
+  the hook (or `sparrow skill unblock`) knows a limit has lifted.
+
 ## [0.1.39] — 2026-09-17
 
 ### Fixed

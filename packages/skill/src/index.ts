@@ -11,6 +11,7 @@ export {
   uninstall,
   pause,
   resume,
+  unblock,
   status,
   verify,
   assetsDir,
@@ -54,6 +55,16 @@ export {
   type FiredStamp,
   type HookVerification,
 } from './provider-codex.js';
+
+/** Usage-limit markers: what `sparrow skill status`/`unblock` and the hooks read. */
+export {
+  readBlockedMarkers,
+  currentBlock,
+  clearBlockedMarkers,
+  blockedDir,
+  clockOf,
+  type BlockedMarker,
+} from './blocked.js';
 
 /** Why the current listener generation died, when it recorded a reason. */
 export { readAwaitFailure, type AwaitFailure } from './await-failure.js';

@@ -21,7 +21,7 @@
  * when the other one already owns the registration ({@link installRefusal}):
  * proceeding would leave two live registrations while overwriting the playbook
  * underneath them.
- * Events    → Stop, UserPromptSubmit, PostToolUse, Notification.
+ * Events    → Stop, StopFailure, UserPromptSubmit, PostToolUse, Notification.
  * Also      → `env.CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, which opts the
  *             session out of Claude Code's memory-pressure reaper so a long idle
  *             stretch cannot kill the background `sparrow await` that is a
@@ -45,7 +45,8 @@ const SCRIPTS: ReadonlyArray<string> = ['sparrow-stop-check.sh', 'sparrow-auto-s
  * on the type as well — belt and braces).
  */
 const NOTIFICATION_MATCHER =
-  'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt';
+  'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt|' +
+  'quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled';
 
 /**
  * The Claude Code hook registrations merged into the settings file.
@@ -55,9 +56,15 @@ const NOTIFICATION_MATCHER =
  * paths — so a blocked stop never flickers the agent idle (no separate Stop
  * entry, no working→idle→working churn).
  */
-type HookEvent = 'Stop' | 'UserPromptSubmit' | 'PostToolUse' | 'Notification';
+type HookEvent = 'Stop' | 'StopFailure' | 'UserPromptSubmit' | 'PostToolUse' | 'Notification';
 const HOOKS: ReadonlyArray<{ file: string; event: HookEvent; mode?: string; matcher?: string }> = [
   { file: 'sparrow-stop-check.sh', event: 'Stop' },
+  // StopFailure is a DIFFERENT event from Stop, and the plain Stop hook does not
+  // fire when a turn ends on an API error. Without this entry a session that has
+  // hit its usage limit ends every turn in silence while still looking online —
+  // listener holding the stream, presence green, no turn able to run. Codex has
+  // no documented equivalent event, so its adapter is deliberately untouched.
+  { file: 'sparrow-auto-status.sh', event: 'StopFailure', mode: 'stop-failure' },
   { file: 'sparrow-auto-status.sh', event: 'UserPromptSubmit', mode: 'prompt' },
   { file: 'sparrow-auto-status.sh', event: 'PostToolUse', mode: 'post-tool', matcher: '*' },
   {
@@ -392,7 +399,9 @@ export const CLAUDE_ADAPTER: ProviderAdapter & DualSettingsAdapter = {
   wire(r: Resolved): void {
     const sp = settingsPath(r);
     syncSettings(r, 'install');
-    r.log(`Hooks merged into ${sp} (Stop + UserPromptSubmit + PostToolUse + Notification).`);
+    r.log(
+      `Hooks merged into ${sp} (Stop + StopFailure + UserPromptSubmit + PostToolUse + Notification).`,
+    );
     r.log(BG_REAP_INSTALL_NOTE);
     if (r.scope === 'project') {
       r.log(
@@ -440,7 +449,7 @@ export const CLAUDE_ADAPTER: ProviderAdapter & DualSettingsAdapter = {
           groups.some((g) => (g.hooks ?? []).some((h) => typeof h.command === 'string' && h.command.includes('sparrow-')))
         );
       });
-    for (const event of ['Stop', 'UserPromptSubmit', 'PostToolUse', 'Notification']) {
+    for (const event of ['Stop', 'StopFailure', 'UserPromptSubmit', 'PostToolUse', 'Notification']) {
       lines.push(
         registered(event)
           ? { level: 'ok', text: `hook ${event}: registered` }

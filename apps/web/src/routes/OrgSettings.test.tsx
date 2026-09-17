@@ -7,7 +7,6 @@ import { AuthProvider } from '../lib/auth.js';
 import { OrgProvider } from '../lib/org.js';
 import { api } from '../lib/client.js';
 import { OrgSettings } from './OrgSettings.js';
-import { fmtDate, fmtDateTime } from './org/ui.js';
 
 const ORG_ID = 'org_1';
 
@@ -328,58 +327,6 @@ describe('OrgSettings', () => {
     await userEvent.click(createBtn);
 
     expect(await screen.findByText('https://example.test/invite/ivk_secret')).toBeInTheDocument();
-  });
-
-  /**
-   * Issue #7: note-less invites all rendered as "Invite · From Jake · expires
-   * Sep 24" — five identical rows and no way to tell which one to revoke. Each
-   * row now carries when it was made and a masked id, plus how many enrollments
-   * have come through it.
-   */
-  it('tells note-less invite rows apart by creation time, masked id and use count', async () => {
-    useFetch(
-      mockFetch({
-        invites: [
-          {
-            id: 'inv_aaaaaaaaa1b2',
-            inviter: { id: jake.id, displayName: 'Jake' },
-            note: null,
-            expiresAt: '2026-09-24T12:00:00Z',
-            revokedAt: null,
-            createdAt: '2026-09-17T12:00:00Z',
-            useCount: 0,
-          },
-          {
-            id: 'inv_bbbbbbbbc3d4',
-            inviter: { id: jake.id, displayName: 'Jake' },
-            note: null,
-            expiresAt: '2026-09-24T12:00:00Z',
-            revokedAt: null,
-            createdAt: '2026-09-16T12:00:00Z',
-            useCount: 2,
-          },
-        ],
-      }),
-    );
-    renderOrgSettings();
-
-    const invites = (await screen.findByRole('heading', { name: /^invites$/i })).closest(
-      'section',
-    )!;
-    const first = (await within(invites).findByText('inv_…a1b2')).closest('div')!.parentElement!;
-    expect(first.textContent).toContain('From Jake');
-    expect(first.textContent).toContain(`created ${fmtDateTime('2026-09-17T12:00:00Z')}`);
-    expect(first.textContent).toContain(`expires ${fmtDate('2026-09-24T12:00:00Z')}`);
-    // Nobody has come through this one — nothing to say about use.
-    expect(first.textContent).not.toMatch(/used/i);
-
-    const second = within(invites).getByText('inv_…c3d4').closest('div')!.parentElement!;
-    expect(second.textContent).toContain(`created ${fmtDateTime('2026-09-16T12:00:00Z')}`);
-    expect(second.textContent).toMatch(/used 2×/);
-    // Two note-less rows, two different lines — that is the whole point.
-    expect(fmtDateTime('2026-09-17T12:00:00Z')).not.toBe(fmtDateTime('2026-09-16T12:00:00Z'));
-    // The whole id is never a secret, but the row shows only its tail.
-    expect(invites.textContent).not.toContain('inv_aaaaaaaaa1b2');
   });
 
   it('approves a pending enrollment', async () => {

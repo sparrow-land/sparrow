@@ -5,8 +5,8 @@ import { ErrorText, Loading, Notice, Panel, Section, errMsg, fmtDate, ghostBtn }
 
 /**
  * Org admin → **Rooms** (SPEC "Rooms & members → Org room governance"). The
- * owner/admin's view of every PROJECT room in the org, including the ones they
- * were never invited to (DMs are never enumerated: that a DM exists is private), with the one verb governance needs: archive (and restore).
+ * owner/admin's view of every room in the org, including the ones they were
+ * never invited to, with the one verb governance needs: archive (and restore).
  *
  * What this section deliberately does NOT do is read. There is no message
  * preview, no member roster, no "join this room" button — archiving a room is
@@ -61,12 +61,12 @@ export function RoomsSection({ orgId }: { orgId: string }) {
     <Section
       id="rooms"
       title="Rooms"
-      lead="Every project room in your organization, including ones you are not in. DM rooms are private and never listed here. You can archive a room to retire it — you cannot read it: archiving never adds you to a room or shows you a message."
+      lead="Every room in your organization, including ones you are not in. You can archive a room to retire it — you cannot read it: archiving never adds you to a room or shows you a message."
     >
       {!rooms ? (
         <Panel>{error ? <ErrorText>{error}</ErrorText> : <Loading />}</Panel>
       ) : rooms.length === 0 ? (
-        <Notice>No project rooms yet.</Notice>
+        <Notice>No rooms yet.</Notice>
       ) : (
         <div className="overflow-hidden rounded-xl border border-[var(--sparrow-border)]">
           {rooms.map((room, i) => (

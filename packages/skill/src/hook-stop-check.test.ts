@@ -925,6 +925,54 @@ describe('sparrow-stop-check.sh', () => {
     });
   });
 
+  /* ------------------- a session that CANNOT run at all -------------------- *
+   * When Claude Code hits its usage limit the CLI stands by: it closes the
+   * stream and stamps the heartbeat `blocked` / `blocked:<reason>`. Blocking the
+   * stop then helps nobody — the agent cannot run, so it cannot re-arm anything,
+   * and the nudge would be actively wrong ("re-arm your listener" when the
+   * listener is fine and the account is out of quota). Allow, silently, fresh or
+   * stale: the usage-limit status and the prompt-time line carry that story.
+   * ------------------------------------------------------------------------- */
+  describe('a listener standing by on a usage limit', () => {
+    for (const stamp of ['blocked', 'blocked:rate_limit', 'blocked:billing_error']) {
+      it(`allows the stop silently for a FRESH ${stamp} heartbeat`, () => {
+        writeLoopState('engaged');
+        writeHeartbeat(3, stamp);
+        const r = runHook();
+        expect(r.code).toBe(0);
+        expect(r.stdout.trim()).toBe('');
+      });
+
+      it(`allows it for a STALE ${stamp} heartbeat too`, () => {
+        writeLoopState('engaged');
+        writeHeartbeat(9999, stamp);
+        const r = runHook();
+        expect(r.code).toBe(0);
+        expect(r.stdout.trim()).toBe('');
+      });
+    }
+
+    it('allows under Codex as well, where a plain await would be judged passive', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(3, 'blocked:rate_limit');
+      const r = runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('ignores a SUPERSEDED generation blocked stamp exactly like any other', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(3, 'blocked:rate_limit 4f2c9a01bb33cd10');
+      fs.writeFileSync(
+        path.join(stateDir, 'await-owner.json'),
+        JSON.stringify({ version: 1, nonce: 'b0b0', pid: 4242, kind: 'await' }),
+      );
+      const r = runHook();
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe(''); // unjudgeable → allow, same as before
+    });
+  });
+
   it('does NOT set idle on a blocked stop (loop drift)', () => {
     writeLoopState('engaged'); // stale/no heartbeat → block
     const curlLog = stubRecordingCurl();

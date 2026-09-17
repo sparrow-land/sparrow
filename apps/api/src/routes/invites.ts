@@ -4,7 +4,7 @@
  * exactly once, inside the created invite's `url`.
  */
 import type { FastifyInstance } from 'fastify';
-import { and, asc, count, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import {
   CreateInviteRequestSchema,
   type CreateInviteResponse,
@@ -15,29 +15,12 @@ import {
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';
 import { effectiveOrigin } from '../effective-origin.js';
-import { enrollments, humans, invites, orgs } from '../db/schema.js';
+import { humans, invites, orgs } from '../db/schema.js';
 import type { InviteRow } from '../db/schema.js';
 import { parse } from '../validate.js';
 import { forbidden, notFound } from '../errors.js';
 import { parseOrgSettings, requireMembership, roleAtLeast } from '../org-helpers.js';
 import { createInvite } from '../invite-helpers.js';
-
-/**
- * How many enrollments have come through an invite, whatever their outcome.
- * Zero is the property that matters: a door nobody has walked through can be
- * REUSED (the invite dialog reuses a blank invite rather than minting a fresh
- * live one on every open — SPEC *Invites & enrollment*), and an admin reading
- * the list can tell a spent invite from an untouched one.
- */
-function useCountOf(ctx: AppContext, inviteId: string): number {
-  return (
-    ctx.db
-      .select({ n: count() })
-      .from(enrollments)
-      .where(eq(enrollments.inviteId, inviteId))
-      .get()?.n ?? 0
-  );
-}
 
 function toInvite(ctx: AppContext, row: InviteRow): Invite {
   // An admin owner invite carries no inviter (NULL); member-created invites
@@ -55,7 +38,6 @@ function toInvite(ctx: AppContext, row: InviteRow): Invite {
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt ?? null,
     createdAt: row.createdAt,
-    useCount: useCountOf(ctx, row.id),
   };
 }
 

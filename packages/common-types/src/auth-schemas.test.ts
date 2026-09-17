@@ -354,18 +354,6 @@ describe('invites', () => {
     expect('token' in InviteSchema.parse(invite)).toBe(false);
     expect(InviteSchema.parse({ ...invite, note: null, revokedAt: '2026-08-21T00:00:00Z' }).revokedAt).toBeTruthy();
   });
-  /**
-   * `useCount` is how many enrollments have come through the invite. The invite
-   * dialog reuses a blank, unused invite instead of minting a fresh door every
-   * time it opens (issue #5), so "has anybody walked through this?" has to be
-   * on the wire. Absent (an older server) reads as 0.
-   */
-  it('InviteSchema carries useCount, defaulting to 0 when absent', () => {
-    expect(InviteSchema.parse({ ...invite, useCount: 3 }).useCount).toBe(3);
-    expect(InviteSchema.parse(invite).useCount).toBe(0);
-    expect(InviteSchema.safeParse({ ...invite, useCount: -1 }).success).toBe(false);
-    expect(InviteSchema.safeParse({ ...invite, useCount: 1.5 }).success).toBe(false);
-  });
   it('CreateInvite request bounds expiresInDays 1..30', () => {
     expect(CreateInviteRequestSchema.parse({}).note).toBeUndefined();
     expect(CreateInviteRequestSchema.parse({ note: 'hi', expiresInDays: 30 }).expiresInDays).toBe(30);

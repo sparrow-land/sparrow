@@ -279,7 +279,9 @@ describe('sparrow-auto-status.sh — notification mode', () => {
     expect(fs.existsSync(path.join(stateDir, 'auto-status-idle'))).toBe(true);
   });
 
-  for (const type of ['auth_success', 'elicitation_complete', 'quota_auto_resume_fired', 'brand_new_type']) {
+  // `quota_auto_resume_*` used to live here; it is handled now (see the
+  // quota auto-resume describe below). Everything still unknown stays a no-op.
+  for (const type of ['auth_success', 'elicitation_complete', 'brand_new_type']) {
     it(`is a no-op for ${type}`, () => {
       writeLoopState('engaged');
       stubCurl();
@@ -685,5 +687,397 @@ describe('sparrow-auto-status.sh — credential profile resolution', () => {
     expect(statusPosts().map((p) => p.url)).toContain(
       'https://example.test/api/v1/rooms/rom_a/status',
     );
+  });
+});
+
+/* =============================== USAGE LIMITS =============================== *
+ * THE SILENT FAILURE (Jake, 2026-09-17). When a Claude Code session hits its
+ * usage limit the agent looks perfectly ONLINE — the background `sparrow await`
+ * still holds the stream, presence stays green — while every wake dies on the
+ * limit and no turn ever runs. Nobody is told, in either direction.
+ *
+ * Claude Code fires `StopFailure` (NOT the plain `Stop` hook) when a turn ends
+ * on an API error, naming it in `error_type`. Some of those errors mean "this
+ * agent cannot run until something changes" and are worth saying out loud; the
+ * rest are retried by Claude Code, or are the agent's own bug, and must stay
+ * silent — a sticky status is expensive to get wrong.
+ *
+ * The marker protocol is the interesting part, and it is deliberately
+ * paranoid: one FILE per block under `<state dir>/blocked/`, cleared only by
+ * name from a snapshot, and only on EVIDENCE — a successful assistant turn in
+ * the transcript after that marker was written. Prompt ids cannot order
+ * anything (a delayed PostToolUse from prompt A differs from a newer marker for
+ * prompt B exactly as much as a genuinely older one does), and a marker's age
+ * is not evidence quota came back, so nothing expires.
+ * ========================================================================== */
+const BLOCKED_DIR = () => path.join(stateDir, 'blocked');
+const markerFiles = (): string[] =>
+  fs.existsSync(BLOCKED_DIR()) ? fs.readdirSync(BLOCKED_DIR()).filter((f) => f.endsWith('.json')).sort() : [];
+const markers = (): Record<string, unknown>[] =>
+  markerFiles().map((f) => JSON.parse(fs.readFileSync(path.join(BLOCKED_DIR(), f), 'utf8')) as Record<string, unknown>);
+
+function stopFailure(errorType: string | null, extra = ''): string {
+  const e = errorType === null ? '' : `"error_type":"${errorType}","error_message":"You've reached your limit.",`;
+  return (
+    `{"session_id":"ses_1","prompt_id":"pr_1","hook_event_name":"StopFailure",${e}` +
+    `"transcript_path":"${path.join(stateDir, 'transcript.jsonl')}","cwd":"/tmp","permission_mode":"default"${extra}}`
+  );
+}
+
+/** Write a JSONL transcript of `{type,timestamp,isApiErrorMessage}` entries. */
+function writeTranscript(entries: { type: string; at: Date; apiError?: boolean }[]): string {
+  const p = path.join(stateDir, 'transcript.jsonl');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    p,
+    entries
+      .map((e) =>
+        JSON.stringify({
+          type: e.type,
+          timestamp: e.at.toISOString(),
+          ...(e.apiError ? { isApiErrorMessage: true, error: 'rate_limit' } : {}),
+          message: { role: e.type, content: 'text we must never read' },
+        }),
+      )
+      .join('\n') + '\n',
+  );
+  return p;
+}
+
+/** Write a marker by hand, as StopFailure would have. */
+function writeMarker(name: string, fields: Record<string, unknown>): string {
+  fs.mkdirSync(BLOCKED_DIR(), { recursive: true });
+  const f = path.join(BLOCKED_DIR(), name);
+  fs.writeFileSync(f, JSON.stringify({ version: 1, reason: 'rate_limit', ...fields }));
+  return f;
+}
+
+describe('sparrow-auto-status.sh — stop-failure mode', () => {
+  const BLOCKING = [
+    'rate_limit',
+    'billing_error',
+    'authentication_failed',
+    'account_on_hold',
+    'oauth_org_not_allowed',
+    'cloud_credential_error',
+  ];
+  const RETRIED = ['overloaded', 'server_error', 'max_output_tokens', 'invalid_request', 'model_not_found', 'unknown'];
+
+  it('records a marker and posts a usage-limit status for rate_limit', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const r = runHook('stop-failure', stopFailure('rate_limit'));
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe(''); // StopFailure output is discarded; write none
+    expect(markers()).toHaveLength(1);
+    const rec = markers()[0]!;
+    expect(rec.version).toBe(1);
+    expect(rec.reason).toBe('rate_limit');
+    expect(rec.session).toBe('ses_1');
+    expect(rec.prompt).toBe('pr_1');
+    expect(new Date(rec.at as string).getTime()).toBeGreaterThan(Date.now() - 60_000);
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0);
+    for (const p of posts) {
+      expect(p.body).toContain('"state":"working"');
+      expect(p.body).toContain('"sticky":true');
+      expect(p.body).toContain('blocked — usage limit reached');
+    }
+  });
+
+  it('accepts the older `error` spelling as a fallback', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop-failure', '{"session_id":"ses_1","hook_event_name":"StopFailure","error":"rate_limit"}');
+    expect(markers()[0]!.reason).toBe('rate_limit');
+  });
+
+  it('names the reason for the other blocking errors', () => {
+    for (const error of BLOCKING.filter((e) => e !== 'rate_limit')) {
+      fs.rmSync(curlLog, { force: true });
+      fs.rmSync(BLOCKED_DIR(), { recursive: true, force: true });
+      writeLoopState('engaged');
+      stubCurl();
+      runHook('stop-failure', stopFailure(error));
+      expect(markers()[0]!.reason).toBe(error);
+      expect(statusPosts()[0]!.body).toContain(`blocked — ${error}`);
+    }
+  });
+
+  it('appends the reset time if a payload ever carries one', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop-failure', stopFailure('rate_limit', ',"resets_at":"2026-09-17T14:30:00Z"'));
+    expect(markers()[0]!.resumesAt).toBe('2026-09-17T14:30:00Z');
+    expect(statusPosts()[0]!.body).toMatch(/blocked — usage limit reached; resumes \d\d:\d\d/);
+  });
+
+  it('says NOTHING for an error Claude Code retries or that is our own bug', () => {
+    for (const error of RETRIED) {
+      writeLoopState('engaged');
+      stubCurl();
+      const r = runHook('stop-failure', stopFailure(error));
+      expect(r.code).toBe(0);
+      expect(markerFiles()).toEqual([]);
+      expect(statusPosts()).toEqual([]);
+    }
+  });
+
+  it('says nothing for a payload with no error field at all', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop-failure', stopFailure(null));
+    expect(markerFiles()).toEqual([]);
+    expect(statusPosts()).toEqual([]);
+  });
+
+  it('honours the loop switch', () => {
+    writeLoopState('paused');
+    stubCurl();
+    expect(runHook('stop-failure', stopFailure('rate_limit')).code).toBe(0);
+    expect(markerFiles()).toEqual([]);
+    expect(statusPosts()).toEqual([]);
+  });
+
+  it('still records the block when the status fan-out cannot run', () => {
+    // No credentials: the network half is impossible, but the local marker is
+    // what the Stop hook and the next prompt read, so it must still land.
+    writeLoopState('engaged');
+    stubCurl();
+    const r = runHook('stop-failure', stopFailure('rate_limit'), { SPARROW_SERVER: '', SPARROW_TOKEN: '' });
+    expect(r.code).toBe(0);
+    expect(markers()[0]!.reason).toBe('rate_limit');
+  });
+
+  it('writes into the state dir it was pointed at, and no other', () => {
+    // One limited session must not take a neighbour offline: every marker lives
+    // in the SPARROW_STATE_DIR the hook command was stamped with.
+    const neighbour = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-as-other-'));
+    fs.writeFileSync(path.join(neighbour, 'loop-state'), 'engaged\n');
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop-failure', stopFailure('rate_limit'), { SPARROW_STATE_DIR: neighbour });
+    expect(markerFiles()).toEqual([]); // this dir untouched
+    expect(fs.readdirSync(path.join(neighbour, 'blocked'))).toHaveLength(1);
+    fs.rmSync(neighbour, { recursive: true, force: true });
+  });
+});
+
+describe('sparrow-auto-status.sh — clearing a marker takes EVIDENCE', () => {
+  it('removes a marker when the transcript shows a later successful turn', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const at = new Date(Date.now() - 120_000);
+    writeMarker('20260917T000000-1.json', { at: at.toISOString(), prompt: 'pr_1' });
+    writeTranscript([
+      { type: 'assistant', at: new Date(at.getTime() - 60_000) },
+      { type: 'assistant', at: new Date(at.getTime() + 60_000) }, // after the marker
+    ]);
+    runHook('post-tool', stopFailure(null));
+    expect(markerFiles()).toEqual([]);
+  });
+
+  /**
+   * THE REVERSED-ORDER REGRESSION. A delayed PostToolUse from prompt A arrives
+   * after prompt B's turn has already been rate-limited. Its prompt id differs
+   * from the marker's — which is exactly what an *older* marker looks like too —
+   * so id inequality must not be allowed to clear anything. The transcript says
+   * what really happened: the last assistant entry is B's API error.
+   */
+  it('keeps a NEWER marker when the only later entry is an API error', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const at = new Date(Date.now() - 30_000);
+    writeMarker('20260917T000100-2.json', { at: at.toISOString(), prompt: 'pr_B' });
+    writeTranscript([
+      { type: 'assistant', at: new Date(at.getTime() - 120_000) },
+      { type: 'assistant', at: new Date(at.getTime() + 5_000), apiError: true },
+    ]);
+    runHook('post-tool', '{"hook_event_name":"PostToolUse","prompt_id":"pr_A","transcript_path":"' +
+      path.join(stateDir, 'transcript.jsonl') + '"}');
+    expect(markerFiles()).toHaveLength(1);
+  });
+
+  it('keeps the marker when there is no prompt id and no transcript', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeMarker('20260917T000200-3.json', { at: new Date().toISOString() });
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(markerFiles()).toHaveLength(1);
+  });
+
+  it('keeps the marker when the transcript path is unreadable', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeMarker('20260917T000300-4.json', { at: new Date().toISOString() });
+    runHook('post-tool', '{"hook_event_name":"PostToolUse","transcript_path":"/nope/missing.jsonl"}');
+    expect(markerFiles()).toHaveLength(1);
+  });
+
+  it('keeps a marker written AFTER the hook took its snapshot', () => {
+    // The race the unique filenames exist for: the hook clears what it read, and
+    // a block recorded in the meantime has a name it never saw. Simulated by
+    // leaving a second marker the transcript cannot vouch for.
+    writeLoopState('engaged');
+    stubCurl();
+    const old = new Date(Date.now() - 300_000);
+    writeMarker('20260917T000400-5.json', { at: old.toISOString() });
+    writeMarker('20260917T990000-6.json', { at: new Date(Date.now() + 600_000).toISOString() });
+    writeTranscript([{ type: 'assistant', at: new Date(old.getTime() + 60_000) }]);
+    runHook('post-tool', stopFailure(null));
+    expect(markerFiles()).toEqual(['20260917T990000-6.json']);
+  });
+
+  it('a prompt does NOT clear anything (an attempt is not restored quota)', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeMarker('20260917T000500-7.json', { at: new Date(Date.now() - 60_000).toISOString() });
+    writeTranscript([{ type: 'assistant', at: new Date() }]);
+    runHook('prompt', '{"prompt":"hi","hook_event_name":"UserPromptSubmit"}');
+    expect(markerFiles()).toHaveLength(1);
+  });
+});
+
+describe('sparrow-auto-status.sh — quota auto-resume notifications', () => {
+  for (const type of ['quota_auto_resume_fired', 'quota_auto_resume_stale']) {
+    it(`clears the markers and goes back to working on ${type}`, () => {
+      writeLoopState('engaged');
+      writeMarker('20260917T000600-8.json', { at: new Date().toISOString() });
+      stubCurl();
+      const r = runHook('notification', notify(type));
+      expect(r.code).toBe(0);
+      expect(markerFiles()).toEqual([]);
+      const posts = statusPosts();
+      expect(posts.length).toBeGreaterThan(0);
+      for (const p of posts) {
+        expect(p.body).toContain('"state":"working"');
+        expect(p.body).toContain('"sticky":true');
+        expect(p.body).not.toContain('blocked');
+      }
+    });
+  }
+
+  it('names the quota type in the note when the payload carries one', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook(
+      'notification',
+      '{"hook_event_name":"Notification","notification_type":"quota_auto_resume_fired","notification_data":{"quota_type":"five_hour","resume_after_seconds":120}}',
+    );
+    expect(statusPosts()[0]!.body).toContain('quota five_hour resumed');
+  });
+
+  it('KEEPS the markers and says a human is needed when auto-resume is disabled', () => {
+    writeLoopState('engaged');
+    writeMarker('20260917T000700-9.json', { at: new Date().toISOString() });
+    stubCurl();
+    runHook('notification', notify('quota_auto_resume_disabled'));
+    expect(markerFiles()).toHaveLength(1);
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0);
+    expect(posts[0]!.body).toContain(
+      'blocked — usage limit reached; auto-resume is off, needs a human to continue',
+    );
+  });
+
+  /**
+   * THE FAILED-RETRY CYCLE, end to end. A late auto-resume notification can
+   * clear an episode that is still live. Recovery is not a guarantee about hook
+   * ordering — it is the ordinary lifecycle: the next attempted turn fails, and
+   * StopFailure writes a fresh marker.
+   */
+  it('re-blocks after a clear when the next attempted turn fails again', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeMarker('20260917T000800-10.json', { at: new Date().toISOString() });
+    runHook('notification', notify('quota_auto_resume_fired'));
+    expect(markerFiles()).toEqual([]);
+    runHook('stop-failure', stopFailure('rate_limit', ',"x":1'));
+    expect(markerFiles()).toHaveLength(1);
+    expect(markers()[0]!.reason).toBe('rate_limit');
+    expect(new Date(markers()[0]!.at as string).getTime()).toBeGreaterThan(Date.now() - 60_000);
+  });
+});
+
+describe('sparrow-auto-status.sh — the prompt-time blocked line', () => {
+  const writeAgedMarker = (ageSeconds: number, reason = 'rate_limit'): string => {
+    const at = new Date(Date.now() - ageSeconds * 1000);
+    writeMarker(`2026-${ageSeconds}.json`, { at: at.toISOString(), reason });
+    return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+  };
+
+  it('replaces the re-arm nudge with the standing-by line', () => {
+    writeLoopState('engaged');
+    const hhmm = writeAgedMarker(120);
+    stubCurl();
+    const r = runHook('prompt', '{"prompt":"hi"}');
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(`Sparrow: this session hit its usage limit at ${hhmm} (rate_limit)`);
+    expect(r.stdout).toContain('the listener is standing by and will reconnect when Claude Code resumes');
+    expect(r.stdout).toContain('Nothing to re-arm.');
+    expect(r.stdout).not.toMatch(/re-arm it: run/i); // not the listener nudge
+  });
+
+  it('wins over the dead-listener nudge (a limited session cannot re-arm anything)', () => {
+    writeLoopState('engaged');
+    writeAgedMarker(60);
+    writeHeartbeat('killed:SIGTERM'); // would normally nag loudly
+    stubCurl();
+    const out = runHook('prompt', '{"prompt":"hi"}').stdout;
+    expect(out).toContain('hit its usage limit');
+    expect(out).not.toContain('was killed');
+  });
+
+  it('keeps speaking for an OLD marker: age is not evidence quota came back', () => {
+    writeLoopState('engaged');
+    writeAgedMarker(40 * 3600);
+    stubCurl();
+    expect(runHook('prompt', '{"prompt":"hi"}').stdout).toContain('hit its usage limit');
+  });
+
+  it('says nothing extra when there is no marker at all', () => {
+    writeLoopState('engaged');
+    writeHeartbeat('await');
+    stubCurl();
+    expect(runHook('prompt', '{"prompt":"hi"}').stdout.trim()).toBe('');
+  });
+});
+
+describe('sparrow-auto-status.sh — debug capture', () => {
+  const logFile = () => path.join(stateDir, 'hook-debug.log');
+
+  it('writes nothing at all by default', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop-failure', stopFailure('rate_limit'));
+    expect(fs.existsSync(logFile())).toBe(false);
+  });
+
+  it('records the mode, event, error_type and the payload KEY NAMES only', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop-failure', stopFailure('rate_limit'), { SPARROW_HOOK_DEBUG: '1' });
+    const line = fs.readFileSync(logFile(), 'utf8').trim();
+    expect(line).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ /);
+    expect(line).toContain('mode=stop-failure');
+    expect(line).toContain('event=StopFailure');
+    expect(line).toContain('error_type=rate_limit');
+    expect(line).toContain('keys=');
+    expect(line).toContain('session_id');
+    expect(line).toContain('transcript_path');
+    // Names, never values: the error message and the path itself stay out.
+    expect(line).not.toContain("You've reached");
+    expect(line).not.toContain(stateDir);
+  });
+
+  it('appends one line per invocation, including notifications', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('notification', notify('quota_auto_resume_fired'), { SPARROW_HOOK_DEBUG: '1' });
+    runHook('stop', '{"hook_event_name":"Stop"}', { SPARROW_HOOK_DEBUG: '1' });
+    const lines = fs.readFileSync(logFile(), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('notification_type=quota_auto_resume_fired');
+    expect(lines[1]).toContain('mode=stop');
   });
 });

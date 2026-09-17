@@ -124,7 +124,13 @@ import {
   writeEventCursor,
   type LastInbound,
 } from './state.js';
-import { touchHeartbeat, markHeartbeatDead, readLoopState, skillInstall } from './loop-state.js';
+import {
+  touchHeartbeat,
+  markHeartbeatBlocked,
+  markHeartbeatDead,
+  readLoopState,
+  skillInstall,
+} from './loop-state.js';
 import {
   ARM_HELPER_COMMAND,
   assertMayArm,
@@ -133,6 +139,7 @@ import {
   type AwaitGeneration,
 } from './await-owner.js';
 import { writeAwaitFailure } from './await-failure.js';
+import { readBlocked } from './await-blocked.js';
 import {
   recordSkillInstall,
   forgetSkillInstall,
@@ -315,6 +322,13 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  */
 const STALE_SECONDS_DEFAULT = 75;
 const MAX_STREAM_AGE_SECONDS_DEFAULT = 300;
+
+/**
+ * How often a listener asks whether its agent is blocked (see await-blocked.ts):
+ * once before each connection attempt, on the stream's own activity cadence, and
+ * on this timer while streaming or standing by. A local `readdir`, no network.
+ */
+const BLOCKED_POLL_MS_DEFAULT = 30_000;
 
 /**
  * Reconcile-poll cadence for `watch`/`loop` on the `/me/events` path. Every 30s —
@@ -884,19 +898,12 @@ function formatRooms(rooms: MeRoom[]): string {
 }
 
 /**
- * `sparrow rooms --all` — the org owner/admin's governance table over the org's
- * PROJECT rooms. Deliberately structural (how many members, alive or archived,
- * since when) and never a preview: enumeration is not readership.
- *
- * DM rooms are absent by design — the existence of a DM is itself the private
- * fact (SPEC → "Org room governance"), so the server never enumerates them. The
- * empty line says "project rooms" and names the omission, because an org whose
- * only rooms are DMs otherwise reads a truthful list as a broken one (issue #7).
+ * `sparrow rooms --all` — the org owner/admin's governance table. Deliberately
+ * structural (who many members, alive or archived, since when) and never a
+ * preview: enumeration is not readership.
  */
 function formatOrgRooms(items: OrgRoomSummary[]): string {
-  if (items.length === 0) {
-    return 'No project rooms in this org. (DM rooms are private and never listed here.)';
-  }
+  if (items.length === 0) return 'No rooms in this org.';
   return table(
     ['ROOM ID', 'NAME', 'KIND', 'MEMBERS', 'ARCHIVED', 'CREATED'],
     items.map((r) => [
@@ -1116,24 +1123,6 @@ function emailLanded(e: { disposition: string }): boolean {
  * `thread` is null when the caller fetched ONE email by id and never loaded its
  * thread; the header then names the thread by id alone.
  */
-/**
- * ONE entry of a transcript (`sparrow log` for a room, `sparrow email read
- * <ethId>` for a thread): the `head` ("time  sender: "), the body WHOLE, and a
- * `tail` of metadata (an attachment count, a disposition tag) that belongs to
- * the message rather than to its last sentence.
- *
- * A multi-line body keeps every line: the first continues the head, the rest
- * hang under it indented two spaces. The old renderer printed the first line
- * plus an ellipsis, so everything an agent wrote after its first newline was
- * lost from the human view while `-j` still had it — a transcript must not lie
- * about what was said. Blank lines in the body stay blank rather than becoming
- * two spaces, so no line carries trailing whitespace.
- */
-function transcriptEntry(head: string, body: string, tail = ''): string {
-  const [first = '', ...rest] = body.split('\n');
-  return [`${head}${first}${tail}`, ...rest.map((l) => (l === '' ? '' : `  ${l}`))].join('\n');
-}
-
 function formatEmail(email: Email, thread: EmailThreadRef | null): string {
   const label = thread ? `${thread.id} · ${thread.subject}` : email.threadId;
   const lines = [
@@ -1188,8 +1177,7 @@ function formatEmailThreads(items: EmailThreadRef[]): string {
  * `sparrow email read <ethId>` — a whole thread as an oldest-first transcript,
  * the same shape `sparrow log` gives a room. Each line carries the email's id
  * (so `sparrow email read <emlId>` / `email reply --to` can target it), the
- * direction, the other party, and the body in full (multi-line bodies hang
- * indented under their first line, exactly as `sparrow log` renders a room).
+ * direction, the other party, and the first line of the body.
  *
  * Emails that did NOT land — `quarantined`, `held`, `rejected`, `send-failed` —
  * are tagged inline rather than hidden: the route includes them precisely so an
@@ -1207,10 +1195,12 @@ function formatEmailThreadTranscript(thread: EmailThread, items: Email[]): strin
   const lines = items.map((e) => {
     const arrow = e.direction === 'in' ? '←' : '→';
     const who = e.direction === 'in' ? party(e.from) : e.to.map((t) => t.email).join(', ');
+    const firstLine = e.text.split('\n')[0] ?? '';
+    const body = firstLine.length < e.text.length ? `${firstLine} …` : firstLine;
     const n = e.attachments.length;
     const att = n > 0 ? ` (${n} attachment${n === 1 ? '' : 's'})` : '';
     const tag = emailLanded(e) ? '' : ` [${e.disposition}${e.reason ? `: ${e.reason}` : ''}]`;
-    return transcriptEntry(`${e.createdAt}  ${e.id}  ${arrow} ${who}: `, e.text, `${att}${tag}`);
+    return `${e.createdAt}  ${e.id}  ${arrow} ${who}: ${body}${att}${tag}`;
   });
   return [...head, ...lines].join('\n');
 }
@@ -1379,9 +1369,8 @@ function formatOutbox(items: Message[]): string {
 /**
  * A compact chronological transcript of a room's history. The server returns
  * messages newest-first; render them oldest-first (reading order) as
- * `time  sender: body`, with a voice tag and an attachment count. A multi-line
- * body prints WHOLE, its continuation lines indented under the first
- * ({@link transcriptEntry}) — the transcript never drops a word.
+ * `time  sender: body`, with a voice tag and an attachment count. Multi-line
+ * bodies collapse to the first line (with an ellipsis); short bodies show whole.
  */
 function formatLog(items: Message[]): string {
   if (items.length === 0) return 'No messages.';
@@ -1389,9 +1378,11 @@ function formatLog(items: Message[]): string {
     .reverse()
     .map((m) => {
       const voice = m.origin === 'voice' ? ' [voice]' : '';
+      const firstLine = m.body.split('\n')[0] ?? '';
+      const body = firstLine.length < m.body.length ? `${firstLine} …` : firstLine;
       const n = m.attachments.length;
       const att = n > 0 ? ` (${n} attachment${n === 1 ? '' : 's'})` : '';
-      return transcriptEntry(`${m.createdAt}  ${m.from.displayName}${voice}: `, m.body, att);
+      return `${m.createdAt}  ${m.from.displayName}${voice}: ${body}${att}`;
     });
   // A transcript is one line per message, so the register note rides it ONCE,
   // as a footnote — repeating 144 characters under every spoken turn would
@@ -2858,18 +2849,12 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
 
   /* ============================ rooms ============================ */
   withOrg(program.command('rooms'))
-    .description(
-      'list your room memberships (--all: every project room in the org, for owners/admins)',
-    )
-    .option(
-      '--all',
-      'every project room in the org, joined or not — DMs are never listed (org owner/admin only)',
-    )
+    .description('list your room memberships (--all: every room in the org, for owners/admins)')
+    .option('--all', 'every room in the org, joined or not (org owner/admin only)')
     .action(
       action(async (opts) => {
         const { client } = buildClient(opts, env);
-        // Governance view: every PROJECT room of the org, membership irrelevant
-        // (DMs are never enumerated — their existence is the private fact). It
+        // Governance view: the org's whole room list, membership irrelevant. It
         // carries no messages — archiving a room is cleanup, not surveillance.
         if (opts.all) {
           const orgId = await resolveOrg(client, opts, env);
@@ -3850,20 +3835,12 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const enrollments = await client.listEnrollments(orgId, { mine: true });
 
     // The email half is the only half that can be missing: with the medium off
-    // its route 404s while enrollments keep answering. The LIST still SUCCEEDS
-    // there (SPEC → CLI, the email-disabled rule): it answers the human's
-    // question — "what needs me?" — with everything this instance has, says
-    // plainly that the email half is unavailable, and carries the same signal
-    // as `email: null` in the `-j` envelope. Exiting 1 after a good answer made
-    // every `approvals` in a script look like a failure, and `-j` printed a
-    // valid envelope followed by a second `{"error":…}` document that broke the
-    // `| jq` it was written for (issue #3).
-    //
-    // A run NARROWED to the email half alone (`--agent` / `--direction`) is a
-    // different question — it asks only for mail — so it fails, exits 1, and
-    // prints NOTHING: an error never lands after an envelope that contradicts
-    // it. `approve`/`deny` are pure email and refuse outright, as before.
-    const emailOnly = opts.agent !== undefined || opts.direction !== undefined;
+    // its route 404s while enrollments keep answering. On such an instance we
+    // still PRINT the enrollments — a human reading a short list must never
+    // conclude "nothing needs me" — and then exit 1, because the email half did
+    // not answer (SPEC → CLI: "the email half of `sparrow approvals` exits 1
+    // with 'email is not enabled on this server'"). `approve`/`deny` are pure
+    // email, so they refuse outright with nothing to show.
     let emailItems: EmailApprovalItem[] | null = null;
     let disabled = false;
     try {
@@ -3881,8 +3858,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       if (e instanceof CliError && e.message === EMAIL_DISABLED) disabled = true;
       else throw e;
     }
-    if (disabled && emailOnly) throw new CliError(EMAIL_DISABLED);
     print({ enrollments, email: emailItems }, formatApprovals(enrollments, emailItems));
+    if (disabled) throw new CliError(EMAIL_DISABLED);
   });
   withApprovals(approvals).action(listApprovals);
   withApprovals(approvals.command('list'))
@@ -4693,9 +4670,186 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     let firstDeferMs: number | undefined;
     let batchTimer: ReturnType<typeof setTimeout> | undefined;
 
+    const controller = new AbortController();
+    standDown = () => controller.abort();
+    // The heartbeat is deliberately NOT touched here: this process is still a
+    // candidate until the stream opens (see the publish-late rule above), and a
+    // candidate must not write over the state dir a healthy listener owns —
+    // including from a late signal, hence the stamp veto.
+    const disarmSignals = armListenerSignals(
+      env,
+      () => controller.abort(),
+      () => (generation.published() && owned() ? generation.nonce() : false),
+    );
+    let timedOut = false;
+    /* ARMED BEFORE THE FIRST NETWORK CALL, not just around the stream: standby
+     * can begin before this listener has asked the queue anything, and a
+     * `--timeout` that only covered the streaming phase would never fire there —
+     * a blocked listener would sit past its deadline instead of exiting 2 for
+     * the harness to re-arm. */
+    const timer =
+      timeoutSeconds > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, timeoutSeconds * 1000)
+        : undefined;
+    (timer as { unref?: () => void } | undefined)?.unref?.();
+
+    /* ========================= STANDBY (usage limit) =========================
+     * A Claude Code session that hits its usage limit keeps this listener
+     * perfectly healthy: the stream stays open, presence stays ON, and every
+     * wake it delivers dies on the limit before the agent reads a word. The
+     * server's owner watchdog — "unread work and nobody listening" — cannot
+     * fire while a stream is open, so the listener's own health disarms the one
+     * mechanism that would have told a human. Online and deaf, invisibly.
+     *
+     * So when the skill's StopFailure hook leaves `<state dir>/blocked.json`
+     * (see await-blocked.ts), this listener CLOSES the stream and stands by:
+     * presence drops, the truth becomes visible, and nothing is consumed. It
+     * polls the one file — no network, no reconnect, no wake — until the hook
+     * removes it, then reopens on the normal path, where the reconnect
+     * reconcile finds whatever waited and wakes as usual.
+     *
+     * PER STATE DIR, like everything else here: the marker belongs to this
+     * profile's listener, and no other location is consulted.
+     * ====================================================================== */
+    const blockedPollMs = Math.max(
+      50,
+      Number.parseInt(env.SPARROW_BLOCKED_POLL_MS ?? '', 10) || BLOCKED_POLL_MS_DEFAULT,
+    );
+    let standingBy = false;
+    let presenceCleared = false;
+    /* The reconcile poll is the other thing that talks to the network, so
+     * standby stops it and resuming starts a fresh one. Indirect because
+     * standby can begin BEFORE the poll exists (a listener blocked at startup
+     * never reaches the streaming phase), and a gate that reached forward into
+     * an uninitialised binding would crash instead of standing by. */
+    let pollStop: (() => void) | undefined;
+    let restartPoll: () => void = () => {};
+    /**
+     * Ask the queue once on resume — assigned when the wake machinery exists
+     * (the FIRST standby happens before it, and is followed by the pre-stream
+     * inbox look, which asks the same question).
+     *
+     * WHY IT MUST BE ASKED AT ALL: standby can last hours, and work that lands
+     * during it is exactly the expected case. A reopened stream replays from
+     * `since=<cursor>` — but a listener that stood by before it ever saw an
+     * event HAS no cursor, so its stream starts "from now" and the only thing
+     * left to notice that work is the reconcile poll, a full cadence later
+     * (never, with `--poll-seconds 0`). A blocked agent coming back must find
+     * what piled up while it was away, immediately.
+     */
+    let reconcileOnResume: () => void = () => {};
+    const stopPoll = (): void => {
+      pollStop?.();
+      pollStop = undefined;
+    };
+    /** The live stream, so a checkpoint can close it and fall into standby. */
+    let liveHandle: EventStreamHandle | undefined;
+
+    const abortableNap = (ms: number): Promise<void> =>
+      new Promise((resolve) => {
+        if (controller.signal.aborted) return resolve();
+        const t = setTimeout(done, ms);
+        (t as { unref?: () => void }).unref?.();
+        function done(): void {
+          clearTimeout(t);
+          controller.signal.removeEventListener('abort', done);
+          resolve();
+        }
+        controller.signal.addEventListener('abort', done, { once: true });
+      });
+
+    /**
+     * THE GATE, awaited before every connection attempt. Returns immediately
+     * when nothing is blocking — the ordinary path pays one `stat` — and
+     * otherwise holds until the marker is gone, the timeout fires, or this
+     * listener is superseded.
+     */
+    const standbyGate = async (): Promise<void> => {
+      for (;;) {
+        const blocked = readBlocked(env);
+        if (blocked === undefined) {
+          if (standingBy) {
+            standingBy = false;
+            // Back to an ordinary listener claim: the stamp is how the hooks
+            // learn the wake path is live again.
+            if (owned()) touchHeartbeat(env, awaitHeartbeatKind, true, generation.nonce());
+            presenceCleared = false; // a fresh block would drop the mark again
+            restartPoll(); // …and the reconcile poll comes back with us
+            io.err('[await] resuming: usage limit cleared\n');
+            // Whatever arrived while we were away is waiting NOW, not at the
+            // next poll tick: the reopened stream cannot replay what it has no
+            // cursor for. Wakes (and exits 0) when it finds work.
+            reconcileOnResume();
+          }
+          return;
+        }
+        if (!standingBy) {
+          standingBy = true;
+          /* PUBLISH-LATE, THE THIRD EXCEPTION. A standing-by listener owns the
+           * state dir exactly as a streaming one does — it is this agent's wake
+           * path, merely a declared-deaf one — and the stamp below is only
+           * judgeable when it names a generation. (The other two: holding the
+           * stream, and the preflight hand-off.) */
+          generation.publish();
+          if (!owned()) return; // superseded mid-publish: the caller exits 4
+          stopPoll(); // standby is a LOCAL poll of one directory: no network
+          markHeartbeatBlocked(env, blocked.reason, generation.nonce());
+          await dropPresenceMark();
+          const at = new Date(blocked.at);
+          const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+          io.err(
+            `[await] standing by: this session hit its usage limit (${blocked.reason}) at ${hhmm}; ` +
+              'the stream is closed until Claude Code resumes\n',
+          );
+        }
+        if (!owned()) return; // exit 4 — the successor is the wake path now
+        await abortableNap(blockedPollMs);
+        if (controller.signal.aborted) return; // --timeout (exit 2) or stand-down
+      }
+    };
+
+    /**
+     * Drop the ONLINE mark, once, as the last network act before going quiet.
+     *
+     * `POST /me/presence {ttlSeconds: 0}` clears the presence TTL a previous
+     * wake's `markTurn` planted, and NOTHING else: statuses live on their own
+     * routes, so the "blocked — usage limit" status the hook posts survives
+     * standby and stays as the explanation a human reads. Best-effort: if the
+     * call fails, the mark expires by itself within {@link PRESENCE_TTL_MAX}
+     * seconds (300), which only delays the truth.
+     */
+    const dropPresenceMark = async (): Promise<void> => {
+      if (presenceCleared || !owned()) return;
+      presenceCleared = true;
+      try {
+        await client.setPresence(0);
+      } catch (e) {
+        lifecycle(
+          { type: 'await.presence_error', turnSeconds: 0, message: String((e as Error)?.message ?? e) },
+          `[await] could not clear presence (${String((e as Error)?.message ?? e)}) — it expires within ${PRESENCE_TTL_MAX}s`,
+        );
+      }
+    };
+
+    /* STANDBY COMES FIRST — before the queue is even asked. A blocked agent
+     * must not be woken, and asking is a network call in its own right: the
+     * gate returns immediately when nothing is blocking (one `readdir`), and
+     * otherwise holds here, with no stream, no poll and no presence, until the
+     * hook clears the marker. */
+    await standbyGate();
+
     // A restarting turn-based agent must never block on a stream while its mail
     // sits unread — so ask the queue BEFORE opening anything.
     let alreadyWaiting: WakeDecision;
+    // …unless the wait is already over: standing by can end because `--timeout`
+    // elapsed or this listener was superseded, and asking the queue then would
+    // wake an agent whose listener has no business waking anyone (and, under
+    // Codex, queue a turn for it). The tail below reports the real outcome.
+    if (controller.signal.aborted) alreadyWaiting = undefined;
+    else
     try {
       alreadyWaiting = await nextWake();
     } catch (e) {
@@ -4728,17 +4882,6 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     }
     if (alreadyWaiting) firstDeferMs = alreadyWaiting.deferMs;
 
-    const controller = new AbortController();
-    standDown = () => controller.abort();
-    // The heartbeat is deliberately NOT touched here: this process is still a
-    // candidate until the stream opens (see the publish-late rule above), and a
-    // candidate must not write over the state dir a healthy listener owns —
-    // including from a late signal, hence the stamp veto.
-    const disarmSignals = armListenerSignals(
-      env,
-      () => controller.abort(),
-      () => (generation.published() && owned() ? generation.nonce() : false),
-    );
     let terminalError: unknown;
     let upgradeWake: Promise<void> | undefined;
     const terminateForUpgrade = (e: unknown): boolean => {
@@ -4838,6 +4981,11 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     // the queue. A successful empty listing is authoritative: keep listening
     // instead of spending a turn on `{ item: null }`. If the listing fails we
     // retain the conservative wake, because emptiness was not proved.
+    // The wake machinery exists from here on, so a resume can use it. `waiting`
+    // is the same reason the pre-stream look reports, and means the same thing:
+    // this was already in the queue when we asked.
+    reconcileOnResume = () => consider('waiting');
+
     const onGap = (since?: string | number, latest?: string | number): void => {
       if (emitted || controller.signal.aborted) return;
       cursor.gap(latest);
@@ -4919,6 +5067,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           // server heartbeats): no new timer, and an idle listener still
           // notices it was superseded.
           if (owned()) touchHeartbeat(env, awaitHeartbeatKind, false, generation.nonce());
+          // …and the same checkpoint asks whether the agent can still act at
+          // all. Closing here drops us into the runner's next attempt, where the
+          // gate holds until the block clears.
+          checkBlockedWhileStreaming();
           onActivity();
         },
         dispatcher: transport?.dispatcher,
@@ -4927,42 +5079,59 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       // See watch: this chain exists only to close the Agent, so its inherited
       // rejection MUST be swallowed or it kills the process.
       if (transport) void handle.closed.finally(transport.close).catch(() => {});
+      liveHandle = handle;
       return handle;
     };
 
-    const stopPoll = startReconcilePoll({
-      client,
-      pollMs: pollMsOf(opts, env),
-      timeoutMs: pollTimeoutMsOf(env),
-      signal: controller.signal,
-      newTransport,
-      quiet,
-      getLastId: () => cursor.current(),
-      onEvent,
-      onGap: ({ since, latest }) => onGap(since, latest),
-      onSeed: (latest) => cursor.seed(latest),
-      onError: (e) => {
-        if (terminateForUpgrade(e)) return;
-        lifecycle(
-          { type: 'await.poll_error', message: String((e as Error)?.message ?? e) },
-          `[await] reconcile poll failed (${String((e as Error)?.message ?? e)})`,
-        );
-      },
-    });
+    /**
+     * A stream is open and the agent may have just become unable to act. Closing
+     * is all this does: the runner's next attempt awaits the standby gate, which
+     * is where the stamp, the presence drop and the waiting live.
+     */
+    function checkBlockedWhileStreaming(): void {
+      if (standingBy || controller.signal.aborted) return;
+      if (readBlocked(env) === undefined) return;
+      stopPoll(); // no network while standing by — not even the reconcile poll
+      liveHandle?.close();
+    }
 
-    let timedOut = false;
-    const timer =
-      timeoutSeconds > 0
-        ? setTimeout(() => {
-            timedOut = true;
-            controller.abort();
-          }, timeoutSeconds * 1000)
-        : undefined;
-    (timer as { unref?: () => void } | undefined)?.unref?.();
+    /* The activity cadence only fires when BYTES arrive, and a quiet stream can
+     * go a long time without any. This timer is the floor under it — the same
+     * question, asked on a clock, so a block is noticed within one cadence
+     * however silent the connection is. */
+    const blockedTimer = setInterval(checkBlockedWhileStreaming, blockedPollMs);
+    (blockedTimer as { unref?: () => void }).unref?.();
+
+    /** Restartable: standby stops the poll, and resuming starts a fresh one. */
+    const startPoll = (): (() => void) =>
+      startReconcilePoll({
+        client,
+        pollMs: pollMsOf(opts, env),
+        timeoutMs: pollTimeoutMsOf(env),
+        signal: controller.signal,
+        newTransport,
+        quiet,
+        getLastId: () => cursor.current(),
+        onEvent,
+        onGap: ({ since, latest }) => onGap(since, latest),
+        onSeed: (latest) => cursor.seed(latest),
+        onError: (e) => {
+          if (terminateForUpgrade(e)) return;
+          lifecycle(
+            { type: 'await.poll_error', message: String((e as Error)?.message ?? e) },
+            `[await] reconcile poll failed (${String((e as Error)?.message ?? e)})`,
+          );
+        },
+      });
+    restartPoll = (): void => {
+      pollStop = startPoll();
+    };
+    restartPoll();
 
     try {
       const result = await runReconnectingStream({
         open,
+        beforeOpen: standbyGate,
         staleMs,
         maxStreamAgeMs,
         signal: controller.signal,
@@ -5002,6 +5171,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       if (batchTimer !== undefined) clearTimeout(batchTimer);
+      clearInterval(blockedTimer);
       stopPoll();
       disarmSignals();
     }

@@ -13,7 +13,9 @@
  * one heartbeat and one pause. `skillInstall` (= `runSkill`) lets a `sparrow skill …` subcommand drive
  * the exact same install/pause/resume/status logic as `npx sparrow-skill`.
  */
+import fs from 'node:fs';
 import {
+  heartbeatPath,
   resolveStateDir,
   readLoopState as readLoopStateAt,
   writeLoopState as writeLoopStateAt,
@@ -71,6 +73,46 @@ export function markHeartbeatDead(
   generation?: string,
 ): void {
   markHeartbeatDeadAt(resolveStateDir(env), reason, signal, generation);
+}
+
+/**
+ * Stamp the heartbeat `blocked:<reason>` — the listener is alive and DELIBERATELY
+ * not listening, because the agent behind it cannot take a turn (a Claude Code
+ * usage limit; see await-blocked.ts).
+ *
+ * A THIRD WORD next to `killed`/`stopped`, and deliberately not one of them: the
+ * process is fine, the stream is closed on purpose, and it will come back by
+ * itself. Readers that know the word can say so; the skill's heartbeat reader
+ * treats any word it does not know as UNJUDGEABLE, which is the correct answer
+ * for an older reader meeting a newer listener — never "there is a listener".
+ *
+ * Written here rather than through `@sparrow/skill`'s `markHeartbeatDead`
+ * because that one's vocabulary is the two DEAD reasons, and standby is not a
+ * death. Same file, same shape (`<word> [generation]`), same fresh mtime:
+ * content is what disqualifies a heartbeat, never age.
+ */
+export function markHeartbeatBlocked(
+  env: Env = process.env,
+  reason = 'blocked',
+  /** The `await` generation nonce, so a superseded listener's stamp is discardable. */
+  generation?: string,
+  now: number = Date.now(),
+): void {
+  try {
+    const dir = resolveStateDir(env);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = heartbeatPath(dir);
+    const word = `blocked:${reason}`;
+    fs.writeFileSync(file, generation ? `${word} ${generation}\n` : `${word}\n`);
+    try {
+      const when = new Date(now);
+      fs.utimesSync(file, when, when);
+    } catch {
+      // leave the OS-assigned mtime (still "fresh")
+    }
+  } catch {
+    // best-effort: a listener must never crash over a heartbeat
+  }
 }
 
 /** Read the loop switch (`engaged` | `paused` | `undefined`). */

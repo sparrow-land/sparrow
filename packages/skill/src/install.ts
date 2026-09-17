@@ -66,6 +66,7 @@ import {
   type LoopState,
 } from './state.js';
 import { readAwaitFailure } from './await-failure.js';
+import { blockedDir, clearBlockedMarkers, clockOf, currentBlock } from './blocked.js';
 
 export type { Scope, Resolved, Provider };
 
@@ -326,6 +327,27 @@ export async function pause(r: Resolved): Promise<number> {
   return 0;
 }
 
+/**
+ * `unblock` — the operator recovery from a usage-limit marker.
+ *
+ * Everything else that clears a marker needs the limited session to still be
+ * running: transcript evidence of a later successful turn, or Claude Code's
+ * quota-resume notification. When that session is closed, neither will ever
+ * arrive, and this is the way out. It deletes by name from a snapshot, so a
+ * block recorded while it runs survives.
+ */
+export async function unblock(r: Resolved): Promise<number> {
+  const dir = blockedDir(r.stateDir);
+  const removed = clearBlockedMarkers(r.stateDir);
+  if (removed.length === 0) {
+    r.log(`No usage-limit markers in ${dir} — nothing to unblock.`);
+    return 0;
+  }
+  await tryStickyStatus(r, 'working');
+  r.log(`Cleared ${removed.length} usage-limit marker(s) in ${dir}: ${removed.join(', ')}.`);
+  return 0;
+}
+
 /** Flip the loop switch back to `engaged`. */
 export function resume(r: Resolved): number {
   writeLoopState(r.stateDir, 'engaged');
@@ -358,6 +380,17 @@ export function status(r: Resolved): number {
   r.log(`heartbeat:  ${hb}`);
   r.log(`state dir:  ${r.stateDir}`);
   r.log(`skill:      ${installed ? 'installed' : 'not installed'} (${r.scope} scope, ${dir})`);
+  // A usage limit is the one failure that leaves everything else looking
+  // healthy: the listener holds the stream, presence is green, and no turn can
+  // run. Nothing expires it — age is not evidence quota came back — so the line
+  // also names both ways out.
+  const block = currentBlock(r.stateDir);
+  if (block) {
+    r.log(
+      `blocked:    usage limit since ${clockOf(block.at) ?? 'an unknown time'} (${block.reason}); ` +
+        `clears on the next successful turn, or run sparrow skill unblock`,
+    );
+  }
   // Why the CURRENT generation's listener died, when it got to say so. A
   // superseded listener's complaint is not about the one on watch now, so the
   // reader gates on the owner nonce and this prints nothing unless it matches.
@@ -482,7 +515,7 @@ function resolve(opts: RunSkillOptions, p: ParsedArgv, provider: Provider): Reso
 }
 
 const USAGE =
-  'Use: install | uninstall | pause | resume | status | verify ' +
+  'Use: install | uninstall | pause | resume | unblock | status | verify ' +
   '[--user] [--shared] [--profile <name>] [--claude|--codex].';
 
 /**
@@ -520,6 +553,8 @@ export async function runSkill(argv: string[], opts: RunSkillOptions = {}): Prom
       return pause(r);
     case 'resume':
       return resume(r);
+    case 'unblock':
+      return unblock(r);
     case 'status':
       return status(r);
     case 'verify':

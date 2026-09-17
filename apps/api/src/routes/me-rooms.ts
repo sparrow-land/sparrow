@@ -330,7 +330,7 @@ export function registerMeRoomRoutes(app: FastifyInstance, ctx: AppContext): voi
         .run();
       const wire = toMember(ctx, member);
       emitMemberJoined(ctx, room.id, wire);
-      ctx.rooms.onMemberJoined(room.id, 'human', human.id);
+      ctx.rooms.onMembershipChanged('human', human.id);
       const response: AcceptRoomInvitationResponse = { room: toRoom(room), member: wire };
       return reply.send(response);
     },

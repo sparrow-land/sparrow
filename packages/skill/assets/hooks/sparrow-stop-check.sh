@@ -282,6 +282,7 @@ mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 # otherwise wave through a replacement that comes up as a PASSIVE plain `await`.)
 #
 #   alive        fresh wake path whose process exists (or nobody claims one)
+#   blocked      standing by on a usage limit: it cannot run, so let it stop
 #   unjudgeable  fresh heartbeat we cannot read (legacy, third-party, superseded)
 #   dead         a killed:/stopped: stamp from the live generation
 #   passive      fresh plain `await` under Codex: no verified queue bridge
@@ -297,6 +298,16 @@ classify() {
 
   [ -f "$HEARTBEAT_FILE" ] || { cls="drift"; return 0; }
   content=$(sparrow_heartbeat_read)
+
+  # STANDING BY ON A USAGE LIMIT. The CLI closes the stream and stamps `blocked`
+  # / `blocked:<reason>` when this session cannot run at all. Blocking the stop
+  # would help nobody: the agent cannot take a turn, so it cannot re-arm
+  # anything, and the nudge would be wrong in the details too (the listener is
+  # fine; the account is out of quota). Fresh or stale, allow — the usage-limit
+  # status and the prompt-time line carry that story instead.
+  case "$content" in
+    blocked | blocked:*) cls="blocked"; return 0 ;;
+  esac
 
   # A TERMINAL stamp is not subject to the freshness window: the listener told us
   # it is gone, and it is freshest exactly when it just died.
@@ -364,7 +375,7 @@ if [ "$cls" = arming ]; then
   fi
 fi
 case "$cls" in
-  alive | unjudgeable) allow_stop ;;
+  alive | unjudgeable | blocked) allow_stop ;;
 esac
 
 # Engaged, and either drifted or held online by a deaf listener. Best-effort

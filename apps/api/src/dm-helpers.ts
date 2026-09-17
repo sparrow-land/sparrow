@@ -38,21 +38,16 @@ export function ensureDmRoomWithEvents(
 
   const roomId = ensureDmRoom(ctx, orgId, a, b);
 
+  // Presence for any open /me/events streams of either principal.
+  ctx.rooms.onMembershipChanged(a.type, a.id);
+  ctx.rooms.onMembershipChanged(b.type, b.id);
+
   // member.joined for each newly-added member — reaches the gaining principal
-  // itself (audience 'all', delivered wrapped on its /me/events). Emitted BEFORE
-  // the presence pass below so a client learns the member before its dot.
+  // itself (audience 'all', delivered wrapped on its /me/events).
   for (const p of [a, b]) {
     if (existedBefore.get(`${p.type}:${p.id}`)) continue;
     const member = memberOf(ctx, roomId, p.type, p.id);
     if (member) emitMemberJoined(ctx, roomId, toMember(ctx, member));
-  }
-
-  // Presence for any open /me/events streams of either principal; a principal
-  // that JUST joined also gets its current presence announced in the new room
-  // (it may have been online before the membership existed — see `onMemberJoined`).
-  for (const p of [a, b]) {
-    if (existedBefore.get(`${p.type}:${p.id}`)) ctx.rooms.onMembershipChanged(p.type, p.id);
-    else ctx.rooms.onMemberJoined(roomId, p.type, p.id);
   }
 
   return { roomId, created: !before };

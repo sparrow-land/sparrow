@@ -182,6 +182,8 @@ interface PresenceProxy {
   url: string;
   /** Every `POST /me/presence` body seen, in order. */
   posts: Array<{ ttlSeconds?: number }>;
+  /** Every request seen, as `METHOD /path` — how "no network" is proved. */
+  requests: string[];
   /** When true the relay answers presence POSTs with a 500 (never forwarding). */
   fail: boolean;
   close(): Promise<void>;
@@ -190,12 +192,13 @@ interface PresenceProxy {
 async function startPresenceProxy(): Promise<PresenceProxy> {
   const upstream = new URL(url);
   const sockets = new Set<Socket>();
-  const state = { posts: [] as Array<{ ttlSeconds?: number }>, fail: false };
+  const state = { posts: [] as Array<{ ttlSeconds?: number }>, requests: [] as string[], fail: false };
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (d: Buffer) => chunks.push(d));
     req.on('end', () => {
       const raw = Buffer.concat(chunks);
+      state.requests.push(`${req.method ?? '?'} ${(req.url ?? '').split('?')[0]}`);
       if (req.method === 'POST' && (req.url ?? '').startsWith('/api/v1/me/presence')) {
         try {
           state.posts.push(JSON.parse(raw.toString('utf8')) as { ttlSeconds?: number });
@@ -236,6 +239,9 @@ async function startPresenceProxy(): Promise<PresenceProxy> {
   const port = (server.address() as AddressInfo).port;
   return {
     url: `http://127.0.0.1:${port}`,
+    get requests() {
+      return state.requests;
+    },
     get posts() {
       return state.posts;
     },
@@ -1609,41 +1615,6 @@ describe('sparrow CLI — orgs, rooms, invites, requests', () => {
     await member.client.sendMessage(theirs.id, { body: 'hi' });
   });
 
-  it('rooms --all is the PROJECT-room governance list: DMs are never enumerated', async () => {
-    // SPEC → "Org room governance": the existence of a DM is itself the private
-    // fact, so `GET /orgs/:orgId/rooms` lists project rooms only. The CLI must
-    // say that in the words it uses, or an org whose only rooms are DMs reads
-    // its governance list as "there is nothing here" (issue #7).
-    const owner = await boot('roomsdm@x.com');
-    const bot = await makeAgent(owner, 'roomsdm-bot');
-    const dm = await owner.client.ensureDm({ principal: bot.id });
-    await ownerProfile(owner);
-
-    const empty = capture();
-    expect(await runCli(['rooms', '--all'], env, empty.io)).toBe(0);
-    expect(empty.out()).toContain('No project rooms in this org.');
-    expect(empty.out()).toContain('DM');
-    expect(empty.out()).not.toContain(dm.room.id);
-
-    const json = capture();
-    expect(await runCli(['rooms', '--all', '--json'], env, json.io)).toBe(0);
-    expect(JSON.parse(json.out()).items).toEqual([]);
-
-    // With one project room, that room — and only it — is listed.
-    const proj = await owner.client.createRoom(owner.orgId, { name: 'proj-room' });
-    const listed = capture();
-    expect(await runCli(['rooms', '--all'], env, listed.io)).toBe(0);
-    expect(listed.out()).toContain(proj.id);
-    expect(listed.out()).not.toContain(dm.room.id);
-
-    // The help text promises exactly what the command delivers.
-    const help = capture();
-    await runCli(['rooms', '--help'], env, help.io);
-    const helpText = help.out() + help.err();
-    expect(helpText).toContain('project room');
-    expect(helpText).not.toMatch(/every room in the org/);
-  });
-
   it('invites create → list → revoke', async () => {
     const owner = await boot('inv@x.com');
     await ownerProfile(owner);
@@ -1987,24 +1958,6 @@ describe('sparrow CLI — room messaging', () => {
       ),
     ).toBe(0);
     expect(JSON.parse(p2.out()).items.map((m: { body: string }) => m.body)).toEqual(['first']);
-  });
-
-  it('log prints a multi-line body WHOLE, continuation lines indented', async () => {
-    const { owner, roomId, roomName, agentId } = await roomFixture('mlog');
-    const body = 'line one\nline two\n\nline four';
-    await owner.client.sendMessage(roomId, { to: agentId, body });
-
-    const cap = capture();
-    expect(await runCli(['log', '--room', roomName], env, cap.io)).toBe(0);
-    const text = cap.out();
-    // Nothing is silently lost, and nothing is elided.
-    expect(text).toContain('line one');
-    expect(text).toContain('line four');
-    expect(text).not.toContain('…');
-    // Continuation lines hang under the first, indented by two spaces; a blank
-    // line in the body stays blank (no trailing whitespace).
-    expect(text).toContain('\n  line two\n');
-    expect(text).toContain('\n\n  line four');
   });
 
   it('send --suggest + read shows suggestions; --in-reply-to/--reply-value echoes', async () => {
@@ -4028,6 +3981,263 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     expect(await first).toBe(4);
     expect(await second).toBe(0);
     expect(stdoutLines(a, b)).toHaveLength(1);
+  });
+
+  /* ================================================================== *
+   * STANDBY — the agent behind the listener cannot take a turn.
+   *
+   * A Claude Code session at its usage limit kept this listener perfectly
+   * healthy: stream open, presence ON, every wake dying on the limit before the
+   * agent read a word — and the server's owner watchdog ("unread work, nobody
+   * listening") cannot fire while a stream is open. The listener's own health
+   * hid the problem. So a marker under `<state dir>/blocked/` closes the stream
+   * and drops presence until the hook clears it.
+   * ================================================================== */
+  describe('standby (usage limit)', () => {
+    const blockedDir = path.join(stateDir, 'blocked');
+    afterEach(() => fs.rmSync(blockedDir, { recursive: true, force: true }));
+
+    let markers = 0;
+    /** Write one marker exactly as the skill's StopFailure hook does. */
+    function block(reason = 'rate_limit', at = new Date()): string {
+      fs.mkdirSync(blockedDir, { recursive: true });
+      const file = path.join(blockedDir, `2026-marker-${markers++}.json`);
+      fs.writeFileSync(
+        file,
+        `${JSON.stringify({ version: 1, reason, at: at.toISOString(), session: 'sess-x' })}\n`,
+      );
+      return file;
+    }
+    const heartbeat = (): string => {
+      try {
+        return fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8').trim();
+      } catch {
+        return '';
+      }
+    };
+    /** A fast cadence so a test sees a transition without waiting 30 s. */
+    const quick = (extra: Record<string, string | undefined> = {}) => ({
+      ...env,
+      SPARROW_BLOCKED_POLL_MS: '60',
+      ...extra,
+    });
+    const until = async (want: () => boolean | Promise<boolean>, ms = 6000): Promise<void> => {
+      const deadline = Date.now() + ms;
+      while (!(await want())) {
+        if (Date.now() > deadline) throw new Error('timed out waiting for the condition');
+        await nap(20);
+      }
+    };
+
+    it('stands by instead of opening a stream, and resumes when the marker goes', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtblock');
+      block();
+
+      const cap = capture();
+      const running = runCli(['await', '--timeout', '20'], quick(), cap.io);
+      // No stream is opened at all: the heartbeat says why, in one line.
+      await until(() => heartbeat().startsWith('blocked:'));
+      const claim = heartbeat().split(/\s+/);
+      expect(claim[0]).toBe('blocked:rate_limit');
+      expect(claim[1]).toBe(
+        JSON.parse(fs.readFileSync(path.join(stateDir, 'await-owner.json'), 'utf8')).nonce,
+      );
+      expect(cap.err()).toContain('standing by: this session hit its usage limit (rate_limit) at');
+      expect(cap.err()).toContain('the stream is closed until Claude Code resumes');
+      expect(cap.out()).toBe(''); // nothing woken, nothing consumed
+
+      // The hook clears it → the listener comes back on the ordinary path…
+      fs.rmSync(blockedDir, { recursive: true, force: true });
+      await until(() => cap.err().includes('resuming: usage limit cleared'));
+      await until(() => heartbeat().startsWith('await'));
+      // …and it is REALLY back: the server sees a held stream again. Waiting for
+      // the stamp alone would race the socket — the stamp is written before the
+      // connection is dialled, and a message sent into that gap is replayed
+      // only if there is a cursor to replay from (there is not, on a listener
+      // that stood by before it ever saw an event).
+      await until(async () => await ownerSeesOnline(owner, agentId));
+
+      const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'after the limit' });
+      expect(await running).toBe(0);
+      expect(wakeLine(cap).item.id).toBe(sent.message.id);
+    }, 30_000);
+
+    /* Standby can last hours, so "work arrived while I was blocked" is the
+     * ordinary case — and a stream reopened without a cursor cannot replay it.
+     * Resuming therefore asks the queue itself, and wakes at once instead of
+     * waiting out a reconcile-poll cadence (or forever, with --poll-seconds 0). */
+    it('wakes immediately for work that arrived DURING standby, with no poll to save it', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtblockduring');
+      const cap = capture();
+      const running = runCli(
+        ['await', '--timeout', '25', '--poll-seconds', '0'],
+        quick(),
+        cap.io,
+      );
+      // Start LISTENING first, so the resume happens inside the stream loop —
+      // no pre-stream inbox look to fall back on, and (no events seen yet) no
+      // cursor for the reopened stream to replay from.
+      await until(async () => await ownerSeesOnline(owner, agentId));
+      block();
+      await until(() => heartbeat().startsWith('blocked:'));
+
+      // It lands while the listener is standing by: no stream, no poll, nobody
+      // looking at the queue at all.
+      const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'arrived while blocked' });
+      await nap(200);
+      expect(cap.out()).toBe('');
+
+      fs.rmSync(blockedDir, { recursive: true, force: true });
+      expect(await running).toBe(0);
+      const wake = wakeLine(cap);
+      expect(wake.item.id).toBe(sent.message.id);
+      expect(wake.reason).toBe('waiting');
+    }, 30_000);
+
+    /* The queue is NOT touched by standby: an item that arrived before the limit
+     * is still unread when the listener comes back, and is what wakes it. */
+    it('leaves waiting work untouched across standby, and wakes for it on resume', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtblockqueue');
+      const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'waiting through it' });
+      block();
+
+      const cap = capture();
+      const running = runCli(['await', '--timeout', '20'], quick(), cap.io);
+      await until(() => heartbeat().startsWith('blocked:'));
+      expect(cap.out()).toBe(''); // the item is there, and deliberately not taken
+
+      fs.rmSync(blockedDir, { recursive: true, force: true });
+      expect(await running).toBe(0);
+      expect(wakeLine(cap).item.id).toBe(sent.message.id);
+
+      // Still unread: waking is not reading, standby or no standby.
+      const pop = capture();
+      expect(await runCli(['pop', '--json'], env, pop.io)).toBe(0);
+      expect(JSON.parse(pop.out()).item.message.id).toBe(sent.message.id);
+    }, 30_000);
+
+    it('closes a live stream within one cadence when a marker appears', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtblockmid');
+      const cap = capture();
+      const running = runCli(['await', '--timeout', '25'], quick(), cap.io);
+      await until(() => heartbeat().startsWith('await')); // streaming, presence held
+
+      block('overloaded');
+      await until(() => heartbeat().startsWith('blocked:overloaded'));
+      expect(cap.err()).toContain('standing by');
+      expect(cap.out()).toBe('');
+
+      fs.rmSync(blockedDir, { recursive: true, force: true });
+      await until(() => heartbeat().startsWith('await'));
+      // Really listening again, not merely stamped: a message wakes it.
+      const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'back online' });
+      expect(await running).toBe(0);
+      expect(wakeLine(cap).item.id).toBe(sent.message.id);
+    }, 30_000);
+
+    /* The prompt hook can clear a marker while the limit still holds, so the
+     * StopFailure hook writes a new one and the listener stands by again. That
+     * cycle must be bounded and quiet: one line per transition, nothing queued,
+     * nothing consumed. */
+    it('survives a reopen-then-re-block cycle without noise or consumption', async () => {
+      await awaitFixture('awtblockcycle');
+      block();
+      const cap = capture();
+      const running = runCli(['await', '--timeout', '6'], quick(), cap.io);
+      await until(() => heartbeat().startsWith('blocked:'));
+
+      fs.rmSync(blockedDir, { recursive: true, force: true });
+      await until(() => heartbeat().startsWith('await'));
+      block(); // …the limit had not actually lifted
+      await until(() => heartbeat().startsWith('blocked:'));
+      fs.rmSync(blockedDir, { recursive: true, force: true });
+      await until(() => heartbeat().startsWith('await'));
+
+      expect(await running).toBe(2);
+      const err = cap.err();
+      expect(err.match(/standing by/g)).toHaveLength(2); // one per transition
+      expect(err.match(/resuming: usage limit cleared/g)).toHaveLength(2);
+      expect(cap.out()).toContain('await.timeout'); // and nothing was consumed
+    }, 30_000);
+
+    /* STANDBY IS A LOCAL POLL, and that is the whole point: presence must drop
+     * and stay dropped. One call clears the online mark on the way in, and then
+     * nothing touches the network until the marker is gone. */
+    it('makes no network calls at all while standing by, after clearing presence', async () => {
+      await awaitFixture('awtblocknet');
+      const proxy = await startPresenceProxy();
+      try {
+        block();
+        const cap = capture();
+        const running = runCli(
+          ['await', '--timeout', '3', '--server', proxy.url],
+          quick(),
+          cap.io,
+        );
+        await until(() => heartbeat().startsWith('blocked:'));
+        // The last act before going quiet: clear the ONLINE mark (statuses are
+        // untouched, so the hook's "blocked" explanation survives).
+        expect(proxy.posts).toContainEqual({ ttlSeconds: 0 });
+
+        const afterEntry = proxy.requests.length;
+        await nap(600); // ~10 standby cadences at 60 ms
+        expect(proxy.requests.length).toBe(afterEntry);
+
+        expect(await running).toBe(2);
+      } finally {
+        await proxy.close();
+      }
+    }, 30_000);
+
+    it('an unreadable marker is ignored: junk never silences a listener', async () => {
+      await awaitFixture('awtblockjunk');
+      fs.mkdirSync(blockedDir, { recursive: true });
+      fs.writeFileSync(path.join(blockedDir, 'junk.json'), 'not json\n');
+
+      const cap = capture();
+      expect(await runCli(['await', '--timeout', '1'], quick(), cap.io)).toBe(2);
+      expect(cap.err()).not.toContain('standing by');
+      expect(heartbeat()).toMatch(/^await/);
+    });
+
+    it('--timeout still expires while standing by (exit 2, re-armable)', async () => {
+      await awaitFixture('awtblocktimeout');
+      block();
+      const cap = capture();
+      expect(await runCli(['await', '--timeout', '1'], quick(), cap.io)).toBe(2);
+      expect(cap.err()).toContain('standing by');
+      expect(JSON.parse(cap.out().trim()).type).toBe('await.timeout');
+    });
+
+    it('a superseded listener stands down from standby (exit 4)', async () => {
+      await awaitFixture('awtblocksuper');
+      block();
+      const cap = capture();
+      const running = runCli(['await', '--timeout', '20'], quick(), cap.io);
+      await until(() => heartbeat().startsWith('blocked:'));
+
+      // A newer generation takes the state dir while this one is standing by.
+      const second = capture();
+      const successor = runCli(['await', '--timeout', '3'], quick(), second.io);
+      expect(await running).toBe(4);
+      expect(cap.err()).toContain('superseded by a newer listener');
+      await successor;
+    }, 30_000);
+
+    it('Codex: nothing is queued while standing by', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtblockcodex');
+      await owner.client.sendMessage(roomId, { to: agentId, body: 'do not queue this' });
+      block();
+      const cap = capture();
+      const calls: Array<[string, string]> = [];
+      cap.io.notifyCodex = async (threadId, message) => { calls.push([threadId, message]); };
+
+      expect(
+        await runCli(['await', '--timeout', '1'], quick({ CODEX_THREAD_ID: 'thread-blocked' }), cap.io),
+      ).toBe(2);
+      expect(calls).toEqual([]); // no wake bridge for an agent that cannot act
+      expect(cap.err()).toContain('standing by');
+    });
   });
 
   /* ================================================================== *
@@ -6724,12 +6934,10 @@ describe('sparrow CLI — agent↔agent DM oversight', () => {
     expect(await runCli(['agent-dms', 'read', f.dmRoomId], env, cap.io)).toBe(0);
     const out = cap.out();
     // Oldest-first `time  sender: body` lines — the room-log idiom; a
-    // multi-line body prints WHOLE, hanging indented under its first line
-    // (issue #6: oversight that silently drops half a message is not oversight).
+    // multi-line body collapses to its first line with an ellipsis.
     expect(out.indexOf('adm3-alpha: first line')).toBeGreaterThanOrEqual(0);
     expect(out.indexOf('adm3-alpha: first line')).toBeLessThan(out.indexOf('adm3-beta: reply'));
-    expect(out).toContain('\n  second line\n');
-    expect(out).not.toContain('…');
+    expect(out).toContain('…');
 
     // -j: the raw newest-first page with its cursor.
     const json = capture();

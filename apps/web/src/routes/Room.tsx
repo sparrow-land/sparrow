@@ -810,18 +810,6 @@ export function Room() {
             .listMembers(roomId, { limit: 100 })
             .then((r) => setMembers(r.items))
             .catch(() => {});
-          // A JOIN also invalidates the presence snapshot: a member that was
-          // already online before the membership existed (a heartbeat mark, or a
-          // stream inside its grace) is in `GET /status` from the instant it
-          // joins, and the server announces it — but this pane seeded its online
-          // set before the join, so re-read the snapshot rather than trusting an
-          // event to describe a member we did not have (issue #4).
-          if (ev.type === 'member.joined') {
-            void api
-              .listStatuses(roomId)
-              .then((s) => setOnlineIds(new Set(s.presence.online)))
-              .catch(() => {});
-          }
           break;
         case 'room.updated': {
           const d = ev.data as RoomUpdatedEvent;

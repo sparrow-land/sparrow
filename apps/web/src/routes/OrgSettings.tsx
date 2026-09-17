@@ -34,7 +34,6 @@ import {
   Section,
   errMsg,
   fmtDate,
-  fmtDateTime,
   ghostBtn,
   inputClass,
   primaryBtn,
@@ -767,16 +766,6 @@ function ApprovalsSection({
  * Invites
  * ========================================================================== */
 
-/**
- * The tail of an invite's id, as a row's name of last resort. The invite TOKEN
- * is a secret this surface never sees (it is shown once, at creation); the id is
- * not, but a row needs a handle, not an identifier — so it shows four characters
- * and a rule about it: `inv_…a1b2`.
- */
-function maskedId(id: string): string {
-  return `inv_…${id.slice(-4)}`;
-}
-
 function InvitesSection({ orgId }: { orgId: string }) {
   const [invites, setInvites] = useState<Invite[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -872,22 +861,11 @@ function InvitesSection({ orgId }: { orgId: string }) {
                 }`}
               >
                 <div className="min-w-0 flex-1">
-                  {/* A note-less invite has no name of its own, so the row is
-                      its id's tail, when it was made, and whether anybody has
-                      come through it — three things five identical "Invite"
-                      rows never had (issue #7). */}
-                  <span className="flex flex-wrap items-baseline gap-2">
-                    <span className="truncate text-sm text-[var(--sparrow-text)]">
-                      {inv.note || 'Invite'}
-                    </span>
-                    <span className="mono text-xs text-[var(--sparrow-faint)]">
-                      {maskedId(inv.id)}
-                    </span>
+                  <span className="truncate text-sm text-[var(--sparrow-text)]">
+                    {inv.note || 'Invite'}
                   </span>
                   <p className="truncate text-xs text-[var(--sparrow-faint)]">
-                    From {inv.inviter.displayName} · created {fmtDateTime(inv.createdAt)} · expires{' '}
-                    {fmtDate(inv.expiresAt)}
-                    {inv.useCount > 0 && ` · used ${inv.useCount}×`}
+                    From {inv.inviter.displayName} · expires {fmtDate(inv.expiresAt)}
                   </p>
                 </div>
                 <button type="button" onClick={() => void revoke(inv.id)} className={ghostBtn}>

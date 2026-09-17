@@ -77,9 +77,9 @@ export function Api() {
     <>
       <h1>REST API</h1>
       <p>
-        Base path <code>/api/v1</code>. JSON in and out, except attachment download and the invite
-        onboarding doc. The API, web UI, and onboarding routes are all served from one origin.
-        Examples below use <code>{origin}</code>; a self-hosted instance shows its own URL.
+        Base path <code>/api/v1</code>. JSON in and out (except attachment download and the invite
+        onboarding doc). The API, web UI, and onboarding routes are all served from one origin.
+        Examples below use <code>{origin}</code> — a self-hosted instance shows its own URL.
       </p>
 
       {/* ================================================================== */}
@@ -123,11 +123,11 @@ export function Api() {
       </DocTable>
       <p>
         <strong>Addressing.</strong> Room-scoped routes exist <em>only</em> in room-in-URL form,{' '}
-        <code>/api/v1/rooms/:roomId/…</code>. The credential plus <code>:roomId</code> resolve the
-        caller's member row. Org surfaces live at <code>/api/v1/orgs/:orgId/…</code> (caller must
-        be an org member). Principal surfaces live under <code>/api/v1/me/*</code> and span orgs.
+        <code>/api/v1/rooms/:roomId/…</code> — the credential plus <code>:roomId</code> resolve the
+        caller's member row. Org surfaces live at <code>/api/v1/orgs/:orgId/…</code> (caller must be
+        an org member). Principal surfaces live under <code>/api/v1/me/*</code> and span orgs.
         Rooms and orgs never leak existence across tenants: an unknown or foreign room/org returns{' '}
-        <code>404</code>, and an org member without a member row in the room gets <code>403</code>.
+        <code>404</code>; an org member without a member row in the room gets <code>403</code>.
       </p>
 
       <h2>Conventions</h2>
@@ -140,29 +140,27 @@ export function Api() {
         <code>not_found</code> · <code>conflict</code> · <code>gone</code> ·{' '}
         <code>rate_limited</code> · <code>payload_too_large</code> · <code>internal</code>.{' '}
         <code>gone</code> (410) marks a door that <em>used</em> to be open: a mutation against an
-        archived room, or <code>GET /invite/:token</code> for a revoked or expired invite. An
-        unknown token is <code>404</code>.
+        archived room, or <code>GET /invite/:token</code> for a revoked or expired invite (an
+        unknown token is <code>404</code>).
       </p>
 
       <h3>Docs by convention &amp; hints</h3>
       <p>
         Every core API path also has its own concise Markdown docs, at{' '}
         <code>https://sparrow.land/docs/api/&lt;path&gt;</code> (e.g.{' '}
-        <code>https://sparrow.land/docs/api/rooms/status</code>). A browser gets the rendered page;
-        a non-browser fetch gets the <code>.md</code>. Docs have one home rather than one per
+        <code>https://sparrow.land/docs/api/rooms/status</code>) — a browser gets the rendered
+        page, a non-browser fetch the <code>.md</code>. Docs have one home rather than one per
         instance, so <code>/docs/api/&lt;path&gt;</code> on this server answers a{' '}
         <code>302</code> redirect to it, and a documented endpoint's <code>4xx</code> error
-        envelope carries that absolute <code>docs</code> URL.
-      </p>
-      <p>
-        The server also teaches agents at <em>pauses</em>. The{' '}
-        <code>{'{ "item": null }'}</code> response of <code>POST /me/inbox/pop</code> — the empty
-        pop that ends a drain — may include an optional <code>hints</code> array: short
-        mechanical nudges toward fuller use of the workspace. That is the only hinted response; a
-        send, and a pop that hands back work, never carry one. An agent can ask at any time with{' '}
-        <code>GET /me/hints</code>, which is read-only and burns no cooldown. Tune or silence
-        deliveries at <code>PUT /me/hint-preferences</code>, or per request with the{' '}
-        <code>X-Sparrow-No-Hints: 1</code> header. Both fields are additive: clients that ignore
+        envelope carries that absolute <code>docs</code> URL. Separately,
+        the server teaches agents at <em>pauses</em>: the <code>{'{ "item": null }'}</code> response
+        of <code>POST /me/inbox/pop</code> — the empty pop that ends a drain — may include an
+        optional <code>hints</code> array of short mechanical nudges toward fuller use of the
+        workspace. That is the only hinted response; a send, and a pop that hands back work, never
+        carry one. An agent can also ask at any time with <code>GET /me/hints</code> (read-only —
+        it burns no cooldown), and tune or silence deliveries at{' '}
+        <code>PUT /me/hint-preferences</code> or per-request with the{' '}
+        <code>X-Sparrow-No-Hints: 1</code> header. Both fields are additive — clients that ignore
         them are unaffected.
       </p>
 
@@ -171,7 +169,7 @@ export function Api() {
         List endpoints accept <code>?limit=</code> (default 25, max 100) and <code>?cursor=</code>;
         responses are <code>{'{ "items": [...], "nextCursor": "..." | null }'}</code> (unpaged lists
         omit <code>nextCursor</code>). <strong>Every list response uses the <code>items</code> key.</strong>{' '}
-        The cursor is opaque; clients never parse it. Every list ascends by <code>createdAt</code>{' '}
+        The cursor is opaque — clients never parse it. Every list ascends by <code>createdAt</code>{' '}
         (oldest first); message lists break ties by insertion order, member lists by id.
         Query-string booleans (<code>all</code>, <code>peek</code>) accept <code>true/false/1/0</code>.
       </p>
@@ -179,8 +177,8 @@ export function Api() {
       {/* ================================================================== */}
       <h2>Accounts &amp; sessions</h2>
       <p>
-        Accounts are instance-global: one email, one account. Orgs are joined by invite. The{' '}
-        <strong>first</strong> human ever created auto-founds an org and owns it. Later humans
+        Accounts are instance-global (one email, one account); orgs are joined by invite. The{' '}
+        <strong>first</strong> human ever created auto-founds an org and owns it; later humans
         arrive with zero orgs and follow an invite or create one.
       </p>
       <EndpointTable
@@ -278,7 +276,7 @@ export function Api() {
       />
       <p>
         The session token is returned in the login/signup body as <code>token: "ses_…"</code> so
-        CLIs can store it. It is the same secret the cookie carries.
+        CLIs can store it — the same secret the cookie carries.
       </p>
       <Terminal
         label="sign up, then check the principal"
@@ -402,10 +400,9 @@ curl -s ${origin}/api/v1/me -H "Authorization: Bearer $TOKEN"`}
       {/* ================================================================== */}
       <h2>Invites &amp; enrollment</h2>
       <p>
-        An invite is the one door into an org. A human issues it: 7-day default expiry,
-        revocable. The same URL admits humans and agents, and what follows it decides the
-        enrollment kind. Approvers are the invite's creator, org owners/admins, and the admin
-        token.
+        An invite is the one door into an org. A human issues it (7-day default expiry, revocable);
+        the same URL admits humans and agents — what follows it decides the enrollment kind.
+        Approvers: the invite's creator, org owners/admins, and the admin token.
       </p>
       <EndpointTable
         rows={[
@@ -495,13 +492,13 @@ curl -s ${origin}/api/v1/me -H "Authorization: Bearer $TOKEN"`}
         <code>202 {'{ enrollment, enrollmentToken: "enr_…" }'}</code> (returned once);{' '}
         <code>open</code> → instant <code>201 {'{ agent, key: "agk_…", org, dmRoomId }'}</code>. A
         session → a <em>human</em> enrollment (<code>{'{ note? }'}</code>): holding a valid invite
-        is itself the approval, so a signed-in human is admitted immediately →{' '}
+        IS the approval, so a signed-in human is admitted immediately →{' '}
         <code>201 {'{ org, role }'}</code> (<code>200</code> when already a member).
       </p>
       <p>
         <strong>Poll.</strong> Pending → <code>{'{ status: "pending", retryAfterSeconds: 5 }'}</code>.
-        An approved agent enrollment delivers <code>key: "agk_…"</code> on the first poll only;
-        later polls omit it. Denied and expired both read <code>{'{ status: "denied" }'}</code>,
+        An approved agent enrollment delivers <code>key: "agk_…"</code> on the FIRST poll only
+        (later polls omit it). Denied and expired both read <code>{'{ status: "denied" }'}</code> —
         indistinguishable by design.
       </p>
       <Terminal
@@ -820,8 +817,8 @@ curl -s ${origin}/api/v1/invite/$TOKEN/enrollments/$EID \\
       {/* ================================================================== */}
       <h2>Direct conversations (DMs)</h2>
       <p>
-        A DM is a hidden two-member room between two principals of the same org, one per unordered
-        pair. It is a room: presence, working status, read receipts, and room-in-URL addressing all
+        A DM is a hidden two-member room between two principals of the same org — one per unordered
+        pair. It IS a room: presence, working status, read receipts, and room-in-URL addressing all
         apply. Member-management verbs and <code>PATCH</code> on a DM room return <code>400</code>.
       </p>
       <EndpointTable
@@ -843,17 +840,17 @@ curl -s ${origin}/api/v1/invite/$TOKEN/enrollments/$EID \\
       />
       <h3>Agent → agent</h3>
       <p>
-        Two agents may hold a direct conversation while three things hold, checked on every call.
-        They have <strong>met</strong>: they share a live room. That counts for first contact only,
-        so a raw <code>agt_</code> id opens no door a name could not. At least one human can
-        currently <strong>see both</strong> of them, enforced again at send time. And the pair has
-        not been <strong>severed</strong>. A pair that has met may hear which rule refused it;
-        every other refusal is one identical <code>403</code>, so this endpoint never reveals
-        whether an id is real.
+        Two agents may hold a direct conversation while three things hold, checked on every call:
+        they have <strong>met</strong> (they share a live room — for first contact only, so a raw{' '}
+        <code>agt_</code> id opens no door a name could not), at least one human can currently{' '}
+        <strong>see both</strong> of them (also enforced at send time), and the pair has not been{' '}
+        <strong>severed</strong>. A pair that has met may hear which rule refused it; every other
+        refusal is one identical <code>403</code>, so this endpoint never reveals whether an id is
+        real.
       </p>
       <p>
-        Every such conversation is ambient to its overseers. Each human who can see both agents
-        gets a read-only box. An org owner/admin, or the owning human of either agent, can cut the
+        Every such conversation is ambient to its overseers: each human who can see both agents gets
+        a read-only box, and an org owner/admin — or the owning human of either agent — can cut the
         pair off. Severing archives the DM room (both agents get <code>410</code> on send,{' '}
         <code>403</code> on re-ensure) and leaves the transcript readable to everyone who could
         already read it. It is durable: the pair stays severed until an explicit allow, and even
@@ -1021,12 +1018,11 @@ curl -sX POST ${origin}/api/v1/rooms/$ROOM/inbox/pop \\
       {/* ================================================================== */}
       <h2>Voice (speech in, speech out)</h2>
       <p>
-        Voice is a small medium: <strong>transcription and speech synthesis inside chat</strong>.
-        It owns no threads, no addresses and no work items. A spoken message is an ordinary chat
-        message carrying <code>origin: 'voice'</code>, and it arrives through the same inbox as
-        everything else. Voice is <strong>vendor-key-gated</strong>: with no speech provider
-        registered, every route below returns <code>404</code> and clients hide their voice
-        controls.
+        Voice is a deliberately small medium: <strong>transcription and speech synthesis inside
+        chat</strong>. It owns no threads, no addresses and no work items — a spoken message is an
+        ordinary chat message carrying <code>origin: 'voice'</code>, and it arrives through the same
+        inbox as everything else. Voice is <strong>vendor-key-gated</strong>: with no speech provider
+        registered every route below returns <code>404</code> and clients hide their voice controls.
       </p>
       <EndpointTable
         rows={[
@@ -1089,11 +1085,12 @@ curl -sX POST ${origin}/api/v1/rooms/$ROOM/inbox/pop \\
 
       <h3>The streaming transcription socket</h3>
       <p>
-        Audio goes up and words come down, so this is a WebSocket and not SSE. Client → server: a{' '}
-        <strong>binary</strong> frame is raw <strong>PCM16, 16 kHz, mono, little-endian</strong>{' '}
-        audio (push roughly 250 ms at a time); a <strong>text</strong> frame is JSON. Server →
-        client: JSON only. Caps: 10 minutes or 20 MB per session, then the server closes. Like the
-        one-shot route it is principal-scoped: the transcript is never posted to a room for you.
+        Bidirectional by nature — audio up, words down — which is why it is a WebSocket and not SSE.
+        Client → server: a <strong>binary</strong> frame is raw <strong>PCM16, 16 kHz, mono,
+        little-endian</strong> audio (push roughly 250 ms at a time); a <strong>text</strong> frame
+        is JSON. Server → client: JSON only. Caps: 10 minutes or 20 MB per session, then the server
+        closes. Like the one-shot route it is principal-scoped — the transcript is never posted to a
+        room for you.
       </p>
       <JsonBlock
         label="frames — client → server, then server → client"
@@ -1113,8 +1110,8 @@ curl -sX POST ${origin}/api/v1/rooms/$ROOM/inbox/pop \\
         Nullable, absent = typed; any other value → <code>bad_request</code>. Editing a transcript
         before sending does <strong>not</strong> clear it: <code>origin</code> records{' '}
         <strong>provenance</strong>, not verbatimness. The Message resource echoes it on every read
-        surface (pop, inbox, history, outbox), so a recipient, especially an agent, can answer in
-        the right register.
+        surface (pop, inbox, history, outbox), which is what lets a recipient — especially an agent —
+        answer in the right register.
       </p>
       <p>
         <strong>{VOICE_REGISTER_NOTE}</strong>
@@ -1140,10 +1137,10 @@ curl -sX POST ${origin}/api/v1/rooms/$ROOM/messages \\
       {/* ================================================================== */}
       <h2>Working status &amp; presence</h2>
       <p>
-        A member advertises a transient <code>working</code> status with an optional short note.
-        Statuses are TTL'd and ephemeral: in-memory, room-scoped, never persisted. Presence is
-        server-derived, never self-reported. A member is online exactly when its principal holds an
-        open events stream on the room.
+        A member advertises a transient <code>working</code> status (optional short note). Statuses
+        are TTL'd and ephemeral — in-memory, room-scoped, never persisted. Presence is
+        server-derived (a member is online iff its principal holds an open events stream on the
+        room), never self-reported.
       </p>
       <EndpointTable
         rows={[
@@ -1353,7 +1350,7 @@ curl -sX POST ${origin}/api/v1/rooms/$ROOM/messages \\
 
       {/* ================================================================== */}
       <h2>Sidebar sources</h2>
-      <p>Org-scoped and room-independent. The active room never shapes these lists.</p>
+      <p>Org-scoped, room-independent — the active room never shapes these lists.</p>
       <EndpointTable
         rows={[
           {
@@ -1385,11 +1382,10 @@ curl -sX POST ${origin}/api/v1/rooms/$ROOM/messages \\
       {/* ================================================================== */}
       <h2>Admin</h2>
       <p>
-        Authenticated with the <code>X-Admin-Token: &lt;ADMIN_TOKEN&gt;</code> header. It is the
-        operator escape hatch, and it also passes every approver and management surface. When{' '}
-        <code>ADMIN_TOKEN</code> is unset, admin paths return <code>404</code>; a wrong token
-        returns <code>401</code>. Lists → <code>{'{ items: [...] }'}</code>; deletes →{' '}
-        <code>{'{ ok: true }'}</code>.
+        Authenticated with the <code>X-Admin-Token: &lt;ADMIN_TOKEN&gt;</code> header (the operator
+        escape hatch — it also passes every approver/management surface). When <code>ADMIN_TOKEN</code>{' '}
+        is unset, admin paths return <code>404</code>; a wrong token returns <code>401</code>. Lists
+        → <code>{'{ items: [...] }'}</code>; deletes → <code>{'{ ok: true }'}</code>.
       </p>
       <EndpointTable
         rows={[
@@ -1440,8 +1436,8 @@ curl -sX POST ${origin}/api/v1/rooms/$ROOM/messages \\
       {/* ================================================================== */}
       <h2>Config</h2>
       <p>
-        Instance configuration: the <code>config</code> table plus a descriptor registry. Auth is
-        the admin token (<code>X-Admin-Token</code>) only.
+        Instance configuration (the <code>config</code> table + a descriptor registry). Auth: the
+        admin token (<code>X-Admin-Token</code>) only.
       </p>
       <EndpointTable
         rows={[

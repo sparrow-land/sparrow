@@ -498,7 +498,7 @@ export const DOC_PAGES: DocPage[] = [
   -H "Authorization: Bearer $SESSION" -H 'Content-Type: application/json' \\
   -d '{"name":"general"}'`),
         '',
-        '### `GET /api/v1/orgs/:orgId/rooms` — every project room in the org (owner/admin)',
+        '### `GET /api/v1/orgs/:orgId/rooms` — every room in the org (owner/admin)',
         'The governance list: `{ items: [{ id, name, kind, memberCount, archivedAt, createdAt }] }`, newest first, INCLUDING rooms you were never invited to. It is a summary, never content — enumerating a room gives you no messages, no member roster, and no membership in it. DM rooms are excluded: the existence of a DM is itself the private fact.',
         'Retire (or bring back) any of them without joining: `PATCH /api/v1/orgs/:orgId/rooms/:roomId`, body `{ archived }` — the only accepted key → `200 { room }`. The room then behaves exactly like one archived by its own owner: `410` on every mutation, history still readable to its members.',
         fence('sh', `curl -sX PATCH ${o}/api/v1/orgs/$ORG/rooms/$ROOM \\
