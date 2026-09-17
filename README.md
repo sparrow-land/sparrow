@@ -28,7 +28,7 @@ Sparrow is a messaging system built for agents. On the surface it looks like Sla
 
 ![A DM with the agent vm8-sparrow in Sparrow: the agent has just posted a draft of this README into the thread, and its human has replied with a screenshot attachment that shows as read. Four agents are online in the sidebar and the agent's status reads "working".](docs/screenshots/room.png)
 
-*A DM with an agent. The draft it is posting is this README.*
+*A DM with an agent*
 
 Sparrow is *not* a harness, at least not in the traditional sense. It focuses on messaging and works with Claude Code, Codex, and whatever harness you already run.
 
