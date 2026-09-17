@@ -325,13 +325,16 @@ const bridgeRang = (binDir: string): boolean => fs.existsSync(path.join(binDir, 
  * `--timeout 60` and a 5 s standby cadence make the wait long on purpose: a
  * listener that answers a signal only when its nap ends would be caught here.
  */
-async function intoDeferredHandoff(where: 'initial' | 'tail'): Promise<ReturnType<typeof spawnListener>> {
+async function intoDeferredHandoff(
+  where: 'initial' | 'tail',
+  cadenceMs = 5000,
+): Promise<ReturnType<typeof spawnListener>> {
   upstream.reset();
   upstream.holdPresence(true);
   if (where === 'initial') upstream.setItem(true);
   const before = upstream.sseConns();
   const l = spawnListener(['await', '--timeout', '60', '--poll-seconds', '0', '--json'], {
-    SPARROW_BLOCKED_POLL_MS: '5000',
+    SPARROW_BLOCKED_POLL_MS: String(cadenceMs),
     CODEX_THREAD_ID: 'thread-signal',
   });
   if (where === 'tail') {
@@ -386,6 +389,34 @@ describe('sparrow await — a deferred hand-off still answers signals', () => {
       expect(heartbeat(l.stateDir).split(/\s+/)[0]).toBe('killed:SIGTERM');
       expect(bridgeRang(l.binDir)).toBe(false);
       expect(upstream.pops()).toBe(0);
+    }, 40_000);
+  }
+
+  /* THE RECOVERY IS ITSELF A ROUND TRIP. When the limit lifts, the hand-off
+   * re-plants the turn mark — and an interrupt can land inside that POST, where
+   * no nap is watching for it. Ringing the bridge afterwards would queue a turn
+   * for a session the human just stopped. */
+  for (const where of ['initial', 'tail'] as const) {
+    it(`${where}: SIGINT during the RECOVERY presence post rings no bridge`, async () => {
+      const l = await intoDeferredHandoff(where, 200); // notice the clear quickly
+      upstream.holdPresence(true); // …and park the mark the recovery re-plants
+      fs.rmSync(path.join(l.stateDir, 'blocked'), { recursive: true, force: true });
+      await until(() => upstream.presenceHeld() >= 1); // the recovery is mid-POST
+
+      const t0 = Date.now();
+      l.kill('SIGINT');
+      // Wait for the handler to have RUN (its stamp is the proof) before the
+      // POST answers: otherwise this races signal delivery rather than testing
+      // what the hand-off does once it has been interrupted.
+      await until(() => heartbeat(l.stateDir).startsWith('stopped:'), 5000);
+      upstream.releasePresence(); // the POST answers — too late to matter
+      const { code } = await l.ended;
+
+      expect(Date.now() - t0).toBeLessThan(1500);
+      expect(code).toBe(0);
+      expect(heartbeat(l.stateDir).split(/\s+/)[0]).toBe('stopped:SIGINT');
+      expect(bridgeRang(l.binDir)).toBe(false); // nothing queued after the Ctrl-C
+      expect(upstream.pops()).toBe(0); // and the item is still unread
     }, 40_000);
   }
 

@@ -4340,10 +4340,33 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
    * its successor's announcement standing.
    */
   const awaitCandidate: { retire?: () => void } = {};
+  /**
+   * The listener's signal handlers, taken down when the WHOLE run ends.
+   *
+   * They cannot come down with the stream: everything after it — the hand-off,
+   * and above all a hand-off DEFERRED by a usage limit — still has to answer a
+   * Ctrl-C, and used to die by default signal action instead (no stamp, a
+   * signal death rather than a clean stop). And they must not simply be left
+   * armed either: `runCli` is a library entry as much as a binary, and a
+   * process that calls it twice would keep a handler closed over a dead
+   * controller and a retired generation for a later signal to run.
+   *
+   * So: ONE holder, set the moment they are armed, and ONE `finally` below that
+   * every exit path passes through — completion, standby, either hand-off, a
+   * throw. Idempotent: it clears the slot before calling, and never throws.
+   */
+  const awaitSignals: { disarm?: () => void } = {};
   const runAwait = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
     try {
       await runAwaitArmed(opts);
     } finally {
+      const disarm = awaitSignals.disarm;
+      awaitSignals.disarm = undefined;
+      try {
+        disarm?.();
+      } catch {
+        /* taking a handler off is not worth failing a run over */
+      }
       awaitCandidate.retire?.();
       awaitCandidate.retire = undefined;
     }
@@ -4700,7 +4723,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     // candidate until the stream opens (see the publish-late rule above), and a
     // candidate must not write over the state dir a healthy listener owns —
     // including from a late signal, hence the stamp veto.
-    const disarmSignals = armListenerSignals(
+    awaitSignals.disarm = armListenerSignals(
       env,
       () => {
         interrupt.abort(); // Ctrl-C: whatever this listener is waiting for is off
@@ -4887,9 +4910,15 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       reason: 'work' | 'gap',
       opts: { afterBlock?: boolean } = {},
     ): Promise<boolean> => {
-      if (opts.afterBlock === true && interrupted()) return false;
+      if (interrupted()) return false;
       if (blockedSinceAsking()) return false;
       await markTurn();
+      /* EVERY AWAIT IN HERE IS A PLACE AN INTERRUPT CAN LAND, and the turn mark
+       * is a round trip — not the nap, so nothing else here is watching the
+       * interrupt seam. The order after it is fixed: INTERRUPT first (it
+       * outranks every other reason to go on), then the marker, then the
+       * deadline, and only then the bridge. */
+      if (interrupted()) return false;
       // The presence POST is a round trip of its own, and under Claude Code the
       // bridge below is a no-op — so this is the check that catches a marker
       // written while the turn mark was being planted.
@@ -5358,8 +5387,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       clearInterval(blockedTimer);
       stopPoll();
       // NOT the signals: the hand-off below still has to answer them, and a
-      // hand-off deferred by a usage limit can wait there a long time. They come
-      // down when the whole run does (see `awaitSignals`).
+      // hand-off deferred by a usage limit can wait there a long time. They are
+      // taken down by the single `finally` wrapping the whole run — see
+      // `awaitSignals`, where `runAwait` calls `runAwaitArmed`.
     }
 
     // Let an inbox check that was in flight when the stream ended finish, so a

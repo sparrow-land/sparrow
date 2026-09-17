@@ -4663,6 +4663,70 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
       }
     }, 40_000);
 
+    /* ================================================================
+     * SIGNAL HANDLERS ARE NOT LITTER.
+     *
+     * `runCli` is a library entry as much as a binary. A child process hides a
+     * missing cleanup — it exits and the OS collects everything — so the only
+     * honest test is an in-process one that counts listeners. A handler left
+     * behind is closed over a dead controller and a retired generation, and a
+     * later signal would run it.
+     * ================================================================ */
+    const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+    const listenerCounts = (): Record<string, number> =>
+      Object.fromEntries(SIGNALS.map((sg) => [sg, process.listenerCount(sg)]));
+
+    it('every await exit path leaves the signal handlers exactly as it found them', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtsig');
+      const baseline = listenerCounts();
+
+      // (a) an ordinary completed run (timeout)
+      expect(await runCli(['await', '--timeout', '1'], quick(), capture().io)).toBe(2);
+      expect(listenerCounts()).toEqual(baseline);
+
+      // …and again: nothing accumulates across runs.
+      expect(await runCli(['await', '--timeout', '1'], quick(), capture().io)).toBe(2);
+      expect(listenerCounts()).toEqual(baseline);
+
+      // (b) a run that ends standing by (blocked, then its deadline)
+      block();
+      const blockedCap = capture();
+      expect(await runCli(['await', '--timeout', '1'], quick(), blockedCap.io)).toBe(2);
+      expect(blockedCap.err()).toContain('standing by');
+      expect(listenerCounts()).toEqual(baseline);
+      fs.rmSync(blockedDir, { recursive: true, force: true });
+
+      // (c) a run that ends on a wake (the hand-off path)
+      await owner.client.sendMessage(roomId, { to: agentId, body: 'and out' });
+      expect(await runCli(['await', '--timeout', '10'], quick(), capture().io)).toBe(0);
+      expect(listenerCounts()).toEqual(baseline);
+
+      // (d) a run that THROWS after the handlers are armed: the pre-stream look
+      // against a server that is not there.
+      const bad = capture();
+      expect(
+        await runCli(['await', '--timeout', '1', '--server', 'http://127.0.0.1:9'], quick(), bad.io),
+      ).toBe(1);
+      expect(bad.err()).not.toBe('');
+      expect(listenerCounts()).toEqual(baseline);
+    }, 40_000);
+
+    it('a run interrupted while standing by also cleans up after itself', async () => {
+      await awaitFixture('awtsigint');
+      const baseline = listenerCounts();
+      block();
+      const cap = capture();
+      const running = runCli(['await', '--timeout', '25'], quick(), cap.io);
+      await until(() => heartbeat().startsWith('blocked:'));
+      // The listener's OWN interrupt path, without signalling this process:
+      // `standDown` is what a supersession uses, and the exit path is shared.
+      const successor = capture();
+      const second = runCli(['await', '--timeout', '2'], quick(), successor.io);
+      expect(await running).toBe(4);
+      await second;
+      expect(listenerCounts()).toEqual(baseline);
+    }, 40_000);
+
     it('an unreadable marker is ignored: junk never silences a listener', async () => {
       await awaitFixture('awtblockjunk');
       fs.mkdirSync(blockedDir, { recursive: true });
