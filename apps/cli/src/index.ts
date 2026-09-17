@@ -125,7 +125,8 @@ import {
   type LastInbound,
 } from './state.js';
 import { touchHeartbeat, markHeartbeatDead, readLoopState, skillInstall } from './loop-state.js';
-import { prepareAwaitGeneration, type AwaitGeneration } from './await-owner.js';
+import { assertMayArm, prepareAwaitGeneration, type AwaitGeneration } from './await-owner.js';
+import { writeAwaitFailure } from './await-failure.js';
 import {
   recordSkillInstall,
   forgetSkillInstall,
@@ -4333,9 +4334,16 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     if (opts.codexThread !== undefined && !explicitCodexThread) {
       throw new CliError('--codex-thread requires a non-empty Codex thread id.');
     }
-    // A model-run Codex shell exports BOTH names with the same value, and which
-    // one is present has varied across Codex builds — so either identifies the
-    // thread, for the queue bridge and for the preflight below alike.
+    /* WHICH THREAD THIS LISTENER BRIDGES TO.
+     *
+     * CODEX_THREAD_ID is the answer whenever it is set: it names THIS shell's
+     * thread, which is the only one `codex queue` will accept from here.
+     * CODEX_SESSION_ID is a FALLBACK ONLY — kept because which of the two a
+     * Codex build exports has varied, and in a ROOT shell they are equal anyway.
+     * They part company in a spawned sub-agent, where the session id is the
+     * ROOT's thread; arming from there is refused outright in the preflight
+     * below, so this fallback can never quietly make a sub-agent queue into its
+     * parent. */
     const codexThread =
       explicitCodexThread || env.CODEX_THREAD_ID?.trim() || env.CODEX_SESSION_ID?.trim();
     const awaitHeartbeatKind = codexThread ? 'await:codex' : 'await';
@@ -4354,6 +4362,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         err: (s) => io.err(s),
         probe: io.sandboxProbe,
       });
+      // …and the state dir's incumbent, if it is a live listener for a DIFFERENT
+      // Codex thread: superseding that one cannot re-point the wake path, it can
+      // only silence it. Re-checked inside publish() for the concurrent case.
+      assertMayArm(env, codexThread);
     }
 
     const { client, server, token } = buildClient(opts, env);
@@ -4391,6 +4403,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       env,
       kind: awaitHeartbeatKind,
       profile: activeProfileName(opts, env),
+      ...(codexThread ? { thread: codexThread } : {}),
     });
     awaitCandidate.retire = () => generation.clearCandidate();
     let supersededBy: string | undefined;
@@ -4419,6 +4432,11 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         // so even a stamp written inside that window is discarded by readers.)
         if (!owned()) return;
         markHeartbeatDead(env, 'killed', 'CODEX_QUEUE', generation.nonce());
+        // The stderr line below is about to scroll into a shell nobody will read
+        // again — the turn that armed this listener is over. Leave the same
+        // sentence on disk so the NEXT turn's status can say why the wake path
+        // died instead of making the agent guess from `killed:CODEX_QUEUE`.
+        writeAwaitFailure(env, { nonce: generation.nonce(), thread: codexThread, error: e });
         const consequence =
           reason === 'upgrade'
             ? 'the required upgrade remains pending'
@@ -4426,6 +4444,16 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
               ? 'work remains unread'
               : 'work may remain unread';
         io.err(`[await] ${String((e as Error)?.message ?? e)}; ${consequence}, but no Codex turn was queued\n`);
+        /* EXIT 1, NOT 0 (field incident, 2026-09-17). Exit 0 says "handled: a
+         * turn is coming", and a harness that believes it re-arms nothing. But
+         * the queue was REFUSED: there is unread work, no turn was started, and
+         * this process is about to end — the workspace is deaf until something
+         * notices. A failure exit is the only honest report, and it is what gets
+         * a supervising harness to act. The wake line stays on stdout and the
+         * item stays unconsumed, so nothing is lost by exiting non-zero. Guarded
+         * by `owned()` above: a superseded listener says nothing about the
+         * successor's state dir, and changes no exit code on its behalf. */
+        ctx.exitCode = 1;
       }
     };
 
@@ -4948,7 +4976,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       throw terminalError;
     }
     if (emitted) {
-      // exit 0 — the wake line is already on stdout; cover the turn it starts.
+      // The wake line is already on stdout; cover the turn it starts. Exit 0 —
+      // UNLESS the Codex queue is refused, in which case `queueCodexWake` sets
+      // exit 1: no turn was started for work that is still unread, and saying
+      // "handled" there is how a workspace goes quietly deaf.
       await markTurn();
       await queueCodexWake(emittedReason === 'replay.gap' ? 'gap' : 'work');
       return;

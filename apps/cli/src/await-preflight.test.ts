@@ -71,6 +71,64 @@ function run(
   return lines;
 }
 
+/* ==================================================================
+ * THE SUB-AGENT REFUSAL (field incident, Codex 0.154).
+ *
+ * A spawned sub-agent ran `sparrow await` in the parent's project dir with the
+ * parent's profile. Newest-wins handed it the state dir, and when work arrived
+ * `codex queue --thread <child>` was refused (-32600, "direct app-server input
+ * is not allowed for unloaded spawned sub-agents"): the root session's listener
+ * was gone and nothing could be woken. In a spawned sub-agent shell
+ * CODEX_SESSION_ID is the ROOT thread while CODEX_THREAD_ID is the child's own;
+ * in a root shell the two are equal.
+ * ================================================================== */
+describe('codexAwaitPreflight — spawned sub-agent (FATAL: the wake path cannot exist)', () => {
+  const subagentEnv = { CODEX_THREAD_ID: 'thread-child', CODEX_SESSION_ID: 'thread-root' };
+
+  it('refuses before anything else — including the sandbox probe', () => {
+    const probe = sandboxProbe(); // would also refuse, and must never be asked
+    let thrown: unknown;
+    try {
+      run({ env: subagentEnv, probe, thread: 'thread-child' });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(CliError);
+    const message = (thrown as Error).message;
+    expect(message.split('\n')).toHaveLength(1);
+    expect(message).toContain('spawned Codex sub-agent (thread thread-child, session thread-root)');
+    expect(message).toContain("cannot be woken by Codex");
+    expect(message).toContain('Leave listening to the root session');
+    expect(message).toContain('SPARROW_AWAIT_SUBAGENT=1');
+    expect(probe.reads).toEqual([]);
+  });
+
+  it('a ROOT shell (the two ids agree) is not a sub-agent', () => {
+    stamp('Stop', 'runtime thread-root');
+    expect(
+      run({
+        env: { CODEX_THREAD_ID: 'thread-root', CODEX_SESSION_ID: 'thread-root' },
+        thread: 'thread-root',
+      }),
+    ).toEqual([]);
+  });
+
+  /* An OBSERVED signal, not a documented contract: when the session id is not
+   * there at all we know nothing, and refusing on ignorance would strand every
+   * Codex build that does not export it. */
+  it('a missing CODEX_SESSION_ID is UNKNOWN, never proof of a sub-agent', () => {
+    stamp('Stop', 'runtime thread-child');
+    expect(run({ env: { CODEX_THREAD_ID: 'thread-child' }, thread: 'thread-child' })).toEqual([]);
+  });
+
+  it('SPARROW_AWAIT_SUBAGENT=1 lets an operator arm anyway', () => {
+    stamp('Stop', 'runtime thread-child');
+    expect(
+      run({ env: { ...subagentEnv, SPARROW_AWAIT_SUBAGENT: '1' }, thread: 'thread-child' }),
+    ).toEqual([]);
+  });
+});
+
 describe('codexAwaitPreflight — sandbox check (FATAL: provable from the inside)', () => {
   it('refuses to arm inside a Codex sandbox, naming the evidence and the way out', () => {
     stamp('Stop', `runtime ${THREAD}`);

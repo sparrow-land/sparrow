@@ -292,4 +292,70 @@ describe('Codex SKILL.md — the sandbox truth about the wake listener', () => {
     expect(s).toMatch(/trust/i);
     expect(s).toMatch(/no new flags|nothing new to remember|no flag/i);
   });
+
+  /**
+   * The other refusal, same paragraph: arming is idempotent and supersedes the
+   * previous listener, which is exactly right WITHIN one thread and exactly
+   * wrong across two. A sub-agent that supersedes the root session's listener
+   * takes the whole agent offline, so the CLI stops rather than replaces.
+   */
+  it('says await refuses to supersede a listener owned by another Codex thread', () => {
+    const s = section();
+    expect(s).toMatch(/another Codex thread|a different Codex thread/i);
+    expect(s).toMatch(/refuse/i);
+    expect(s).toMatch(/rather than taking it over|instead of taking it over/i);
+  });
+});
+
+/**
+ * SUB-AGENTS DO NOT OWN THE LISTENER (field incident, 2026-09-17). A spawned
+ * Codex sub-agent ran `sparrow await` in the parent's directory with the
+ * parent's profile. It superseded the root session's listener, and when work
+ * arrived Codex would not queue a turn into a sub-agent that was no longer
+ * loaded — so the whole agent went deaf while presence stayed green. The
+ * playbook has to draw the line before an agent spawns helpers, not after.
+ */
+describe('Codex SKILL.md — spawned sub-agents and the parent profile', () => {
+  const section = (() => {
+    const idx = codex.indexOf('## Several agents on one machine');
+    expect(idx).toBeGreaterThan(0);
+    return codex.slice(idx, codex.indexOf('## What the hooks enforce'));
+  })();
+
+  it('says the ROOT thread alone owns this profile listener', () => {
+    expect(section).toMatch(/root/i);
+    expect(section).toMatch(/sub-?agent/i);
+  });
+
+  it('names the three commands a sub-agent must not run for the parent profile', () => {
+    expect(section).toMatch(/never[^.]*`sparrow await`/i);
+    expect(section).toContain('sparrow pop');
+    expect(section).toMatch(/status/i);
+  });
+
+  it('leaves `sparrow send` open to a sub-agent', () => {
+    expect(section).toMatch(/`sparrow send`/);
+  });
+
+  it('gives the reason: Codex cannot queue a turn into an unloaded sub-agent', () => {
+    expect(section).toMatch(/queue a turn|queue turns/i);
+    expect(section).toMatch(/no longer loaded|not loaded|unloaded/i);
+  });
+
+  it('says the CLI now refuses to arm there, rather than leaving it to discipline', () => {
+    expect(section).toMatch(/refuses to arm/i);
+  });
+
+  it('points an independent agent at its OWN profile and state dir', () => {
+    expect(section).toMatch(/own profile/i);
+    expect(section).toMatch(/state dir/i);
+  });
+
+  it('is Codex-specific: the Claude playbook is untouched by it', () => {
+    const claudeSection = claude.slice(
+      claude.indexOf('## Several agents on one machine'),
+      claude.indexOf('## What the hooks enforce'),
+    );
+    expect(claudeSection).not.toMatch(/sub-?agent/i);
+  });
 });

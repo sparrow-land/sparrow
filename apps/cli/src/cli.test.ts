@@ -80,6 +80,9 @@ let env: Record<string, string | undefined>;
 
 beforeEach(async () => {
   await startServer();
+  for (const f of ['await-owner.json', 'await-candidate.json', 'await-last-failure.json']) {
+    fs.rmSync(path.join(stateDir, f), { force: true });
+  }
   configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-cli-cfg-'));
   env = {
     XDG_CONFIG_HOME: configDir,
@@ -87,6 +90,12 @@ beforeEach(async () => {
     SPARROW_STATE_DIR: stateDir,
     PATH: process.env.PATH,
     SPARROW_POLL_INTERVAL_MS: '15',
+    // ONE state dir is shared by every test in this file, and every listener in
+    // it runs in THIS live process — so a published owner record would outlive
+    // its test and read, to the next one, as a healthy listener on a different
+    // Codex thread (which 0.1.38 rightly refuses to supersede). Each test starts
+    // unowned instead; ownership races are set up explicitly where they matter.
+    // (Placed here rather than in an afterEach so a crashed test cannot leak.)
     // `await`'s Codex sandbox preflight reads the REAL procfs by default, so a
     // suite run from inside a bubblewrap/unshare sandbox (or a nested-namespace
     // CI container) would refuse to arm in every Codex test below, for reasons
@@ -3135,7 +3144,11 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     );
   });
 
-  it('--codex-thread makes a queue failure loud while preserving exit 0 and unread work', async () => {
+  /* EXIT 1, NOT 0 (field incident, 2026-09-17). A refused queue means no turn
+   * was started for work that is still unread, and this process is ending: exit
+   * 0 would tell a harness "handled" and stop it re-arming, which is exactly how
+   * the workspace went deaf. The wake line and the unread item are unchanged. */
+  it('--codex-thread makes a queue failure loud, exits 1, and leaves the work unread', async () => {
     const { owner, roomId, agentId } = await awaitFixture('awtcodexfail');
     const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'queue failure' });
     const cap = capture();
@@ -3147,11 +3160,23 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
         { ...env, CODEX_THREAD_ID: 'thread-env-must-not-win' },
         cap.io,
       ),
-    ).toBe(0);
+    ).toBe(1);
     expect(cap.err()).toContain('codex queue failed for thread thread-fail');
     expect(cap.err()).toContain('fake codex failure');
     expect(cap.err()).toContain('work remains unread');
     expect(fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8')).toContain('killed:CODEX_QUEUE');
+    // The wake line still went out — exit 1 reports the wake bridge, not the wake.
+    expect(JSON.parse(cap.out().trim()).type).toBe('await.item');
+
+    // …and the reason is left on disk for the next turn's status to read.
+    const failure = JSON.parse(
+      fs.readFileSync(path.join(stateDir, 'await-last-failure.json'), 'utf8'),
+    );
+    expect(failure).toMatchObject({ version: 1, kind: 'codex-queue', thread: 'thread-fail' });
+    expect(failure.error).toContain('fake codex failure');
+    expect(failure.nonce).toBe(
+      JSON.parse(fs.readFileSync(path.join(stateDir, 'await-owner.json'), 'utf8')).nonce,
+    );
 
     const inbox = capture();
     expect(await runCli(['inbox', '--json'], env, inbox.io)).toBe(0);
@@ -4095,6 +4120,11 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
       ).toBe(2);
       expect(manual.err()).toContain('hand run');
 
+      // The first half left a published owner for thread-manual, and in-process
+      // its pid is this very (live) process — which the ownership guard would
+      // rightly refuse to supersede from another thread. Hooks, not ownership,
+      // are what this test is about, so hand the second half an unowned dir.
+      fs.rmSync(path.join(stateDir, 'await-owner.json'), { force: true });
       stampHook('runtime thread-someone-else');
       const other = capture();
       other.io.sandboxProbe = probe(HOST);
@@ -4102,6 +4132,127 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
         await runCli(['await', '--timeout', '1'], unpinned({ CODEX_THREAD_ID: 'thread-mine' }), other.io),
       ).toBe(2);
       expect(other.err()).toContain('different Codex thread');
+    });
+
+    /* ---------------- the spawned sub-agent (Codex 0.154) ----------------
+     * In a spawned sub-agent shell CODEX_SESSION_ID is the ROOT thread and
+     * CODEX_THREAD_ID is the child's own. Its listener can never be woken —
+     * `codex queue --thread <child>` is refused — so arming there would take
+     * the state dir from the root session and silence the workspace. */
+    it('refuses to arm from a spawned sub-agent, touching NOTHING', async () => {
+      await awaitFixture('awtpfsub');
+      stampHook('runtime thread-child');
+      const cap = capture();
+      const p = probe(HOST);
+      const heartbeatBefore = fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8');
+      cap.io.sandboxProbe = p;
+
+      expect(
+        await runCli(
+          ['await', '--timeout', '10'],
+          unpinned({ CODEX_THREAD_ID: 'thread-child', CODEX_SESSION_ID: 'thread-root' }),
+          cap.io,
+        ),
+      ).toBe(1);
+      expect(cap.err()).toContain('spawned Codex sub-agent (thread thread-child, session thread-root)');
+      expect(cap.err()).toContain('SPARROW_AWAIT_SUBAGENT=1');
+      expect(cap.out()).toBe('');
+      // BEFORE everything: no probe, no candidate, no owner, no heartbeat write.
+      expect(p.reads).toEqual([]);
+      expect(fs.existsSync(path.join(stateDir, 'await-candidate.json'))).toBe(false);
+      expect(fs.existsSync(path.join(stateDir, 'await-owner.json'))).toBe(false);
+      expect(fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8')).toBe(heartbeatBefore);
+    });
+
+    it('SPARROW_AWAIT_SUBAGENT=1 lets an operator arm from a sub-agent anyway', async () => {
+      await awaitFixture('awtpfsubok');
+      stampHook('runtime thread-child');
+      const cap = capture();
+      cap.io.sandboxProbe = probe(HOST);
+
+      expect(
+        await runCli(
+          ['await', '--timeout', '1'],
+          unpinned({
+            CODEX_THREAD_ID: 'thread-child',
+            CODEX_SESSION_ID: 'thread-root',
+            SPARROW_AWAIT_SUBAGENT: '1',
+          }),
+          cap.io,
+        ),
+      ).toBe(2);
+      expect(cap.err()).not.toContain('sub-agent');
+    });
+
+    /* ------------- a live listener on another Codex thread -------------- */
+    it('refuses to supersede a LIVE listener bound to a different thread', async () => {
+      await awaitFixture('awtpfown');
+      const ownerFile = path.join(stateDir, 'await-owner.json');
+      // pid = this very process: demonstrably alive, which is the whole point.
+      const incumbent = {
+        version: 1,
+        nonce: 'aaaabbbbccccdddd',
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+        kind: 'await:codex',
+        thread: 'thread-root',
+      };
+      fs.writeFileSync(ownerFile, `${JSON.stringify(incumbent)}
+`);
+      const cap = capture();
+      cap.io.sandboxProbe = probe(HOST);
+
+      expect(
+        await runCli(['await', '--timeout', '10'], unpinned({ CODEX_THREAD_ID: 'thread-other' }), cap.io),
+      ).toBe(1);
+      expect(cap.err()).toContain(`Codex thread thread-root (pid ${process.pid})`);
+      expect(cap.err()).toContain('SPARROW_AWAIT_TAKE_OVER=1');
+      expect(cap.out()).toBe('');
+      // The incumbent keeps the state dir, and nothing announced an arming.
+      expect(JSON.parse(fs.readFileSync(ownerFile, 'utf8')).nonce).toBe('aaaabbbbccccdddd');
+      expect(fs.existsSync(path.join(stateDir, 'await-candidate.json'))).toBe(false);
+    });
+
+    it('SPARROW_AWAIT_TAKE_OVER=1 supersedes it, and same-thread re-arm never asks', async () => {
+      await awaitFixture('awtpftakeover');
+      const ownerFile = path.join(stateDir, 'await-owner.json');
+      const incumbent = (thread: string): void => {
+        fs.writeFileSync(
+          ownerFile,
+          `${JSON.stringify({
+            version: 1,
+            nonce: 'aaaabbbbccccdddd',
+            pid: process.pid,
+            startedAt: new Date().toISOString(),
+            kind: 'await:codex',
+            thread,
+          })}
+`,
+        );
+      };
+
+      incumbent('thread-root');
+      const forced = capture();
+      forced.io.sandboxProbe = probe(HOST);
+      expect(
+        await runCli(
+          ['await', '--timeout', '1'],
+          unpinned({ CODEX_THREAD_ID: 'thread-other', SPARROW_AWAIT_TAKE_OVER: '1' }),
+          forced.io,
+        ),
+      ).toBe(2);
+      expect(JSON.parse(fs.readFileSync(ownerFile, 'utf8')).thread).toBe('thread-other');
+
+      // The everyday case — the SAME thread re-arming — was never affected.
+      incumbent('thread-mine');
+      const rearm = capture();
+      rearm.io.sandboxProbe = probe(HOST);
+      expect(
+        await runCli(['await', '--timeout', '1'], unpinned({ CODEX_THREAD_ID: 'thread-mine' }), rearm.io),
+      ).toBe(2);
+      const after = JSON.parse(fs.readFileSync(ownerFile, 'utf8'));
+      expect(after.thread).toBe('thread-mine');
+      expect(after.nonce).not.toBe('aaaabbbbccccdddd'); // superseded, as always
     });
 
     it('a NON-Codex run never probes and never reads a stamp', async () => {
@@ -5903,6 +6054,9 @@ describe('sparrow CLI — client versioning', () => {
       expect(cap.err()).not.toContain('no Codex turn was queued'); // stale news
       expect(cap.err()).toContain('superseded by a newer listener');
       expect(JSON.parse(fs.readFileSync(ownerFile, 'utf8')).nonce).toBe('b0b0b0b0b0b0b0b0');
+      // …and it leaves no last-failure record either: the complaint is stale,
+      // and exit 4 (stood down) is not the successor's exit 1 to hand out.
+      expect(fs.existsSync(path.join(stateDir, 'await-last-failure.json'))).toBe(false);
     } finally {
       await stub.close();
     }

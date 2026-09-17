@@ -623,6 +623,114 @@ describe('pause / resume / status', () => {
     expect(out).toMatch(/skill: +installed/);
   });
 
+  /* ------------------------ what the heartbeat SAYS ------------------------ *
+   * An age alone cannot be acted on: `heartbeat 8s ago` is the same line for a
+   * bridged listener doing its job and for a corpse that stamped `killed:` two
+   * seconds ago. The word is the actionable half, so status prints it.
+   * ------------------------------------------------------------------------ */
+  const writeHeartbeatFile = (content: string, ageSeconds = 0): void => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const f = path.join(stateDir, 'heartbeat');
+    fs.writeFileSync(f, `${content}\n`);
+    const when = new Date(Date.now() - ageSeconds * 1000);
+    fs.utimesSync(f, when, when);
+  };
+  const statusOut = async (): Promise<string> => {
+    logs.length = 0;
+    await run(['status']);
+    return logs.join('\n');
+  };
+
+  it('prints the heartbeat WORD beside the age', async () => {
+    await run(['install']);
+    writeHeartbeatFile('await:codex', 8);
+    expect(await statusOut()).toMatch(/heartbeat: +await:codex, 8s ago/);
+    writeHeartbeatFile('await', 3);
+    expect(await statusOut()).toMatch(/heartbeat: +await, 3s ago/);
+  });
+
+  it('prints a dead stamp with its signal, and a human age', async () => {
+    await run(['install']);
+    writeHeartbeatFile('killed:CODEX_QUEUE', 35 * 60);
+    expect(await statusOut()).toMatch(/heartbeat: +killed:CODEX_QUEUE, 35m ago/);
+  });
+
+  it('keeps the old wording when the heartbeat is absent or says nothing', async () => {
+    await run(['install']);
+    expect(await statusOut()).toMatch(/heartbeat: +no heartbeat/);
+    writeHeartbeatFile('', 4);
+    expect(await statusOut()).toMatch(/heartbeat: +heartbeat 4s ago/);
+  });
+
+  /* ------------------------- why the listener died ------------------------- *
+   * A Codex queue rejection is the one death that leaves the agent looking fine:
+   * the listener woke, could not deliver the turn, and exited. The CLI records
+   * it; status surfaces it — but only for the generation that owns this state
+   * dir now, because a superseded listener's complaint says nothing about the
+   * one currently on watch.
+   * ------------------------------------------------------------------------ */
+  const writeOwner = (nonce?: string): void => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, 'await-owner.json'),
+      JSON.stringify({ version: 1, ...(nonce ? { nonce } : {}), pid: 4242, kind: 'await' }),
+    );
+  };
+  const writeFailure = (body: unknown): void => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, 'await-last-failure.json'),
+      typeof body === 'string' ? body : JSON.stringify(body),
+    );
+  };
+  const FAILURE = {
+    version: 1,
+    nonce: 'f00d',
+    thread: 'thr_abc',
+    at: '2026-09-17T09:12:00.000Z',
+    kind: 'codex-queue',
+    error: 'thread not found',
+  };
+
+  it('reports a queue rejection from the generation that owns the dir', async () => {
+    await run(['install']);
+    writeOwner('f00d');
+    writeFailure(FAILURE);
+    expect(await statusOut()).toContain(
+      'listener died: codex queue rejected for thread thr_abc at 2026-09-17T09:12:00.000Z: thread not found',
+    );
+  });
+
+  it('says nothing about a SUPERSEDED generation complaint', async () => {
+    await run(['install']);
+    writeOwner('b0b0');
+    writeFailure(FAILURE);
+    expect(await statusOut()).not.toContain('listener died:');
+  });
+
+  it('says nothing when the record names no generation', async () => {
+    await run(['install']);
+    writeOwner('f00d');
+    writeFailure({ ...FAILURE, nonce: undefined });
+    expect(await statusOut()).not.toContain('listener died:');
+  });
+
+  it('says nothing when there is no owner record to match against', async () => {
+    await run(['install']);
+    writeFailure(FAILURE);
+    expect(await statusOut()).not.toContain('listener died:');
+  });
+
+  it('says nothing for a malformed or missing record, and never throws', async () => {
+    await run(['install']);
+    writeOwner('f00d');
+    expect(await statusOut()).not.toContain('listener died:');
+    writeFailure('{not json');
+    expect(await statusOut()).not.toContain('listener died:');
+    writeFailure({ version: 1, nonce: 'f00d' }); // no error text
+    expect(await statusOut()).not.toContain('listener died:');
+  });
+
   it('rejects an unknown subcommand with a nonzero code', async () => {
     expect(await run(['frobnicate'])).toBe(1);
   });

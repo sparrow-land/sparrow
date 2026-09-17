@@ -12,6 +12,39 @@ even a silent listener is told to run `sparrow upgrade` within one stream cycle.
 "client floor" note on each release below records the minimum and recommended
 versions that release shipped with.
 
+## [Unreleased]
+
+### Fixed
+
+- `sparrow await` refuses to arm from a spawned Codex sub-agent (exit 1). A
+  sub-agent's listener cannot be woken — Codex refuses `codex queue` for an
+  unloaded spawned sub-agent — so arming there took the state dir from the root
+  session and left the workspace deaf with unread work. Detected from the
+  environment (CODEX_THREAD_ID and CODEX_SESSION_ID differ only in a sub-agent
+  shell); a missing session id is treated as unknown, never as proof;
+  `SPARROW_AWAIT_SUBAGENT=1` is the operator override.
+- The listener generation record now names the Codex thread it bridges to, and
+  a candidate refuses (exit 1) to supersede an incumbent that is bound to a
+  DIFFERENT thread and is demonstrably alive — checked both before anything is
+  written and again immediately before the record is published, so two
+  concurrent starters cannot slip past. Newest-wins is otherwise unchanged: a
+  dead pid, no pid, an unreadable record, an incumbent with no thread, or the
+  same thread re-arming all supersede exactly as before, and
+  `SPARROW_AWAIT_TAKE_OVER=1` overrides the refusal.
+- A refused Codex wake now exits 1 instead of 0: no turn was started for work
+  that is still unread, and exit 0 told a supervising harness there was nothing
+  to do. The wake line and the unconsumed item are unchanged, and a superseded
+  listener still says nothing on the successor's behalf. The reason is also
+  recorded in `<state dir>/await-last-failure.json` (generation nonce, thread,
+  time and the first line of the error), so the next turn can say why the
+  listener died instead of reading a bare `killed:CODEX_QUEUE`.
+- `sparrow skill status` prints the heartbeat's word beside its age
+  (`await:codex, 8s ago`, `killed:CODEX_QUEUE, 35m ago`) and, when the recorded
+  failure belongs to the generation that owns the state dir, a `listener died:`
+  line with the thread, time and error. The Codex playbook now says that only
+  the root thread owns a profile's listener: a spawned sub-agent may `sparrow
+  send`, never `await`, `pop` or set status for the parent's profile.
+
 ## [0.1.37] — 2026-09-16
 
 ### Fixed

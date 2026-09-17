@@ -47,6 +47,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CODEX_MIN_VERSION } from './skill-md.js';
+import { formatAge } from './state.js';
 import type { CheckLine, Env, ProviderAdapter, Resolved } from './providers.js';
 
 /** Scripts a Codex install ships: the two shared ones plus its own two. */
@@ -506,11 +507,8 @@ export function hookFiredAge(r: Resolved, event: string, now = Date.now()): numb
   return stamp && stamp.kind === 'runtime' ? stamp.ageSeconds : undefined;
 }
 
-function fmtAge(seconds: number): string {
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  return `${Math.floor(seconds / 3600)}h ago`;
-}
+/** One shape for every printed age (see `state.ts`). */
+const fmtAge = formatAge;
 
 /**
  * `codex --version`, best-effort — so a bug report carries the runtime that

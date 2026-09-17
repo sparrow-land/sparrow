@@ -351,6 +351,16 @@ export function readHeartbeatKind(stateDir: string): ListenerKind | undefined {
   }
 }
 
+/**
+ * An age in seconds, as a human reads it: `8s ago`, `35m ago`, `2h ago`.
+ * Shared so every surface that prints one prints the same shape.
+ */
+export function formatAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  return `${Math.floor(seconds / 3600)}h ago`;
+}
+
 /** Test-only: reset the in-process throttle clock. */
 export function __resetHeartbeatThrottle(): void {
   lastTouch = 0;

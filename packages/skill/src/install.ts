@@ -61,8 +61,11 @@ import {
   readLoopState,
   writeLoopState,
   heartbeatAgeSeconds,
+  readHeartbeatState,
+  formatAge,
   type LoopState,
 } from './state.js';
+import { readAwaitFailure } from './await-failure.js';
 
 export type { Scope, Resolved, Provider };
 
@@ -337,7 +340,17 @@ export function status(r: Resolved): number {
   const adapter = adapterFor(r.provider);
   const state = readLoopState(r.stateDir) ?? '(unset)';
   const age = heartbeatAgeSeconds(r.stateDir);
-  const hb = age === undefined ? 'no heartbeat' : `heartbeat ${age}s ago`;
+  // The WORD, not just the age: `8s ago` reads the same for a bridged listener
+  // doing its job and for a corpse that stamped `killed:` two seconds ago. A
+  // heartbeat that claims no kind (empty, or any older CLI) keeps the old line.
+  const beat = readHeartbeatState(r.stateDir);
+  const word = beat ? (beat.signal ? `${beat.state}:${beat.signal}` : beat.state) : undefined;
+  const hb =
+    age === undefined
+      ? 'no heartbeat'
+      : word
+        ? `${word}, ${formatAge(age)}`
+        : `heartbeat ${age}s ago`;
   const dir = adapter.skillDir(r);
   const installed = fs.existsSync(path.join(dir, 'SKILL.md'));
   r.log(`provider:   ${adapter.label}`);
@@ -345,6 +358,16 @@ export function status(r: Resolved): number {
   r.log(`heartbeat:  ${hb}`);
   r.log(`state dir:  ${r.stateDir}`);
   r.log(`skill:      ${installed ? 'installed' : 'not installed'} (${r.scope} scope, ${dir})`);
+  // Why the CURRENT generation's listener died, when it got to say so. A
+  // superseded listener's complaint is not about the one on watch now, so the
+  // reader gates on the owner nonce and this prints nothing unless it matches.
+  const failure = readAwaitFailure(r.stateDir);
+  if (failure) {
+    r.log(
+      `listener died: codex queue rejected for thread ${failure.thread ?? '(unknown)'} ` +
+        `at ${failure.at ?? '(unknown time)'}: ${failure.error}`,
+    );
+  }
   for (const line of adapter.statusLines(r)) r.log(line.text);
   return 0;
 }

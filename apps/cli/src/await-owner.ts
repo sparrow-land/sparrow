@@ -59,6 +59,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { resolveStateDir } from '@sparrow/skill';
+import { CliError } from './util.js';
 
 type Env = Record<string, string | undefined>;
 
@@ -67,11 +68,83 @@ export interface AwaitOwnerRecord {
   version: 1;
   /** The generation id. The only thing supersession is ever decided on. */
   nonce: string;
-  /** Diagnostic only — never signalled, never probed for liveness. */
+  /**
+   * Diagnostic — and, for ONE question only, evidence: whether a
+   * different-thread incumbent is demonstrably alive (see {@link assertMayArm}).
+   * Supersession itself is still decided on the nonce alone.
+   */
   pid: number;
   startedAt: string;
   kind: string;
   profile?: string;
+  /**
+   * The Codex thread this listener bridges to, when it has one. ABSENT for
+   * Claude Code, for a plain listener, and for every record written before
+   * 0.1.38 — which all read as "no thread", i.e. freely superseded.
+   */
+  thread?: string;
+}
+
+/** `process.kill(pid, 0)`, injectable so the three answers are testable. */
+export type PidSignal = (pid: number, signal: 0) => void;
+
+/**
+ * Is this pid demonstrably ALIVE? The Stop hook's rule, exactly:
+ *
+ *   - the call succeeds        → alive
+ *   - it throws EPERM          → alive (it exists; it is simply not ours)
+ *   - it throws ESRCH          → absent
+ *   - anything else, or no pid → UNKNOWN, which is not proof of either
+ *
+ * Only the first two are proof, and only proof may block an arm.
+ */
+function pidDemonstrablyAlive(pid: number, kill: PidSignal = process.kill): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
+}
+
+/** The refusal — it names the pid so a hung incumbent is one command away. */
+export const differentThreadRefusal = (thread: string, pid: number): string =>
+  `sparrow await refused to arm: a listener for Codex thread ${thread} (pid ${pid}) already owns this ` +
+  `state dir, and it is still running. If that session is gone, stop that process (kill ${pid}) or ` +
+  'set SPARROW_AWAIT_TAKE_OVER=1 to arm anyway.';
+
+/**
+ * MAY this candidate take the state dir? Throws {@link CliError} (exit 1) only
+ * when it must not.
+ *
+ * NEWEST-WINS IS DELIBERATE AND STAYS. It is what makes a blind re-arm safe:
+ * check-then-exit on a pid cannot tell a healthy listener from a hung one, and a
+ * listener that refuses to replace anything leaves the agent deaf the first time
+ * a process wedges. So the bar for blocking is PROOF, and there is exactly one
+ * proof: an incumbent that is demonstrably alive AND bound to a DIFFERENT Codex
+ * thread. Replacing that one cannot re-point the wake path — Codex will not
+ * accept a queue for a thread this shell does not own (the 2026-09-17 sub-agent
+ * incident) — so the workspace simply goes deaf.
+ *
+ * EVERYTHING ELSE SUPERSEDES, exactly as before: no record, an unreadable one,
+ * an incumbent with no thread (Claude Code, or any pre-0.1.38 listener), the
+ * same thread re-arming, a dead pid, no pid, or a kill that failed for a reason
+ * we do not understand. A lock that outlives its owner would make the whole
+ * project deaf, which is strictly worse than the duplicate this guard prevents.
+ * The escape hatch is printed in the refusal itself.
+ *
+ * @param thread this candidate's Codex thread, or `undefined` for a non-Codex
+ *   listener — which never consults the guard at all.
+ */
+export function assertMayArm(env: Env, thread: string | undefined, kill?: PidSignal): void {
+  if (!thread) return;
+  const v = env.SPARROW_AWAIT_TAKE_OVER?.trim().toLowerCase();
+  if (v !== undefined && v !== '' && v !== '0' && v !== 'false' && v !== 'no' && v !== 'off') return;
+  const owner = readAwaitOwner(env);
+  if (owner?.thread === undefined || owner.thread === thread) return;
+  if (!pidDemonstrablyAlive(owner.pid, kill)) return;
+  throw new CliError(differentThreadRefusal(owner.thread, owner.pid));
 }
 
 /**
@@ -214,6 +287,7 @@ export function readAwaitOwner(env: Env): AwaitOwnerRecord | undefined {
       startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
       kind: typeof raw.kind === 'string' ? raw.kind : 'await',
       ...(typeof raw.profile === 'string' ? { profile: raw.profile } : {}),
+      ...(typeof raw.thread === 'string' && raw.thread ? { thread: raw.thread } : {}),
     };
   } catch {
     return undefined;
@@ -245,6 +319,11 @@ export interface AwaitGeneration {
    * Claim the state dir for this listener: write the record, newest wins.
    * Idempotent — re-publishing keeps the same nonce and re-writes nothing, so
    * the first call's outcome is the one that stands.
+   *
+   * THROWS {@link CliError} (exit 1) in exactly one case: a demonstrably live
+   * listener on a DIFFERENT Codex thread published while this candidate was
+   * still authenticating (see {@link assertMayArm}). Nothing is written on that
+   * path — the incumbent keeps the state dir and this process stands down.
    */
   publish(): AwaitPublication;
   /**
@@ -276,8 +355,16 @@ export function prepareAwaitGeneration(opts: {
   env: Env;
   kind: string;
   profile?: string;
+  /**
+   * The Codex thread this listener bridges to — recorded so the NEXT candidate
+   * can tell "re-arm me" from "replace a session I cannot speak for" (see
+   * {@link assertMayArm}). Omitted by Claude Code and plain listeners.
+   */
+  thread?: string;
+  /** Test seam: the `process.kill(pid, 0)` used by the publish-time recheck. */
+  kill?: PidSignal;
 }): AwaitGeneration {
-  const { env, kind, profile } = opts;
+  const { env, kind, profile, thread, kill } = opts;
   const nonce = crypto.randomBytes(8).toString('hex');
   // IMMEDIATELY — before credentials, before the network, before publish-late.
   // This is what turns the arming window from "no listener" into "one starting".
@@ -296,6 +383,12 @@ export function prepareAwaitGeneration(opts: {
     fenced: () => onDisk,
     publish(): AwaitPublication {
       if (live) return onDisk ? 'published' : 'unfenced';
+      // THE LAST-MOMENT RECHECK. The preflight guard ran before this process
+      // touched anything, which two concurrent starters would both pass: each
+      // reads an empty (or dead) state dir, then both write. Re-reading here —
+      // immediately before the rename — is what makes the loser stand down
+      // instead of evicting a live listener it cannot speak for.
+      assertMayArm(env, thread, kill);
       const record: AwaitOwnerRecord = {
         version: 1,
         nonce,
@@ -303,6 +396,7 @@ export function prepareAwaitGeneration(opts: {
         startedAt: new Date().toISOString(),
         kind,
         ...(profile ? { profile } : {}),
+        ...(thread ? { thread } : {}),
       };
       try {
         const file = awaitOwnerPath(env);

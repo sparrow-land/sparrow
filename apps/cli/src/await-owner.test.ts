@@ -3,11 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  assertMayArm,
   awaitCandidatePath,
   awaitOwnerPath,
   prepareAwaitGeneration,
   readAwaitOwner,
 } from './await-owner.js';
+import { CliError } from './util.js';
 
 /* ==================================================================
  * THE CANDIDATE MARKER — `<state dir>/await-candidate.json`.
@@ -143,5 +145,171 @@ describe('prepareAwaitGeneration — the candidate marker', () => {
     expect(gen.publish()).toBe('unfenced');
     expect(gen.supersededBy()).toBeUndefined();
     expect(() => gen.clearCandidate()).not.toThrow();
+  });
+});
+
+/* ==================================================================
+ * THREAD-AWARE OWNERSHIP (field incident, Codex 0.154, 2026-09-17).
+ *
+ * Newest-wins is deliberate and stays. The ONE exception is proof: a live
+ * listener bound to a DIFFERENT Codex thread cannot be woken on this one's
+ * behalf, so replacing it makes the workspace deaf rather than re-pointing it.
+ * Everything short of proof — a dead pid, no pid, an unreadable record, a kill
+ * that failed for a reason we do not understand — supersedes exactly as before.
+ * ================================================================== */
+
+/** A live owner record for `thread`, owned by `pid` (default: this process). */
+function ownerRecord(thread: string | undefined, pid = process.pid): void {
+  fs.writeFileSync(
+    awaitOwnerPath(env()),
+    `${JSON.stringify({
+      version: 1,
+      nonce: 'deadbeefdeadbeef',
+      pid,
+      startedAt: new Date().toISOString(),
+      kind: thread ? 'await:codex' : 'await',
+      ...(thread ? { thread } : {}),
+    })}\n`,
+  );
+}
+
+/** `process.kill(pid, 0)` stand-ins for the three answers that matter. */
+const alive = (): void => {};
+const eperm = (): never => {
+  throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+};
+const esrch = (): never => {
+  throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+};
+const weird = (): never => {
+  throw Object.assign(new Error('something else entirely'), { code: 'EWHAT' });
+};
+
+describe('assertMayArm — only PROOF of a live different-thread owner blocks', () => {
+  it('an empty state dir is nobody\u2019s', () => {
+    expect(() => assertMayArm(env(), 'thread-mine', alive)).not.toThrow();
+  });
+
+  it('an owner with NO thread (Claude Code, or any pre-0.1.38 listener) is superseded', () => {
+    ownerRecord(undefined);
+    expect(() => assertMayArm(env(), 'thread-mine', alive)).not.toThrow();
+  });
+
+  it('the SAME thread re-arming is the everyday case and stays idempotent', () => {
+    ownerRecord('thread-mine');
+    expect(() => assertMayArm(env(), 'thread-mine', alive)).not.toThrow();
+  });
+
+  it('a non-Codex candidate never invokes the guard (newest-wins, unchanged)', () => {
+    ownerRecord('thread-theirs');
+    expect(() => assertMayArm(env(), undefined, alive)).not.toThrow();
+  });
+
+  it('refuses a LIVE owner on a different thread, naming its pid and thread', () => {
+    ownerRecord('thread-theirs', 4242);
+    let thrown: unknown;
+    try {
+      assertMayArm(env(), 'thread-mine', alive);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(CliError);
+    const message = (thrown as Error).message;
+    expect(message.split('\n')).toHaveLength(1);
+    expect(message).toContain('Codex thread thread-theirs (pid 4242)');
+    expect(message).toContain('still running');
+    expect(message).toContain('kill 4242');
+    expect(message).toContain('SPARROW_AWAIT_TAKE_OVER=1');
+  });
+
+  it('EPERM is PROOF of life (someone else\u2019s process) — refused', () => {
+    ownerRecord('thread-theirs', 4242);
+    expect(() => assertMayArm(env(), 'thread-mine', eperm)).toThrow(CliError);
+  });
+
+  it('ESRCH is proof of ABSENCE — superseded, as today', () => {
+    ownerRecord('thread-theirs', 4242);
+    expect(() => assertMayArm(env(), 'thread-mine', esrch)).not.toThrow();
+  });
+
+  it('an unexpected kill error is UNKNOWN — superseded (a lock must not outlive its owner)', () => {
+    ownerRecord('thread-theirs', 4242);
+    expect(() => assertMayArm(env(), 'thread-mine', weird)).not.toThrow();
+  });
+
+  it('a record with no usable pid proves nothing — superseded', () => {
+    ownerRecord('thread-theirs', 0);
+    expect(() => assertMayArm(env(), 'thread-mine', alive)).not.toThrow();
+  });
+
+  it('an unreadable record proves nothing — superseded', () => {
+    fs.writeFileSync(awaitOwnerPath(env()), 'not json at all\n');
+    expect(() => assertMayArm(env(), 'thread-mine', alive)).not.toThrow();
+  });
+
+  it('SPARROW_AWAIT_TAKE_OVER=1 is the operator escape', () => {
+    ownerRecord('thread-theirs', 4242);
+    expect(() =>
+      assertMayArm({ ...env(), SPARROW_AWAIT_TAKE_OVER: '1' }, 'thread-mine', alive),
+    ).not.toThrow();
+  });
+});
+
+describe('publish() re-checks ownership at the last possible moment', () => {
+  it('records the Codex thread it bridges to', () => {
+    const gen = prepareAwaitGeneration({ env: env(), kind: 'await:codex', thread: 'thread-mine' });
+    gen.publish();
+    expect(readAwaitOwner(env())!.thread).toBe('thread-mine');
+  });
+
+  it('omits the thread entirely for a non-Codex listener', () => {
+    const gen = prepareAwaitGeneration({ env: env(), kind: 'await' });
+    gen.publish();
+    expect(readAwaitOwner(env())!.thread).toBeUndefined();
+  });
+
+  /* TWO concurrent starters would both pass a preflight-only guard: each reads
+   * an empty (or dead) state dir, then both write. The recheck immediately
+   * before the rename is what makes the loser stand down instead. */
+  it('refuses to publish when a live different-thread owner appeared meanwhile', () => {
+    const gen = prepareAwaitGeneration({
+      env: env(),
+      kind: 'await:codex',
+      thread: 'thread-mine',
+      kill: alive,
+    });
+    ownerRecord('thread-theirs', 4242); // …published between preflight and here
+
+    expect(() => gen.publish()).toThrow(CliError);
+    // The incumbent's record is untouched, and we never went live.
+    expect(readAwaitOwner(env())!.thread).toBe('thread-theirs');
+    expect(gen.published()).toBe(false);
+    expect(gen.fenced()).toBe(false);
+  });
+
+  it('publishes over a DEAD different-thread owner (recovery is not a takeover)', () => {
+    const gen = prepareAwaitGeneration({
+      env: env(),
+      kind: 'await:codex',
+      thread: 'thread-mine',
+      kill: esrch,
+    });
+    ownerRecord('thread-theirs', 4242);
+
+    expect(gen.publish()).toBe('published');
+    expect(readAwaitOwner(env())!.thread).toBe('thread-mine');
+  });
+
+  it('publishes over a live SAME-thread owner (the everyday re-arm)', () => {
+    const gen = prepareAwaitGeneration({
+      env: env(),
+      kind: 'await:codex',
+      thread: 'thread-mine',
+      kill: alive,
+    });
+    ownerRecord('thread-mine', 4242);
+
+    expect(gen.publish()).toBe('published');
+    expect(readAwaitOwner(env())!.nonce).toBe(gen.nonce());
   });
 });

@@ -64,6 +64,30 @@ function switchedOn(value: string | undefined): boolean {
 }
 
 /**
+ * THE SPAWNED SUB-AGENT (field incident, Codex 0.154, 2026-09-17).
+ *
+ * A sub-agent Codex spawned ran `sparrow await` in the parent's project dir with
+ * the parent's profile. Newest-wins did exactly what it promises and handed it
+ * the state dir; the root session's listener stood down. Then work arrived and
+ * the bridge ran `codex queue --thread <child>`, which Codex REFUSED (-32600,
+ * "direct app-server input is not allowed for unloaded spawned sub-agents").
+ * The wake path did not merely fail — for a sub-agent it cannot exist — and the
+ * workspace went deaf with unread work in the queue.
+ *
+ * THE SIGNAL IS OBSERVED, NOT DOCUMENTED (measured by vm5 on a real run): in a
+ * spawned sub-agent shell CODEX_SESSION_ID carries the ROOT thread id while
+ * CODEX_THREAD_ID carries the child's own; in a root shell the two are equal.
+ * So the refusal fires ONLY when both are present and they DIFFER. A missing
+ * session id is ignorance, not evidence, and refusing on ignorance would strand
+ * every Codex build that does not export it.
+ */
+export const subagentRefusal = (thread: string, session: string): string =>
+  `sparrow await refused to arm: this shell belongs to a spawned Codex sub-agent (thread ${thread}, ` +
+  `session ${session}), and a sub-agent's listener cannot be woken by Codex, so arming here would ` +
+  "silently replace the root session's listener. Leave listening to the root session: post your " +
+  'update and let it drain. Operators who know better can set SPARROW_AWAIT_SUBAGENT=1.';
+
+/**
  * Worded to the DETECTED CONDITION, not to a certainty: the kernel tells us
  * about the namespace, not about what that namespace's owner will do when the
  * command returns. "Appears to be" is the honest claim, and the escape hatch is
@@ -150,6 +174,20 @@ export const LEGACY_HOOKS_NOTE =
 export function codexAwaitPreflight(opts: CodexAwaitPreflightOpts): void {
   const { env, thread, err, probe } = opts;
   const stateDir = opts.stateDir ?? resolveStateDir(env);
+
+  // 0. The spawned sub-agent — FIRST, before even the sandbox probe. Every other
+  //    check asks "will this listener survive?"; this one asks whether it could
+  //    ever be woken at all, and for a sub-agent the answer is no at any exit.
+  const shellThread = env.CODEX_THREAD_ID?.trim();
+  const shellSession = env.CODEX_SESSION_ID?.trim();
+  if (
+    shellThread &&
+    shellSession &&
+    shellThread !== shellSession &&
+    !switchedOn(env.SPARROW_AWAIT_SUBAGENT)
+  ) {
+    throw new CliError(subagentRefusal(shellThread, shellSession));
+  }
 
   // 1. The sandbox — checked first, because arming inside one fails no matter
   //    how healthy the hooks are. ONLY the supervisor identity is strong enough

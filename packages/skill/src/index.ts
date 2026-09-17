@@ -55,6 +55,9 @@ export {
   type HookVerification,
 } from './provider-codex.js';
 
+/** Why the current listener generation died, when it recorded a reason. */
+export { readAwaitFailure, type AwaitFailure } from './await-failure.js';
+
 /** Sandbox detection — a listener armed inside a PID namespace is already dead. */
 export { detectPidNamespace, type PidNamespaceProbe, type PidNamespaceReport } from './sandbox.js';
 
@@ -80,6 +83,7 @@ export {
   markHeartbeatDead,
   loopStatePath,
   heartbeatPath,
+  formatAge,
   HEARTBEAT_THROTTLE_MS,
   // Test-only throttle reset — exported so downstream packages (the CLI's
   // heartbeat bridge) can test their own touch call sites deterministically.
