@@ -450,11 +450,16 @@ function armListenerSignals(
     return true;
   };
   const onInt = (): void => {
-    if (!stamp('stopped', 'SIGINT')) return;
+    stamp('stopped', 'SIGINT');
     onInterrupt();
   };
   const onKill = (signal: 'SIGTERM' | 'SIGHUP') => (): void => {
-    if (!stamp('killed', signal)) return;
+    /* THE STAMP IS GUARDED; THE EXIT IS NOT. A listener that took a SIGINT and
+     * then a SIGTERM used to swallow the second signal entirely — `fired` was
+     * already set, this returned early, and the process had to be killed by
+     * hand (field report, 2026-09-17). The FIRST cause is the true one and
+     * still owns the stamp, but every kill signal must end the process. */
+    stamp('killed', signal);
     // Leave NOW with the conventional code. Unwinding would risk printing a
     // wake line for an agent that is no longer there to read it.
     process.exit(SIGNAL_EXIT_CODES[signal] ?? 1);
@@ -4680,13 +4685,27 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
 
     const controller = new AbortController();
     standDown = () => controller.abort();
+    /**
+     * A SECOND abort seam, aborted ONLY by a user interrupt.
+     *
+     * `controller` means "this wait is over", and a normal wake aborts it on
+     * purpose (the wake IS the exit). A deferred hand-off waiting out a usage
+     * limit therefore cannot read `controller.aborted` as "the user pressed
+     * Ctrl-C" — it would see its own wake. This one carries exactly one meaning,
+     * so the wait can tell a deliberate hand-off from an interruption.
+     */
+    const interrupt = new AbortController();
+    const interrupted = (): boolean => interrupt.signal.aborted;
     // The heartbeat is deliberately NOT touched here: this process is still a
     // candidate until the stream opens (see the publish-late rule above), and a
     // candidate must not write over the state dir a healthy listener owns —
     // including from a late signal, hence the stamp veto.
     const disarmSignals = armListenerSignals(
       env,
-      () => controller.abort(),
+      () => {
+        interrupt.abort(); // Ctrl-C: whatever this listener is waiting for is off
+        controller.abort();
+      },
       () => (generation.published() && owned() ? generation.nonce() : false),
     );
     let timedOut = false;
@@ -4784,17 +4803,23 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       return Math.max(0, Math.min(ms, handoffDeadline - Date.now()));
     };
 
-    const abortableNap = (ms: number): Promise<void> =>
+    /**
+     * Sleep, endable by an abort. The timer is deliberately NOT unref'd: while a
+     * listener stands by it holds NOTHING else open — no stream, no poll, no
+     * parked request — so an unref'd timer would let the event loop drain and
+     * the process would exit 0 as if it had handed off. A standing-by listener
+     * must stay alive; that is the whole of its job.
+     */
+    const abortableNap = (ms: number, signal: AbortSignal = controller.signal): Promise<void> =>
       new Promise((resolve) => {
-        if (controller.signal.aborted) return resolve();
+        if (signal.aborted) return resolve();
         const t = setTimeout(done, ms);
-        (t as { unref?: () => void }).unref?.();
         function done(): void {
           clearTimeout(t);
-          controller.signal.removeEventListener('abort', done);
+          signal.removeEventListener('abort', done);
           resolve();
         }
-        controller.signal.addEventListener('abort', done, { once: true });
+        signal.addEventListener('abort', done, { once: true });
       });
 
     /**
@@ -4862,6 +4887,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       reason: 'work' | 'gap',
       opts: { afterBlock?: boolean } = {},
     ): Promise<boolean> => {
+      if (opts.afterBlock === true && interrupted()) return false;
       if (blockedSinceAsking()) return false;
       await markTurn();
       // The presence POST is a round trip of its own, and under Claude Code the
@@ -4888,6 +4914,11 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      */
     const handoffAfterBlock = async (reason: 'work' | 'gap'): Promise<boolean> => {
       for (;;) {
+        // A signal outranks everything: the human (or the harness tearing the
+        // tree down) is not waiting for a usage window to reopen. Nothing is
+        // handed off and no bridge is rung; the item stays unread and the
+        // signal handler's `stopped:`/`killed:` stamp stands.
+        if (interrupted()) return false;
         if (!owned()) return false; // superseded: exit 4, never a bare 0
         /* THE DEADLINE IS READ FIRST, before the marker. Waking up to find both
          * "the limit lifted" and "my time is up" is not ambiguous: this
@@ -4907,8 +4938,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         }
         await enterStandby(blocked);
         if (!owned()) return false;
-        // …and the nap can never outlive the deadline it is waiting inside.
-        await sleep(napWithinDeadline(blockedPollMs));
+        // …and the nap can never outlive the deadline it is waiting inside, nor
+        // an interrupt: it ends at the FIRST of the three.
+        await abortableNap(napWithinDeadline(blockedPollMs), interrupt.signal);
       }
     };
 
@@ -5005,6 +5037,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       // coming (see completeHandoff).
       if (await completeHandoff('work')) return;
       if (await handoffAfterBlock('work')) return;
+      // Ctrl-C while waiting out the limit: exit 0 silently, as an interrupted
+      // listener always has. Nothing was handed off; the item is untouched.
+      if (interrupted()) return;
       if (!owned()) {
         reportSuperseded(); // exit 4 — never a 0 over a suppressed bridge
         return;
@@ -5322,7 +5357,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       if (batchTimer !== undefined) clearTimeout(batchTimer);
       clearInterval(blockedTimer);
       stopPoll();
-      disarmSignals();
+      // NOT the signals: the hand-off below still has to answer them, and a
+      // hand-off deferred by a usage limit can wait there a long time. They come
+      // down when the whole run does (see `awaitSignals`).
     }
 
     // Let an inbox check that was in flight when the stream ended finish, so a
@@ -5348,6 +5385,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       const reason = emittedReason === 'replay.gap' ? 'gap' : 'work';
       if (await completeHandoff(reason)) return;
       if (await handoffAfterBlock(reason)) return;
+      if (interrupted()) return; // Ctrl-C, not a timeout: say nothing, exit 0
       if (!owned()) {
         reportSuperseded();
         return;

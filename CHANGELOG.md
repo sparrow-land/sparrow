@@ -57,7 +57,13 @@ versions that release shipped with.
   `--timeout`: it never sleeps past the deadline, reads the deadline before the
   marker, and re-checks it immediately before ringing the bridge — so a limit
   that lifts late exits 2 with the item unread (the re-armed listener finds it)
-  rather than starting a turn for a listener whose harness has moved on. Waiting work is still waiting when the
+  rather than starting a turn for a listener whose harness has moved on. A
+  signal ends that wait at once: SIGINT/SIGTERM stamp the heartbeat and exit
+  without handing anything off, the listener's signal handlers now stay armed
+  through the hand-off (they used to come down with the stream, leaving a
+  deferred hand-off to die by default signal action), and a SIGTERM following a
+  SIGINT is no longer swallowed — the first signal owns the stamp, every signal
+  ends the process. Waiting work is still waiting when the
   marker goes, and resuming asks the queue immediately — a stream reopened
   without a cursor cannot replay what arrived while the listener was away, so
   waiting for the next reconcile poll (or, with `--poll-seconds 0`, for the next

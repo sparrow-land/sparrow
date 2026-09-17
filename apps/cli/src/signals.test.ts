@@ -37,17 +37,63 @@ const nap = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /* ------------------------- a minimal live upstream ------------------------ */
 
+const sampleRoom = {
+  id: 'room_dm',
+  name: '',
+  orgId: 'org_a',
+  kind: 'dm',
+  counterpart: { type: 'human', id: 'usr_o', displayName: 'Owner' },
+};
+/** One waiting work item — enough for `await` to have something to hand off. */
+const waitingItem = {
+  type: 'chat.message',
+  id: 'msg_wait',
+  from: { id: 'mem_owner', kind: 'human', displayName: 'Owner', avatarUrl: null },
+  kind: 'dm',
+  subject: null,
+  preview: 'work for you',
+  truncated: false,
+  attachmentCount: 0,
+  status: 'unread',
+  createdAt: '2026-09-01T00:00:00Z',
+  room: sampleRoom,
+};
+
 interface Upstream {
   url: string;
   /** How many SSE streams have been opened (the "listener is armed" signal). */
   sseConns: () => number;
+  /** Put one item in (or take it out of) what `/me/inbox` reports. */
+  setItem: (present: boolean) => void;
+  /** Park `POST /me/presence` — the turn mark — until released. */
+  holdPresence: (on: boolean) => void;
+  presenceHeld: () => number;
+  releasePresence: () => void;
+  /** Push a `message.new` frame to every open stream (the tail path's wake). */
+  deliver: () => void;
+  /** Has anything CONSUMED the queue? (`await` never should.) */
+  pops: () => number;
+  reset: () => void;
   close: () => Promise<void>;
 }
 
 async function startUpstream(): Promise<Upstream> {
   let conns = 0;
+  const state = { item: false, holdPresence: false, pops: 0 };
+  const parked: Array<() => void> = [];
+  const streams = new Set<import('node:http').ServerResponse>();
   const server = http.createServer((req, res) => {
     const u = req.url ?? '';
+    if (req.method === 'POST' && u.startsWith('/api/v1/me/presence')) {
+      req.resume();
+      const answer = (): void => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ onlineUntil: new Date(Date.now() + 60_000).toISOString() }));
+      };
+      if (state.holdPresence) parked.push(answer);
+      else answer();
+      return;
+    }
     if (u.startsWith('/api/v1/me/events/log')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ events: [], latest: 0 }));
@@ -57,20 +103,25 @@ async function startUpstream(): Promise<Upstream> {
       conns += 1;
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
       res.write(': open\n\n');
+      streams.add(res);
       const hb = setInterval(() => res.write(': ping\n\n'), 200);
-      req.on('close', () => clearInterval(hb));
+      req.on('close', () => {
+        clearInterval(hb);
+        streams.delete(res);
+      });
       return;
     }
     if (u === '/api/v1/me/inbox/pop' && req.method === 'POST') {
       req.resume(); // `loop` drains on connect; an empty queue keeps it holding
+      state.pops += 1;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ item: null }));
       return;
     }
     if (u.startsWith('/api/v1/me/inbox')) {
-      // Nothing waiting — so `await` holds the stream instead of waking at once.
+      // Empty by default — so `await` holds the stream instead of waking at once.
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ items: [], nextCursor: null }));
+      res.end(JSON.stringify({ items: state.item ? [waitingItem] : [], nextCursor: null }));
       return;
     }
     res.writeHead(404).end();
@@ -80,6 +131,37 @@ async function startUpstream(): Promise<Upstream> {
   return {
     url: `http://127.0.0.1:${port}`,
     sseConns: () => conns,
+    setItem: (present: boolean) => {
+      state.item = present;
+    },
+    holdPresence: (on: boolean) => {
+      state.holdPresence = on;
+    },
+    presenceHeld: () => parked.length,
+    releasePresence: () => {
+      state.holdPresence = false;
+      for (const answer of parked.splice(0)) answer();
+    },
+    deliver: () => {
+      for (const res of streams) {
+        res.write(
+          `id: 1\nevent: message.new\ndata: ${JSON.stringify({
+            room: sampleRoom,
+            messageId: 'msg_wait',
+            from: { id: 'mem_owner', kind: 'human', displayName: 'Owner' },
+            preview: 'work for you',
+            kind: 'dm',
+          })}\n\n`,
+        );
+      }
+    },
+    pops: () => state.pops,
+    reset: () => {
+      state.item = false;
+      state.holdPresence = false;
+      state.pops = 0;
+      parked.length = 0;
+    },
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
 }
@@ -178,6 +260,168 @@ const expectStamp = (stateDir: string, word: string): void => {
   ) as { nonce: string };
   expect(tag).toBe(record.nonce);
 };
+
+/* ------------------- the deferred hand-off (usage limit) ------------------ */
+
+/**
+ * Spawn a listener WITHOUT waiting for a stream: the hand-off cases wake before
+ * one is ever opened, so the readiness signal is the caller's to choose.
+ */
+function spawnListener(args: string[], extraEnv: Record<string, string> = {}): {
+  stateDir: string;
+  binDir: string;
+  ended: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  stdout: () => string;
+  stderr: () => string;
+  kill: (signal: NodeJS.Signals) => void;
+} {
+  const stateDir = tmp('sparrow-sig-state-');
+  const configHome = tmp('sparrow-sig-config-');
+  const home = tmp('sparrow-sig-home-');
+  // A stand-in `codex` on PATH: if the bridge is ever rung, it leaves a file.
+  const binDir = tmp('sparrow-sig-bin-');
+  const codexLog = path.join(binDir, 'queued.log');
+  fs.writeFileSync(path.join(binDir, 'codex'), `#!/bin/sh\necho "$@" >> ${codexLog}\n`, {
+    mode: 0o755,
+  });
+  const kid = spawn(process.execPath, [BIN, ...args], {
+    env: {
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+      SPARROW_STATE_DIR: stateDir,
+      XDG_CONFIG_HOME: configHome,
+      HOME: home,
+      SPARROW_SERVER: upstream.url,
+      SPARROW_TOKEN: 'agk_stub',
+      ...extraEnv,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  kids.push(kid);
+  let out = '';
+  let err = '';
+  kid.stdout.on('data', (d: Buffer) => (out += d.toString()));
+  kid.stderr.on('data', (d: Buffer) => (err += d.toString()));
+  const ended = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    kid.on('exit', (code, signal) => resolve({ code, signal }));
+  });
+  return { stateDir, binDir, ended, stdout: () => out, stderr: () => err, kill: (sg) => kid.kill(sg) };
+}
+
+const until = async (want: () => boolean, ms = 15_000): Promise<void> => {
+  const deadline = Date.now() + ms;
+  while (!want()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for the condition');
+    await nap(25);
+  }
+};
+
+const bridgeRang = (binDir: string): boolean => fs.existsSync(path.join(binDir, 'queued.log'));
+
+/**
+ * Drive a real listener into the DEFERRED HAND-OFF: its wake line is printed,
+ * the turn mark is in flight, a usage-limit marker lands, and the hand-off is
+ * left waiting for the limit to lift.
+ *
+ * `--timeout 60` and a 5 s standby cadence make the wait long on purpose: a
+ * listener that answers a signal only when its nap ends would be caught here.
+ */
+async function intoDeferredHandoff(where: 'initial' | 'tail'): Promise<ReturnType<typeof spawnListener>> {
+  upstream.reset();
+  upstream.holdPresence(true);
+  if (where === 'initial') upstream.setItem(true);
+  const before = upstream.sseConns();
+  const l = spawnListener(['await', '--timeout', '60', '--poll-seconds', '0', '--json'], {
+    SPARROW_BLOCKED_POLL_MS: '5000',
+    CODEX_THREAD_ID: 'thread-signal',
+  });
+  if (where === 'tail') {
+    await until(() => upstream.sseConns() > before); // streaming first…
+    upstream.setItem(true);
+    upstream.deliver(); // …then work arrives live
+  }
+  let gone = false;
+  void l.ended.then(() => {
+    gone = true;
+  });
+  await until(() => upstream.presenceHeld() >= 1 || gone); // the wake line is out
+  expect(gone, `the listener exited instead of waking: ${l.stderr()}`).toBe(false);
+  expect(l.stdout()).toContain('await.item');
+  fs.mkdirSync(path.join(l.stateDir, 'blocked'), { recursive: true });
+  fs.writeFileSync(
+    path.join(l.stateDir, 'blocked', 'marker.json'),
+    `${JSON.stringify({ version: 1, reason: 'rate_limit', at: new Date().toISOString() })}\n`,
+  );
+  upstream.releasePresence();
+  await until(() => heartbeat(l.stateDir).startsWith('blocked:'));
+  return l;
+}
+
+describe('sparrow await — a deferred hand-off still answers signals', () => {
+  // One upstream serves every test in this file: leaving an item (or a parked
+  // presence post) behind would change what the NEXT listener does.
+  afterEach(() => upstream.reset());
+
+  for (const where of ['initial', 'tail'] as const) {
+    it(`${where}: SIGINT ends the wait at once, hands nothing off`, async () => {
+      const l = await intoDeferredHandoff(where);
+      const t0 = Date.now();
+      l.kill('SIGINT');
+      const { code } = await l.ended;
+
+      expect(Date.now() - t0).toBeLessThan(1500); // NOT the 5 s standby cadence
+      expect(code).toBe(0); // an interrupted listener exits quietly, as ever
+      expect(heartbeat(l.stateDir).split(/\s+/)[0]).toBe('stopped:SIGINT');
+      expect(bridgeRang(l.binDir)).toBe(false); // no turn queued on the way out
+      expect(upstream.pops()).toBe(0); // and the item is still unread
+    }, 40_000);
+
+    it(`${where}: SIGTERM ends the wait at once, hands nothing off`, async () => {
+      const l = await intoDeferredHandoff(where);
+      const t0 = Date.now();
+      l.kill('SIGTERM');
+      const { code } = await l.ended;
+
+      expect(Date.now() - t0).toBeLessThan(1500);
+      expect(code).toBe(143);
+      expect(heartbeat(l.stateDir).split(/\s+/)[0]).toBe('killed:SIGTERM');
+      expect(bridgeRang(l.binDir)).toBe(false);
+      expect(upstream.pops()).toBe(0);
+    }, 40_000);
+  }
+
+  /* The first signal owns the STAMP; every signal owns the EXIT. A SIGTERM
+   * after a SIGINT used to be swallowed whole — `fired` was set, the handler
+   * returned before `process.exit`, and the process had to be killed by hand. */
+  it('a SIGTERM after a SIGINT is never swallowed', async () => {
+    const l = await intoDeferredHandoff('initial');
+    const t0 = Date.now();
+    l.kill('SIGINT');
+    l.kill('SIGTERM');
+    const { code, signal } = await l.ended;
+
+    expect(Date.now() - t0).toBeLessThan(1500);
+    expect(code === 0 || code === 143 || signal !== null).toBe(true); // it LEFT
+    // Whichever arrived first owns the stamp; both are terminal words.
+    expect(heartbeat(l.stateDir).split(/\s+/)[0]).toMatch(/^(stopped:SIGINT|killed:SIGTERM)$/);
+    expect(bridgeRang(l.binDir)).toBe(false);
+  }, 40_000);
+
+  /* The other direction: a NORMAL wake aborts the same controller a signal
+   * would, and must still be treated as a hand-off, not an interruption. */
+  it('a wake with no marker still hands off and rings the bridge', async () => {
+    upstream.reset();
+    upstream.setItem(true);
+    const l = spawnListener(['await', '--timeout', '60', '--poll-seconds', '0', '--json'], {
+      CODEX_THREAD_ID: 'thread-signal',
+    });
+    const { code } = await l.ended;
+
+    expect(code).toBe(0);
+    expect(l.stdout()).toContain('await.item');
+    await until(() => bridgeRang(l.binDir), 5000);
+    expect(upstream.pops()).toBe(0); // woken, never consumed
+  }, 40_000);
+});
 
 /* --------------------------------- tests --------------------------------- */
 
