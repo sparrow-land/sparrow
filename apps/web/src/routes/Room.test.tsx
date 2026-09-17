@@ -93,6 +93,8 @@ interface Opts {
   outbox?: Message[];
   transcript?: string;
   onSend?: (body: unknown) => void;
+  /** Test gate: hold identity bootstrap while the disabled composer is visible. */
+  whoamiGate?: Promise<void>;
 }
 
 /** Route the client's fetch for one room's boot + actions. */
@@ -103,7 +105,10 @@ function stubRoom(opts: Opts = {}) {
     const method = init?.method ?? 'GET';
     if (url.includes('/capabilities')) return json({ voice: { stt: true, tts: true, sttStreaming: false } });
     if (url.includes('/voice/transcriptions')) return json({ text: opts.transcript ?? 'dictated text' });
-    if (url.includes('/whoami')) return json(SELF);
+    if (url.includes('/whoami')) {
+      if (opts.whoamiGate) await opts.whoamiGate;
+      return json(SELF);
+    }
     if (url.includes('/members')) return json({ items: [SELF, OTHER], nextCursor: null });
     if (url.includes('/inbox')) return json({ items: [], nextCursor: null });
     // Receipts hydrate for a whole screen at once (`GET …/messages/status?ids=`);
@@ -215,13 +220,29 @@ describe('Room voice → the composer stays a TYPING surface', () => {
   // typed send never claims voice provenance, and the composer grew no voice
   // state of its own.
   it('a typed send carries no origin, and the composer has no voice chip', async () => {
+    let releaseWhoami!: () => void;
+    const whoamiGate = new Promise<void>((resolve) => {
+      releaseWhoami = resolve;
+    });
     const sends: Array<{ origin?: string }> = [];
-    stubRoom({ onSend: (b) => sends.push(b as { origin?: string }) });
+    stubRoom({ whoamiGate, onSend: (b) => sends.push(b as { origin?: string }) });
     renderRoom();
 
     const textarea = await screen.findByRole('textbox');
-    await userEvent.type(textarea, 'deploy the build');
-    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    // The textbox exists before identity bootstrap completes, but is disabled:
+    // existence is not composer readiness. Typing into this state is ignored by
+    // user-event, leaving the draft empty and Send disabled.
+    const user = userEvent.setup();
+    expect(textarea).toBeDisabled();
+    await user.type(textarea, 'ignored before bootstrap');
+    expect(textarea).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+
+    releaseWhoami();
+    await waitFor(() => expect(textarea).toBeEnabled());
+
+    await user.type(textarea, 'deploy the build');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
 
     await waitFor(() => expect(sends).toHaveLength(1));
     expect(sends[0]).toMatchObject({ to: 'all', body: 'deploy the build' });
