@@ -52,10 +52,16 @@ interface MockOpts {
   inviteError?: boolean;
   /** Status the failed mint answers with (default 500 — a plain server failure). */
   inviteErrorStatus?: number;
+  /** Invites `GET /orgs/:id/invites` reports on top of the ones minted here. */
+  existingInvites?: unknown[];
+  /** Report every minted invite as already walked through (useCount 1). */
+  invitesSpent?: boolean;
 }
 
 function mockFetch(opts: MockOpts = {}, rec: Recorder = { calls: [] }) {
   let resolved = false;
+  // Everything this server has minted, in the shape the list route returns.
+  const minted: Record<string, unknown>[] = [];
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -114,29 +120,35 @@ function mockFetch(opts: MockOpts = {}, rec: Recorder = { calls: [] }) {
           status,
         );
       }
-      return json(
-        {
-          invite: {
-            id: 'inv_1',
-            inviter: { id: 'usr_1', displayName: 'Jake' },
-            note: null,
-            expiresAt: '2026-09-01T00:00:00Z',
-            revokedAt: null,
-            createdAt: '2026-08-20T00:00:00Z',
-          },
-          url: INVITE_URL,
-        },
-        201,
-      );
+      const n = minted.length + 1;
+      const invite = {
+        id: `inv_${n}`,
+        inviter: { id: 'usr_1', displayName: 'Jake' },
+        note: null,
+        expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+        revokedAt: null,
+        createdAt: new Date(Date.now() + n).toISOString(),
+        useCount: opts.invitesSpent ? 1 : 0,
+      };
+      minted.push(invite);
+      return json({ invite, url: n === 1 ? INVITE_URL : `${INVITE_URL}${n}` }, 201);
+    }
+
+    // The list the reuse check reads: what this browser minted, plus whatever
+    // the org already had.
+    if (url.includes(`/orgs/${ORG_ID}/invites`) && method === 'GET') {
+      return json({ items: [...minted, ...(opts.existingInvites ?? [])] });
     }
 
     return json({ error: { code: 'not_found', message: `unmocked ${method} ${url}` } }, 404);
   });
 }
 
-function renderDialog(props: Partial<React.ComponentProps<typeof InviteDialog>> = {}) {
+type DialogProps = Partial<React.ComponentProps<typeof InviteDialog>>;
+
+function renderDialog(props: DialogProps = {}) {
   const onClose = vi.fn();
-  render(
+  const tree = (extra: DialogProps) => (
     <MemoryRouter initialEntries={[`/org/${ORG_ID}`]}>
       <AuthProvider>
         <OrgProvider orgId={ORG_ID}>
@@ -149,13 +161,20 @@ function renderDialog(props: Partial<React.ComponentProps<typeof InviteDialog>> 
               hasAgents
               onClose={onClose}
               {...props}
+              {...extra}
             />
           </WorkspaceProvider>
         </OrgProvider>
       </AuthProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
-  return { onClose };
+  const utils = render(tree({}));
+  return {
+    onClose,
+    unmount: utils.unmount,
+    /** Re-render with different props — the org growing its first agent, say. */
+    setProps: (extra: DialogProps) => utils.rerender(tree(extra)),
+  };
 }
 
 /** Text of every terminal block currently on screen. */
@@ -530,6 +549,48 @@ describe('InviteDialog', () => {
       expect(invitesMinted(f)).toBe(1);
     });
 
+    /* ---- reuse, not a fresh door every open (issue #5) ----------------- */
+
+    /**
+     * Opening the dialog three times to re-read the command used to leave three
+     * live seven-day invites behind. The link a second open shows is the SAME
+     * link, as long as the server still calls it blank, live and untouched.
+     */
+    it('reuses the invite on a second open instead of minting another door', async () => {
+      const f = mockFetch({}, rec);
+      useFetch(f);
+      const first = renderDialog({ initialStep: 'agent' });
+      await waitFor(() => expect(terminalText()).toContain(INVITE_URL));
+      first.unmount();
+
+      renderDialog({ initialStep: 'agent' });
+      await waitFor(() => expect(terminalText()).toContain(INVITE_URL));
+      expect(invitesMinted(f)).toBe(1);
+      // …and the reused link is the original, not a second token.
+      expect(terminalText()).not.toContain(`${INVITE_URL}2`);
+    });
+
+    it('mints a fresh invite once the remembered one has been walked through', async () => {
+      const f = mockFetch({ invitesSpent: true }, rec);
+      useFetch(f);
+      const first = renderDialog({ initialStep: 'agent' });
+      await waitFor(() => expect(terminalText()).toContain(INVITE_URL));
+      first.unmount();
+
+      renderDialog({ initialStep: 'agent' });
+      await waitFor(() => expect(terminalText()).toContain(`${INVITE_URL}2`));
+      expect(invitesMinted(f)).toBe(2);
+    });
+
+    it('says the link is a live invite and where to revoke it', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'agent' });
+      await waitFor(() => expect(terminalText()).toContain(INVITE_URL));
+      const note = await screen.findByText(/live invite/i);
+      expect(note.textContent).toMatch(/revoke/i);
+      expect(note.textContent).toMatch(/org admin/i);
+    });
+
     it('reports a failed mint instead of showing half a command', async () => {
       useFetch(mockFetch({ inviteError: true }, rec));
       renderDialog({ initialStep: 'agent' });
@@ -590,7 +651,21 @@ describe('InviteDialog', () => {
       const dialog = await screen.findByRole('dialog');
       const row = (await within(dialog).findByText('acme-buildbox')).closest('li')!;
       expect(within(row).getByText('agent')).toBeInTheDocument();
-      expect(within(row).getByText(/via sparrow harness · just now/i)).toBeInTheDocument();
+      expect(within(row).getByText(/note: sparrow harness · just now/i)).toBeInTheDocument();
+    });
+
+    /**
+     * Issue #7: a free-text note is not provenance. "via test-drive agent 1"
+     * claims the enrollment came THROUGH something called that; it did not —
+     * the requester simply typed it.
+     */
+    it('labels the enrollment note as a note, never as a "via" provenance', async () => {
+      useFetch(mockFetch({ initialEnrollments: [agentEnrollment] }, rec));
+      renderDialog({ initialStep: 'agent' });
+      const dialog = await screen.findByRole('dialog');
+      const row = (await within(dialog).findByText('acme-buildbox')).closest('li')!;
+      expect(row.textContent).toContain('note: sparrow harness');
+      expect(row.textContent).not.toMatch(/\bvia\b/);
     });
 
     it('approves a pending request and flips the row to an approved state', async () => {
@@ -627,6 +702,29 @@ describe('InviteDialog', () => {
         ).toBe(true),
       );
       expect(await within(dialog).findByText(/denied/i)).toBeInTheDocument();
+    });
+
+    /**
+     * Issue #7: approving inside the dialog used to re-lay-out the dialog under
+     * the cursor — the org gained its first agent, so the first-agent panel went
+     * away and a back chip took its place. What the dialog looked like when it
+     * opened is what it looks like until it closes.
+     */
+    it('keeps the first-agent intro (and the header) put across an approval', async () => {
+      useFetch(mockFetch({ initialEnrollments: [agentEnrollment] }, rec));
+      const { setProps } = renderDialog({ initialStep: 'agent', hasAgents: false });
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByText('Your first agent.')).toBeInTheDocument();
+      expect(within(dialog).queryByRole('button', { name: /back/i })).not.toBeInTheDocument();
+
+      await within(dialog).findByText('acme-buildbox');
+      await userEvent.click(within(dialog).getByRole('button', { name: /approve/i }));
+      expect(await within(dialog).findByText(/approved/i)).toBeInTheDocument();
+
+      // The org now HAS an agent — the prop flips under the open dialog.
+      setProps({ hasAgents: true });
+      expect(within(dialog).getByText('Your first agent.')).toBeInTheDocument();
+      expect(within(dialog).queryByRole('button', { name: /back/i })).not.toBeInTheDocument();
     });
 
     it('is not shown on the person step', async () => {

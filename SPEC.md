@@ -960,7 +960,7 @@ owners/admins, plus the instance admin token.
 | Route | Auth | Behavior |
 |---|---|---|
 | `POST /orgs/:orgId/invites` | org member (per `invites.who`) | `{ note?, expiresInDays? (1–30) }` → `201 { invite, url: "{effective-origin}/invite/ivk_..." }` (host-aware; see "Effective origin"). The token appears ONCE, in `url` |
-| `GET /orgs/:orgId/invites` | org member | caller's own invites (owners/admins: all): `{ items: [{ id, inviter, note, expiresAt, revokedAt, createdAt }] }` — never tokens |
+| `GET /orgs/:orgId/invites` | org member | caller's own invites (owners/admins: all): `{ items: [{ id, inviter, note, expiresAt, revokedAt, createdAt, useCount }] }` — never tokens. `useCount` is how many enrollments have come through that invite (any outcome); `0` means nobody has walked through this door yet, which is what lets a surface REUSE a blank invite instead of minting another live one |
 | `DELETE /orgs/:orgId/invites/:id` | inviter or org owner/admin | revoke → `{ ok: true }` |
 | `POST /invite/:token/enroll` | none / session | the knock — see below |
 | `GET /invite/:token/info` | none | browser-facing landing metadata: `200 { org: { name }, inviter: { displayName, email }, agentPolicy: 'approval'\|'open' }`; dead token → the shared classification below (unknown `404`, revoked/expired `410`). This endpoint is how the SPA renders its hero and its dead-link states, so it must be able to say WHICH way the link died |
@@ -4375,8 +4375,23 @@ so the loop closes in the dialog that opened it. Entry points pre-select the ste
 the top-nav Invite button opens on *who* — always, whatever the agent count — the
 HUMANS **+** on *person*, the AGENTS **+** on *agent*. An org with no agents yet changes
 the agent step's copy (a first-agent lead-in), and only the AGENTS **+** skips *who*;
-reaching the agent step from *who* keeps the back chip. Each open mints a fresh invite (per-invite provenance) shared by
-both agent variants; outstanding invites are managed in org settings.
+reaching the agent step from *who* keeps the back chip.
+
+An invite is a live door for seven days, so an open **reuses one rather than minting
+one**: the caller's most recent invite that is blank (no note), live (unrevoked,
+unexpired) and untouched (`useCount === 0`) is offered again, and a new invite is
+minted only when no such invite exists — re-reading the instructions must not leave a
+trail of doors behind. (The token is shown exactly once, so the client remembers the
+links it minted and the list route says which of them are still reusable; an invite
+the server no longer calls reusable is dropped, never re-offered.) Both agent variants
+share the one invite, and the step SAYS what the link is, in a line of its own: a live
+invite anyone following it joins the org with, revocable in org admin → Invites, where
+outstanding invites are managed. The dialog's layout is frozen for the open: approving
+an agent in the footer gives the org its first agent, but the first-agent lead-in — and
+the header shape that goes with it — stays where it was until the dialog closes, so
+nothing re-lays out under the button just clicked. An approvals row reads
+`<name> · <KIND> · note: <what the requester typed> · <age>`; a free-text note is
+quoted AS a note, never as a `via` provenance that was never established.
 
 **Policy gates the door, not the doorbell.** `invites.who` hides EVERY invite entry
 point it forbids — the top-nav Invite, the HUMANS **+**, and the AGENTS **+** alike —
@@ -4832,7 +4847,10 @@ Agents (the governance LIST — name, email address, owner,
 created; no DM/attach affordances), org-wide Approvals (every pending enrollment
 **and** every pending quarantine and hold in the org, not just the admin's own
 agents, with the same approve/deny affordances and the same live events), org-wide
-Invites (all outstanding, with revoke), and — with `capabilities.email` — a
+Invites (all outstanding, with revoke — each row carries its note or, having none, the
+tail of its id (`inv_…a1b2`), when it was created, when it expires, and its `useCount`
+once anything has come through, because five note-less rows reading only "Invite" name
+nothing an admin can act on), and — with `capabilities.email` — a
 **Contacts** list (`GET`/`PATCH /orgs/:orgId/email/contacts`): every external
 address the org has seen, its trust state, who resolved it and when, with approve /
 block / reset-to-unknown actions. Changing trust is forward-looking; the copy says

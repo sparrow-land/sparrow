@@ -975,6 +975,13 @@ export const InviteSchema = z.object({
   expiresAt: IsoDateTimeSchema,
   revokedAt: IsoDateTimeSchema.nullable(),
   createdAt: IsoDateTimeSchema,
+  /**
+   * How many enrollments have come through this invite (any outcome — pending,
+   * approved or denied). Zero means nobody has walked through this door yet,
+   * which is what lets a surface REUSE a blank invite instead of minting a new
+   * one every time it needs a link. Absent (an older server) reads as 0.
+   */
+  useCount: z.number().int().nonnegative().default(0),
 });
 export type Invite = z.infer<typeof InviteSchema>;
 

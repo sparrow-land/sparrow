@@ -5,6 +5,7 @@ import { ApiError } from '@sparrow/client';
 import { api } from '../lib/client.js';
 import { useWorkspace } from '../lib/workspace.js';
 import { buildInviteBlob } from '../lib/inviteBlob.js';
+import { ensureOrgInvite } from '../lib/orgInvite.js';
 import { INSTALL_COMMAND } from '../lib/docsUrl.js';
 import { formatRelativeTime } from '../lib/time.js';
 import { Modal } from './Modal.js';
@@ -39,10 +40,13 @@ import {
  * whichever way the caller arrived. Only the AGENTS "+" opens on `agent`
  * without a `who` behind it, and only that open has no back chip.
  *
- * The classic invite (`POST /orgs/:id/invites`) is minted ONCE, lazily, the
+ * The classic invite (`POST /orgs/:id/invites`) is resolved ONCE, lazily, the
  * first time a step needs a URL, and both agent variants share it — so the
  * harness command and the invitation blob always name the same invite, and a
- * user flipping between them does not leave a trail of dead invites.
+ * user flipping between them does not leave a trail of dead invites. Across
+ * OPENS it is reused rather than re-minted (see {@link ensureOrgInvite}): an
+ * invite is a live door, and re-reading the instructions is not a reason to
+ * open another one (issue #5).
  *
  * The `agent` step also CLOSES THE LOOP: pending enrollments arriving through
  * the caller's own invites (live, via the workspace's `/me/events` state) are
@@ -79,7 +83,11 @@ export function InviteDialog({
   onClose: () => void;
   onInvited?: () => void;
 }) {
-  const firstAgent = !hasAgents;
+  // FROZEN for this open. Approving an agent right here makes the org's first
+  // agent — and an intro panel that vanishes under the button you just clicked
+  // (taking the header's shape with it) is the dialog re-laying itself out mid
+  // gesture (issue #7). What the dialog opened as, it stays.
+  const [firstAgent] = useState(!hasAgents);
   // The entry point IS the step: the header's `who` is never skipped, or the one
   // door would strand a brand-new owner trying to invite a teammate on the agent
   // step. (The AGENTS "+" passes `agent` itself; it needs no short-cut here.)
@@ -164,9 +172,10 @@ export function InviteDialog({
 /* -------------------------------------------------------------------------- */
 
 /**
- * Mint the org's classic invite once, the first time a step actually needs a
- * URL. Re-renders (mode flips, runtime flips, step changes) never mint again;
- * the token appears exactly once, inside `url`.
+ * Resolve the org's classic invite once, the first time a step actually needs a
+ * URL: the caller's own blank, live, untouched invite if they have one, else a
+ * freshly minted one ({@link ensureOrgInvite}). Re-renders (mode flips, runtime
+ * flips, step changes) never re-resolve it.
  */
 function useMintedInvite(orgId: string, enabled: boolean) {
   const [url, setUrl] = useState<string | null>(null);
@@ -181,8 +190,8 @@ function useMintedInvite(orgId: string, enabled: boolean) {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await api.createInvite(orgId, {});
-        if (!cancelled) setUrl(res.url);
+        const inviteUrl = await ensureOrgInvite(orgId);
+        if (!cancelled) setUrl(inviteUrl);
       } catch (err) {
         if (cancelled) return;
         if (err instanceof ApiError && err.status === 403) setForbidden(true);
@@ -266,6 +275,21 @@ function InviteTerminal({
   if (error) return <MintError />;
   if (!url) return <TerminalSkeleton label={label} />;
   return <Terminal code={code} label={label} wrap={wrap} />;
+}
+
+/**
+ * What the link actually IS, said once wherever it is handed over: a live door
+ * into the org, and a revocable one. The dialog used to mint a seven-day invite
+ * per open and say nothing about it (issue #5) — now it reuses one, and names
+ * both the standing consequence and the place to end it.
+ */
+function LiveInviteNote({ orgName }: { orgName: string }) {
+  return (
+    <p className={`mt-2 ${helperClass}`}>
+      This is a live invite: anyone who follows the link joins {orgName}. Revoke it any time in
+      Org admin → Invites.
+    </p>
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -358,6 +382,7 @@ function PersonStep({
         <div className="mt-2">
           <InviteTerminal url={url} error={error} label="invite link" code={url ?? ''} />
         </div>
+        {url && <LiveInviteNote orgName={orgName} />}
       </div>
     </div>
   );
@@ -516,6 +541,8 @@ function AgentStep({
           )}
         </div>
       )}
+
+      {url && <LiveInviteNote orgName={orgName} />}
 
       <PendingApprovals orgId={orgId} />
     </div>
@@ -679,10 +706,11 @@ function PendingApprovals({ orgId }: { orgId: string }) {
               e.kind === 'agent'
                 ? (e.proposedName ?? 'agent')
                 : (e.displayName ?? e.email ?? 'person');
-            // "via <how it enrolled> · <age>" when the enrollment carried a note;
-            // otherwise the age alone — never an invented provenance.
+            // The note is free text the requester typed — quote it AS a note.
+            // "via <note>" claimed a provenance nobody ever established (issue
+            // #7); with no note, the age stands alone.
             const age = formatRelativeTime(e.createdAt);
-            const provenance = e.note ? `via ${e.note} · ${age}` : age;
+            const provenance = e.note ? `note: ${e.note} · ${age}` : age;
             const outcome = resolved[e.id];
             const pending = busy[e.id];
             const err = errored[e.id];
