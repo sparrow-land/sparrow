@@ -5116,6 +5116,12 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     if (alreadyWaiting) firstDeferMs = alreadyWaiting.deferMs;
 
     let terminalError: unknown;
+    /**
+     * A `publish()` that REFUSED at stream open (see the `onOpen` note). Held
+     * here because the SSE read path would otherwise swallow it into a
+     * reconnect; the tail turns it into exit 1 with its own message.
+     */
+    let publishFailure: unknown;
     let upgradeWake: Promise<unknown> | undefined;
     const terminateForUpgrade = (e: unknown): boolean => {
       if (!isUpgradeRequired(e)) return false;
@@ -5296,7 +5302,30 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           // over the heartbeat. Idempotent: a reconnect never re-claims, so a
           // listener that has been superseded stays superseded.
           const first = !generation.published();
-          generation.publish();
+          /* A REFUSED CLAIM IS AN ANSWER, NOT AN ERROR IN TRANSIT.
+           *
+           * This runs INSIDE the client's SSE read path, so a throw here is not
+           * the caller's error path at all: it surfaces as a failed connection
+           * and the reconnecting runner simply tries again. Until 0.1.39
+           * `publish()` could not fail, so nothing noticed; the arming lock gave
+           * it four refusals (contention, an unusable lock, a broken `flock`,
+           * and a live different-thread owner) and each one became an invisible
+           * retry loop — a listener that streamed forever, never claimed the
+           * state dir, never stamped the heartbeat, and (never having
+           * published) never learned it had been superseded, so it woke on the
+           * same message as the listener that DID claim it. Field report, vm8,
+           * 0.1.39.
+           *
+           * So the refusal is captured here and reported by the tail: stream
+           * aborted, nothing stamped, exit 1 with the refusal's own text. */
+          try {
+            generation.publish();
+          } catch (e) {
+            publishFailure = e;
+            controller.abort(); // end the stream AND the reconnect loop
+            onOpen();
+            return;
+          }
           // A newer candidate can publish in the gap between that write and
           // this touch, so the touch is a checkpoint like any other: a listener
           // that lost the race writes nothing and stands down instead.
@@ -5428,6 +5457,16 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       // taken down by the single `finally` wrapping the whole run — see
       // `awaitSignals`, where `runAwait` calls `runAwaitArmed`.
     }
+
+    /* A REFUSED CLAIM OUTRANKS EVERYTHING BELOW. Nothing was stamped, nothing
+     * was emitted (the stream never went live for this listener), and the
+     * incumbent — if there is one — is untouched. Exit 1 carrying the refusal's
+     * own words: the contention line naming the holder's pid, the unusable-lock
+     * line naming the path, the broken-`flock` line naming the errno, or the
+     * different-thread line naming the owner. DISTINCT from a stand-down: being
+     * superseded is exit 4 and says so in its own words (`reportSuperseded`);
+     * failing to claim is exit 1 and says why. */
+    if (publishFailure !== undefined) throw publishFailure;
 
     // Let an inbox check that was in flight when the stream ended finish, so a
     // wake that had already been decided still wins over the timeout.

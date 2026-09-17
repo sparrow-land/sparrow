@@ -15,7 +15,13 @@ import {
 } from '@sparrow/common-types';
 import { clientBuildVersion } from '@sparrow/client';
 import { PassThrough, Writable } from 'node:stream';
-import { __setAwaitPublishHookForTests } from './await-owner.js';
+import {
+  __resetArmLockProbeForTests,
+  __setAwaitPublishHookForTests,
+  armLockContention,
+  armLockUnavailable,
+  flockBrokenRefusal,
+} from './await-owner.js';
 import {
   runCli,
   loadUndici,
@@ -4034,6 +4040,244 @@ describe('sparrow CLI — await (wake on a work item, without consuming it)', ()
     expect(await first).toBe(4);
     expect(await second).toBe(0);
     expect(stdoutLines(a, b)).toHaveLength(1);
+  });
+
+  /* ================================================================== *
+   * A REFUSED CLAIM IS VISIBLE (field report, vm8, 0.1.39).
+   *
+   * `publish()` runs inside the SSE `onOpen` callback, which the client invokes
+   * from its read path — so a throw there is not the caller's error path: it
+   * reads as a failed connection and the runner reconnects. Before 0.1.39
+   * publish could not fail; the arming lock gave it four refusals, and each
+   * became an invisible retry: a listener streaming forever, never claiming the
+   * state dir, never stamping the heartbeat, and — never having published —
+   * never learning it had been superseded, so it woke on the same message as
+   * the listener that DID claim the dir.
+   * ================================================================== */
+  describe('a refused claim', () => {
+    const binDirs: string[] = [];
+    afterEach(() => {
+      for (const d of binDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+      __resetArmLockProbeForTests();
+    });
+
+    /** A stand-in `flock` on PATH — the only way to make a claim refuse for real. */
+    function fakeFlock(body: string, mode = 0o755): string {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-flock-'));
+      binDirs.push(dir);
+      fs.writeFileSync(path.join(dir, 'flock'), `#!/bin/sh\n${body}\n`, { mode });
+      return dir;
+    }
+    const withFlock = (dir: string, extra: Record<string, string | undefined> = {}) => ({
+      ...env,
+      PATH: `${dir}:${process.env.PATH ?? ''}`,
+      SPARROW_ARM_LOCK: 'flock',
+      ...extra,
+    });
+
+    const ownerFile = path.join(stateDir, 'await-owner.json');
+    const heartbeatFile = path.join(stateDir, 'heartbeat');
+    /** A healthy listener already holds the dir — a refusal must not disturb it. */
+    function incumbent(): { owner: string; heartbeat: string } {
+      const record = {
+        version: 1,
+        nonce: 'incumbent0000000',
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+        kind: 'await',
+        lock: 'flock',
+      };
+      fs.writeFileSync(ownerFile, `${JSON.stringify(record)}\n`);
+      fs.writeFileSync(heartbeatFile, 'await incumbent0000000\n');
+      return {
+        owner: fs.readFileSync(ownerFile, 'utf8'),
+        heartbeat: fs.readFileSync(heartbeatFile, 'utf8'),
+      };
+    }
+    const untouched = (before: { owner: string; heartbeat: string }): void => {
+      expect(fs.readFileSync(ownerFile, 'utf8')).toBe(before.owner);
+      expect(fs.readFileSync(heartbeatFile, 'utf8')).toBe(before.heartbeat);
+    };
+
+    /** How many SSE streams the listener opened — a retry would grow this. */
+    const streamCount = (proxy: PresenceProxy): number =>
+      proxy.requests.filter((r) => r.startsWith('GET /api/v1/me/events')).length;
+
+    /**
+     * Drive a REAL listener against the test server, refusing at stream open.
+     * The refusal has to cross the SSE boundary to mean anything: a direct call
+     * to a throwing `publish()` would miss the whole mechanism.
+     */
+    async function refusedRun(
+      fixture: string,
+      envOverride: Record<string, string | undefined>,
+    ): Promise<{ code: number; cap: Capture; codex: string[]; streams: number }> {
+      await awaitFixture(fixture);
+      const before = incumbent();
+      const proxy = await startPresenceProxy();
+      try {
+        const cap = capture();
+        const codex: string[] = [];
+        cap.io.notifyCodex = async (thread) => { codex.push(thread); };
+        const code = await runCli(
+          ['await', '--timeout', '10', '--server', proxy.url],
+          envOverride,
+          cap.io,
+        );
+        untouched(before); // the incumbent's record AND heartbeat, byte for byte
+        return { code, cap, codex, streams: streamCount(proxy) };
+      } finally {
+        await proxy.close();
+      }
+    }
+
+    it('exits 1 with the contention line, streams once, and stamps nothing', async () => {
+      const dir = fakeFlock('exit 1'); // `-w` expired: held by someone else
+      const r = await refusedRun('awtref1', withFlock(dir));
+
+      expect(r.code).toBe(1);
+      expect(r.cap.err()).toContain(
+        armLockContention(path.join(stateDir, 'await-arming.lock'), 3000),
+      );
+      expect(r.cap.out()).toBe(''); // no wake line
+      expect(r.codex).toEqual([]); // no bridge
+      expect(r.streams).toBe(1); // …and no reconnect: it stood down at once
+    }, 30_000);
+
+    it('exits 1 with the unusable-lock line when flock cannot open the file', async () => {
+      const dir = fakeFlock('echo "flock: cannot open lock file /x: Permission denied" >&2\nexit 66');
+      const r = await refusedRun('awtref2', withFlock(dir));
+
+      expect(r.code).toBe(1);
+      expect(r.cap.err()).toContain('could not be taken (flock: cannot open lock file');
+      expect(r.cap.err()).toContain(
+        armLockUnavailable(
+          path.join(stateDir, 'await-arming.lock'),
+          'flock: cannot open lock file /x: Permission denied',
+        ),
+      );
+      expect(r.cap.out()).toBe('');
+      expect(r.codex).toEqual([]);
+      expect(r.streams).toBe(1);
+    }, 30_000);
+
+    it('exits 1 with the broken-flock line when the binary will not run', async () => {
+      // Present but not executable: the probe answers EACCES, which is a fault
+      // to report, never a reason to publish without the kernel lock.
+      const dir = fakeFlock('exit 0', 0o644);
+      const r = await refusedRun('awtref3', {
+        ...env,
+        // ONLY the fake on PATH: `execvp` remembers an EACCES and keeps
+        // searching, so a real `flock` further along would be found instead and
+        // the probe would succeed.
+        PATH: dir,
+        SPARROW_ARM_LOCK: undefined, // probe for real
+      });
+
+      expect(r.code).toBe(1);
+      expect(r.cap.err()).toContain(flockBrokenRefusal('EACCES'));
+      expect(r.cap.out()).toBe('');
+      expect(r.codex).toEqual([]);
+      expect(r.streams).toBe(1);
+    }, 30_000);
+
+    /* Not every failure is one we predicted. An unexpected throw must reach the
+     * operator too — never a listener that keeps running as if it had claimed. */
+    it('exits 1 for an UNEXPECTED throw from publish, with its message', async () => {
+      await awaitFixture('awtref4');
+      const proxy = await startPresenceProxy();
+      __setAwaitPublishHookForTests(() => {
+        throw new Error('something nobody planned for');
+      });
+      try {
+        const cap = capture();
+        const codex: string[] = [];
+        cap.io.notifyCodex = async (thread) => { codex.push(thread); };
+        const code = await runCli(
+          ['await', '--timeout', '10', '--server', proxy.url],
+          env,
+          cap.io,
+        );
+        expect(code).toBe(1);
+        expect(cap.err()).toContain('something nobody planned for');
+        expect(cap.out()).toBe('');
+        expect(codex).toEqual([]);
+        expect(streamCount(proxy)).toBe(1);
+        // The generation never took over the heartbeat…
+        expect(fs.readFileSync(heartbeatFile, 'utf8')).not.toContain(
+          JSON.parse(fs.readFileSync(ownerFile, 'utf8')).nonce,
+        );
+      } finally {
+        __setAwaitPublishHookForTests(undefined);
+        await proxy.close();
+      }
+    }, 30_000);
+
+    /* THE CONSEQUENCE the field saw: two listeners waking on one message. The
+     * refusing one must be GONE, not sitting unpublished and unsupersedable. */
+    it('leaves exactly one listener to wake when another claims the dir', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtrefdup');
+      const dir = fakeFlock('exit 1');
+
+      const refused = capture();
+      const refusedRunning = runCli(
+        ['await', '--timeout', '10'],
+        withFlock(dir),
+        refused.io,
+      );
+      expect(await refusedRunning).toBe(1); // it exited; it is not lurking
+
+      const healthy = capture();
+      const healthyRunning = runCli(['await', '--timeout', '10'], env, healthy.io);
+      await nap(300);
+      const sent = await owner.client.sendMessage(roomId, { to: agentId, body: 'exactly one' });
+
+      expect(await healthyRunning).toBe(0);
+      expect(wakeLine(healthy).item.id).toBe(sent.message.id);
+      expect(refused.out()).toBe(''); // the refusing listener woke for nothing
+    }, 30_000);
+
+    /* A RECONNECT IS NOT A NEW CLAIM. The second `onOpen` sees `first === false`
+     * and publish is idempotent, so an ordinary re-establish must sail through. */
+    it('does not refuse an already-published generation when the stream re-establishes', async () => {
+      await awaitFixture('awtrefreconnect');
+      const cap = capture();
+      const code = await runCli(
+        ['await', '--timeout', '3', '--max-stream-age', '1', '--poll-seconds', '0'],
+        env,
+        cap.io,
+      );
+
+      expect(code).toBe(2); // the timeout, not a refusal
+      const record = JSON.parse(fs.readFileSync(ownerFile, 'utf8'));
+      expect(fs.readFileSync(heartbeatFile, 'utf8').trim()).toBe(`await ${record.nonce}`);
+      expect(cap.err()).not.toContain('could not arm');
+    }, 30_000);
+
+    /* Failing to CLAIM and being SUPERSEDED are different answers, and neither
+     * may borrow the other's words or exit code. */
+    it('is distinguishable from a stand-down, in both code and wording', async () => {
+      const { owner, roomId, agentId } = await awaitFixture('awtrefdistinct');
+
+      const dir = fakeFlock('exit 1');
+      const refused = capture();
+      expect(await runCli(['await', '--timeout', '5'], withFlock(dir), refused.io)).toBe(1);
+
+      const loser = capture();
+      const first = runCli(['await', '--timeout', '10'], env, loser.io);
+      await nap(300);
+      const winner = capture();
+      const second = runCli(['await', '--timeout', '10'], env, winner.io);
+      await nap(300);
+      await owner.client.sendMessage(roomId, { to: agentId, body: 'to the winner' });
+      expect(await first).toBe(4);
+      expect(await second).toBe(0);
+
+      expect(refused.err()).toContain('could not arm');
+      expect(refused.err()).not.toContain('superseded by a newer listener');
+      expect(loser.err()).toContain('superseded by a newer listener');
+      expect(loser.err()).not.toContain('could not arm');
+    }, 30_000);
   });
 
   /* ================================================================== *

@@ -14,6 +14,25 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Fixed
+
+- A listener that CANNOT claim the state dir now says so and exits 1, instead of
+  streaming on as if it had. `publish()` runs inside the SSE `onOpen` callback,
+  which the client invokes from its read path, so the refusals 0.1.39 gave it
+  (lock contention, an unusable lock file, a broken `flock`, a live
+  different-thread owner) surfaced as failed connections and were simply
+  retried: the listener held a stream forever, never claimed the dir, never
+  stamped the heartbeat — so the Stop hook correctly reported "no listener" —
+  and, never having published, never learned it had been superseded, so it woke
+  on the same message as the listener that did claim the dir. The refusal is now
+  captured, the stream is abandoned without a retry, and the refusal's own text
+  goes to stderr with exit 1; an unexpected throw is reported the same way.
+  Publish-late is unchanged, and an ordinary reconnect (an already-published
+  generation) is unaffected.
+- The arming lock's `flock` probe and helper now run with the listener's
+  environment merged over this process's, so an embedder that drives `runCli`
+  with an env of its own gets the binaries it named.
+
 ## [0.1.40] — 2026-09-17
 
 ### Added

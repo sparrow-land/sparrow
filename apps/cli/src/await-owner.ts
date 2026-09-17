@@ -174,11 +174,11 @@ export function __setAwaitPublishHookForTests(fn: (() => void) | undefined): voi
   afterPublishHook = fn;
 }
 function runPublishHook(): void {
-  try {
-    afterPublishHook?.();
-  } catch {
-    /* a test seam must never break the listener */
-  }
+  /* THE THROW IS THE POINT when a test sets one. Nothing in production ever
+   * installs this hook, so swallowing here protected nobody and cost the one
+   * way to exercise an UNEXPECTED failure of `publish()` end to end — the case
+   * the caller's catch exists for. */
+  afterPublishHook?.();
 }
 
 /** `<state dir>/await-owner.json` — the same state dir the heartbeat uses. */
@@ -450,7 +450,13 @@ export function detectArmLockMechanism(o: ArmLockOptions = {}, env: Env = {}): A
   const run = o.spawn ?? spawnSync;
   let failure: NodeJS.ErrnoException | undefined;
   try {
-    const r = run(o.flockPath ?? 'flock', ['--version'], { stdio: 'ignore', timeout: 5_000 });
+    const r = run(o.flockPath ?? 'flock', ['--version'], {
+      stdio: 'ignore',
+      timeout: 5_000,
+      // The listener's PATH decides which `flock` this is a probe OF — the same
+      // environment the helper will be spawned with, or the answer means nothing.
+      env: { ...process.env, ...env } as NodeJS.ProcessEnv,
+    });
     if (r.error === undefined) {
       probedMechanism = 'flock';
       return { mechanism: 'flock' };
@@ -591,7 +597,16 @@ function publishUnderFlock(
       ARM_HELPER_COMMAND,
       encodeArmHelperPayload(payload),
     ],
-    { encoding: 'utf8', timeout: waitMs + 10_000 },
+    {
+      encoding: 'utf8',
+      timeout: waitMs + 10_000,
+      /* THE LISTENER'S ENVIRONMENT, not this process's: `flock` and `node` are
+       * resolved from PATH, and an embedder that drives `runCli` with an env of
+       * its own must get the binaries IT named. Merged over `process.env` so a
+       * partial env (a test's, typically) still inherits everything it did not
+       * set — the same shape `queueCodexAwaitWake` uses for `codex`. */
+      env: { ...process.env, ...env } as NodeJS.ProcessEnv,
+    },
   );
 
   const line = String(r.stdout ?? '')
