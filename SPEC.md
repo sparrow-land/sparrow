@@ -1470,6 +1470,20 @@ mark (shows offline immediately). Effective online is `stream-connected OR
 unexpired mark`; the mark fires `presence.changed` on set and (via a sweep) on
 expiry, so a forgotten heartbeat can never pin a principal online past its TTL.
 
+**Joining while already online** — presence edges are refcount flips, so a
+principal that was online BEFORE a membership existed (an unexpired mark, which is
+principal-wide, or a stream re-attaching inside its grace) flips nothing when it is
+added to a room, and every client that seeded its online set before the join would
+render the newcomer offline until a reload. EVERY new membership — an agent added
+to a room, an accepted room invitation, a DM's first message, a room's own creator
+— therefore emits `presence.changed { member, state: 'online' }` to that room when
+the joiner is effectively online at join time: **exactly once**, right after the
+join's `member.joined`, whichever mechanism carries the presence. A joiner that is offline
+emits nothing. The room snapshot (`GET /rooms/:id/status`) already counts such a
+member online from the instant the membership lands; this closes the gap between
+the two. Clients re-read that snapshot on `member.joined` as well, so the dot is
+right even against a server that never sent the edge.
+
 **Self-view** — a principal reads its own effective presence on `GET /me`, which
 carries `presence: { online, via, onlineUntil }` for both principal kinds. `online`
 is the same effective rule every other surface shows you by (open stream OR

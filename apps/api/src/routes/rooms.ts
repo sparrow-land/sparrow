@@ -215,6 +215,10 @@ export function registerRoomRoutes(app: FastifyInstance, ctx: AppContext): void 
         .run();
     });
     const room = ctx.db.select().from(rooms).where(eq(rooms.id, roomId)).get()!;
+    // The creator's membership is born under whatever streams it already holds —
+    // attach them to the new room (and announce its presence) exactly as any
+    // other join does, or the creator reads offline here until it reconnects.
+    ctx.rooms.onMemberJoined(roomId, 'human', human.id);
     const response: CreateRoomResponse = { room: toRoom(room) };
     return reply.code(201).send(response);
   });
@@ -330,7 +334,10 @@ export function registerRoomRoutes(app: FastifyInstance, ctx: AppContext): void 
       .run();
     const member = toMember(ctx, ctx.db.select().from(members).where(eq(members.id, memberId)).get()!);
     emitMemberJoined(ctx, caller.room.id, member);
-    ctx.rooms.onMembershipChanged('agent', agent.id);
+    // Attaches the agent's open streams to the room AND announces it online when
+    // it already was (a heartbeat mark, or a stream inside its grace) — see
+    // `onMemberJoined`; without that, clients seeded before the add show it offline.
+    ctx.rooms.onMemberJoined(caller.room.id, 'agent', agent.id);
     const response: MemberResponse = { member };
     return reply.code(201).send(response);
   });

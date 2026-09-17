@@ -121,13 +121,44 @@ export class RoomEventHub {
    * presence stay accurate while connected.
    */
   onMembershipChanged(principalType: PrincipalKind, principalId: string): void {
+    this.reconcileStreamRooms(principalType, principalId);
+  }
+
+  /**
+   * A principal JOINED `roomId`: reconcile stream contributions as above, then
+   * make sure the room is told the joiner's CURRENT presence.
+   *
+   * Presence edges are refcount flips, and a principal that was ALREADY online
+   * before this membership existed flips nothing: a heartbeat mark is principal-
+   * wide and covers the new room the instant the member row lands (it is already
+   * in `GET /rooms/:id/status`), and a stream re-attaching inside its grace
+   * window is silent by design. Without an announcement here, every client that
+   * seeded its online set before the join renders the newcomer offline until a
+   * reload (issue #4). Emitted only when the reconcile above did not already
+   * fire the edge, so the ordinary stream-online join still announces once.
+   */
+  onMemberJoined(roomId: string, principalType: PrincipalKind, principalId: string): void {
+    const fired = this.reconcileStreamRooms(principalType, principalId);
+    if (fired.has(roomId)) return;
+    const pk = principalKey(principalType, principalId);
+    if (this.presence.isOnline(roomId, pk) || this.presence.ttlActive(pk)) {
+      this.firePresence(roomId, pk, 'online');
+    }
+  }
+
+  /**
+   * Attach/detach the principal's open `/me/events` streams to its current room
+   * set. Returns the rooms where doing so fired an `online` presence edge.
+   */
+  private reconcileStreamRooms(principalType: PrincipalKind, principalId: string): Set<string> {
     const pk = principalKey(principalType, principalId);
     const current = new Set(this.principalRoomIds(principalType, principalId));
+    const fired = new Set<string>();
     for (const stream of this.meStreams) {
       if (stream.principalType !== principalType || stream.principalId !== principalId) continue;
       for (const roomId of current) {
         if (!stream._presenceRooms.has(roomId)) {
-          this.presence.add(roomId, pk);
+          if (this.presence.add(roomId, pk)) fired.add(roomId);
           stream._presenceRooms.add(roomId);
         }
       }
@@ -138,6 +169,7 @@ export class RoomEventHub {
         }
       }
     }
+    return fired;
   }
 
   /* ------------------------------- emit ------------------------------ */
