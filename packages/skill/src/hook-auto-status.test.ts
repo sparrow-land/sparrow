@@ -1633,3 +1633,304 @@ describe('sparrow-auto-status.sh — posting the subagent note', () => {
     expect(subagentFiles()).toEqual([]);
   });
 });
+
+/* ============== A CHILD'S BOUNDARIES MUST NOT SILENCE THE PARENT ============ *
+ * Reviewer's sequence (2026-09-17): SubagentStart(a) → Notification
+ * (permission_prompt) → SubagentStop(a) posted `working (1 subagent: …)`, then
+ * `blocked — needs your input`, then plain `working` — while the parent was
+ * still sitting on an unanswered permission prompt. The one note that tells a
+ * human to go and DO something was erased by a child starting and finishing.
+ *
+ * So the needs-input condition is recorded in the state dir and composed onto,
+ * not overwritten. It is cleared exactly where the hook already clears it: the
+ * next prompt (back to working), the resume handshake, and the stop/idle path.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — needs-input survives subagent boundaries', () => {
+  const lastNote = (): string =>
+    (/"note":"([^"]*)"/.exec(statusPosts()[statusPosts().length - 1]!.body) ?? [])[1] ?? '';
+  const needsInput = () => path.join(stateDir, 'needs-input');
+
+  it("does not erase the parent's blocked note when a child stops", () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_a', 'explore'));
+    expect(lastNote()).toBe('working (1 subagent: explore)');
+
+    runHook('notification', notify('permission_prompt'));
+    expect(lastNote()).toBe('blocked — needs your input (1 subagent: explore)');
+    expect(fs.existsSync(needsInput())).toBe(true);
+
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_a', 'explore'));
+    expect(lastNote()).toBe('blocked — needs your input');
+    expect(fs.existsSync(needsInput())).toBe(true); // still in force
+  });
+
+  it('composes onto the blocked note when a child STARTS while it stands', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('notification', notify('agent_needs_input'));
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_a', 'code-review'));
+    expect(lastNote()).toBe('blocked — needs your input (1 subagent: code-review)');
+  });
+
+  it('the BACKSTOP composes onto it too, rather than reverting to working', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('notification', notify('permission_prompt'));
+    // A marker appearing without its hook — what the backstop exists for.
+    writeSubagent('ag_x', 'explore');
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(lastNote()).toBe('blocked — needs your input (1 subagent: explore)');
+  });
+
+  it('the next prompt clears it and goes back to working', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('notification', notify('permission_prompt'));
+    runHook('prompt', '{"prompt":"go on then"}');
+    expect(lastNote()).toBe('working');
+    expect(fs.existsSync(needsInput())).toBe(false);
+  });
+
+  it('the stop path clears it (the turn is over, idle is the truth)', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('notification', notify('permission_prompt'));
+    runHook('stop', '{"hook_event_name":"Stop"}');
+    expect(fs.existsSync(needsInput())).toBe(false);
+    expect(statusPosts()[statusPosts().length - 1]!.body).toContain('"state":"idle"');
+  });
+
+  it('the idle notification clears it as well', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('notification', notify('permission_prompt'));
+    runHook('notification', notify('idle_prompt'));
+    expect(fs.existsSync(needsInput())).toBe(false);
+  });
+
+  /**
+   * THE RECOVERY BOUNDARY, pinned. A child's tool call is not evidence the
+   * parent's permission wait resolved — a subagent running tools while the
+   * parent sits on a dialog is exactly that case. Only the parent moving on
+   * (the next prompt) or the turn ending clears it.
+   */
+  it('is NOT cleared by tool calls or subagent boundaries, only by a prompt', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('notification', notify('permission_prompt'));
+
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(fs.existsSync(needsInput())).toBe(true);
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_c', 'explore'));
+    expect(fs.existsSync(needsInput())).toBe(true);
+    expect(lastNote()).toBe('blocked — needs your input (1 subagent: explore)');
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_c', 'explore'));
+    expect(fs.existsSync(needsInput())).toBe(true);
+    expect(lastNote()).toBe('blocked — needs your input');
+
+    // Even the resume handshake, which starts a turn without a prompt, leaves
+    // the ask standing — it is a tool call, not an answer.
+    fs.writeFileSync(path.join(stateDir, 'auto-status-idle'), '');
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(fs.existsSync(needsInput())).toBe(true);
+    expect(lastNote()).toBe('blocked — needs your input');
+
+    runHook('prompt', '{"prompt":"yes, go ahead"}');
+    expect(fs.existsSync(needsInput())).toBe(false);
+    expect(lastNote()).toBe('working');
+  });
+});
+
+/* ===================== THE PAYLOAD IS PARSED STRUCTURALLY =================== *
+ * `payload_value` takes the first quoted string after a key — which is the NEXT
+ * KEY'S VALUE when the field is null. Reviewer's case:
+ * `{"agent_id":null,"agent_type":"Explore"}` named the marker file after the
+ * type, inventing a subagent that never existed. Anything that NAMES A FILE has
+ * to be read structurally.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — agent id and type are read structurally', () => {
+  const raw = (body: Record<string, unknown>): string =>
+    JSON.stringify({ hook_event_name: 'SubagentStart', ...body });
+
+  it('writes NO marker when agent_id is null', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', raw({ agent_id: null, agent_type: 'Explore' }));
+    expect(subagentFiles()).toEqual([]);
+  });
+
+  it('writes no marker when agent_id is absent entirely', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', raw({ agent_type: 'Explore' }));
+    expect(subagentFiles()).toEqual([]);
+  });
+
+  it('writes no marker when agent_id is a number or an object', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', raw({ agent_id: 42, agent_type: 'Explore' }));
+    runHook('subagent-start', raw({ agent_id: { id: 'nested' }, agent_type: 'Explore' }));
+    expect(subagentFiles()).toEqual([]);
+  });
+
+  it('never takes an agent_id nested inside another object', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook(
+      'subagent-start',
+      raw({ tool_response: { agent_id: 'ag_nested' }, agent_type: 'Explore' }),
+    );
+    expect(subagentFiles()).toEqual([]);
+  });
+
+  it('records an unknown TYPE rather than borrowing the next key', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', raw({ agent_id: 'ag_1', agent_type: null, prompt_id: 'pr_zzz' }));
+    expect(subagentFiles()).toEqual(['ag_1.json']);
+    expect(subagentRecord('ag_1.json').type).toBe('unknown');
+  });
+
+  it('still writes exactly one correctly named marker for a normal payload', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'af21ccd826c2319bb', 'Explore'));
+    expect(subagentFiles()).toEqual(['af21ccd826c2319bb.json']);
+    expect(subagentRecord('af21ccd826c2319bb.json')).toMatchObject({
+      agent: 'af21ccd826c2319bb',
+      type: 'Explore',
+    });
+  });
+
+  /**
+   * NO NODE, NO MARKER. Structured extraction is the only way these fields are
+   * read, so a host without node shows no subagents at all — honest and
+   * harmless, where an anchored-sed fallback could still mistake a nested field
+   * for a top-level one and invent an agent.
+   */
+  it('writes no marker and claims no subagents when node is unavailable', () => {
+    const nodeless = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-as-nonode-'));
+    for (const tool of ['sh', 'cat', 'sed', 'head', 'tr', 'cut', 'mkdir', 'date', 'stat', 'awk', 'sort', 'uniq', 'grep', 'rm', 'wc']) {
+      const real = execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim();
+      fs.symlinkSync(real, path.join(nodeless, tool));
+    }
+    fs.symlinkSync(path.join(stubBin, 'curl'), path.join(nodeless, 'curl'));
+    writeLoopState('engaged');
+    stubCurl();
+    const r = execFileSync('sh', [SCRIPT, 'subagent-start'], {
+      input: subagentPayload('SubagentStart', 'ag_1', 'explore'),
+      encoding: 'utf8',
+      env: {
+        PATH: nodeless,
+        HOME: home,
+        SPARROW_STATE_DIR: stateDir,
+        CURL_LOG: curlLog,
+        SPARROW_SERVER: 'https://example.test',
+        SPARROW_TOKEN: 'agk_test',
+      },
+    });
+    expect(r).toBe('');
+    expect(subagentFiles()).toEqual([]);
+    expect(statusPosts().every((p) => !p.body.includes('subagent'))).toBe(true);
+    fs.rmSync(nodeless, { recursive: true, force: true });
+  });
+
+  it('a stop with a null agent_id deletes nothing', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeSubagent('ag_1', 'explore');
+    runHook('subagent-stop', JSON.stringify({ hook_event_name: 'SubagentStop', agent_id: null }));
+    expect(subagentFiles()).toEqual(['ag_1.json']);
+  });
+});
+
+/* ================= A STALE SNAPSHOT MUST NOT WIN THE NOTE =================== *
+ * Reviewer's repro (2026-09-17): hold `subagent-start(A)` at its `GET /me/rooms`
+ * AFTER it has composed "1 agent"; let `subagent-start(B)` complete and post
+ * "2 agents"; release A, which posts and stamps "1 agent" LAST — while both
+ * marker files exist. The note then contradicts the directory, and a foreground
+ * parent may issue no tool call at all until the child finishes, so the
+ * post-tool backstop never gets to repair it.
+ *
+ * The fix has to make the LAST WRITER responsible for the final state, not the
+ * last to be scheduled.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — concurrent posts converge on the truth', () => {
+  /** A curl stub that blocks on `GET /me/rooms` while the flag file exists. */
+  function stubHangingCurl(flag: string): void {
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+case "$url" in
+  */me/rooms)
+    # ONE-SHOT: only the first caller (A) is held; everybody after it sails past.
+    if [ -f "${flag}" ] && [ ! -f "${flag}.used" ]; then
+      : > "${flag}.used"
+      n=0
+      while [ -f "${flag}" ] && [ "$n" -lt 200 ]; do sleep 0.05; n=$((n + 1)); done
+    fi
+    printf '%s' "$ROOMS_JSON"
+    ;;
+esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+
+  const notesPosted = (): string[] =>
+    statusPosts().map((p) => (/"note":"([^"]*)"/.exec(p.body) ?? [])[1] ?? '');
+
+  it('ends on the note the marker directory justifies, whoever was slow', async () => {
+    writeLoopState('engaged');
+    const flag = path.join(stubBin, 'hang');
+    fs.writeFileSync(flag, '');
+    stubHangingCurl(flag);
+
+    const env = {
+      PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+      HOME: home,
+      SPARROW_STATE_DIR: stateDir,
+      CURL_LOG: curlLog,
+      ROOMS_JSON,
+      SPARROW_SERVER: 'https://example.test',
+      SPARROW_TOKEN: 'agk_test',
+    };
+
+    // A: starts first, composes "1 agent", then hangs inside GET /me/rooms.
+    const a = spawn('sh', [SCRIPT, 'subagent-start'], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+    a.stdin.end(subagentPayload('SubagentStart', 'ag_A', 'explore'));
+    const deadline = Date.now() + 5_000;
+    const sawRooms = (): boolean =>
+      fs.existsSync(curlLog) && fs.readFileSync(curlLog, 'utf8').includes('/me/rooms');
+    while (Date.now() < deadline && !sawRooms()) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    // B: the second subagent starts and runs to completion while A is stuck.
+    runHook('subagent-stop', '{"hook_event_name":"SubagentStop"}'); // no id: a no-op, just noise
+    const b = spawn('sh', [SCRIPT, 'subagent-start'], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+    b.stdin.end(subagentPayload('SubagentStart', 'ag_B', 'code-review'));
+    await new Promise<void>((r) => b.on('exit', () => r()));
+
+    // Release A and let it finish.
+    fs.rmSync(flag, { force: true });
+    await new Promise<void>((r) => a.on('exit', () => r()));
+
+    // Both subagents are still running, so that is what the note must say —
+    // whichever process happened to post last.
+    expect(subagentFiles()).toEqual(['ag_A.json', 'ag_B.json']);
+    const notes = notesPosted();
+    expect(notes[notes.length - 1]).toBe('working (2 subagents: code-review, explore)');
+    // …and the stamp must describe what was actually posted, so the backstop
+    // does not sit on a lie.
+    expect(fs.readFileSync(path.join(stateDir, 'auto-status-subagents'), 'utf8')).toBe(
+      '(2 subagents: code-review, explore)',
+    );
+  }, 20_000);
+});

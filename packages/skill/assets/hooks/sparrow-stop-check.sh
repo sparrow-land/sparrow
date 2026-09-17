@@ -87,9 +87,12 @@ state=$(tr -d ' \t\r\n' < "$LOOP_STATE_FILE" 2>/dev/null || echo "")
 # array of `{id,type,status,description,command}`, and it appears on `Stop` and
 # `SubagentStop` only -- not on UserPromptSubmit or PostToolUse. That turns the
 # background-shell count from an inference off the process tree into a fact the
-# harness itself reported, so it is recorded here, where the Stop payload is
-# actually in hand on EVERY path (blocking ones included). `sparrow skill status`
-# reads the file.
+# harness itself reported, so it is recorded here, where the Stop payload is in
+# hand on every path that gets this far -- the blocking ones included, and NOT a
+# re-entrant Stop (`stop_hook_active: true`), which returns above this point by
+# design. That guard exists so this hook can never wedge a session, and a
+# recording is not worth weakening it: the Stop that preceded the block already
+# captured the same turn. `sparrow skill status` reads the file.
 #
 # `command` IS DROPPED: it is whatever a user typed, and this file is meant to be
 # pasted into a bug report. Needs node (already an optional dependency of the

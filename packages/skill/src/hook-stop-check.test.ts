@@ -1163,6 +1163,23 @@ describe('sparrow-stop-check.sh', () => {
       expect(fs.existsSync(FILE())).toBe(false);
     });
 
+    /**
+     * NOT captured on a RE-ENTRANT Stop. `stop_hook_active: true` is the
+     * infinite-block guard, and it returns before anything else runs — on
+     * purpose, so this hook can never wedge a session. Recording is not worth
+     * weakening that: the Stop that preceded the block already captured the
+     * same turn. Pinned so the claim in the comment stays true.
+     */
+    it('records nothing on a re-entrant Stop, and allows it immediately', () => {
+      writeLoopState('engaged');
+      const r = runHook(
+        JSON.stringify({ hook_event_name: 'Stop', stop_hook_active: true, background_tasks: TWO }),
+      );
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+      expect(fs.existsSync(FILE())).toBe(false);
+    });
+
     it('leaves the last record alone when a later turn cannot report', () => {
       writeLoopState('engaged');
       writeHeartbeat(3, 'await');

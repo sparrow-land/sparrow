@@ -168,6 +168,11 @@ BLOCKED_DIR="$STATE_DIR/blocked"
 # INDICATOR below), plus the last subagent summary we posted.
 SUBAGENT_DIR="$STATE_DIR/subagents"
 SUBAGENT_NOTE_STAMP="$STATE_DIR/auto-status-subagents"
+# Set while a human is being asked something and NOT cleared by anything a child
+# does -- see THE PARENT'S NOTE below.
+NEEDS_INPUT_FILE="$STATE_DIR/needs-input"
+# Serialises compose-and-post across concurrent hooks (see post_composed).
+NOTE_LOCK="$STATE_DIR/auto-status-note.lock"
 # Longer than any session plausibly runs: past this a marker is a crash
 # leftover, not a subagent. The trade is deliberate -- 12h of a phantom in the
 # note is better than dropping a real long-running subagent from it.
@@ -214,6 +219,31 @@ payload_value() {
       printf '%s' "${_rest%%'"'*}"
       ;;
   esac
+}
+
+# A TOP-LEVEL STRING field, read STRUCTURALLY. `payload_value` above takes the
+# first quoted string after a key, which is the NEXT KEY'S VALUE when the field
+# is null: `{"agent_id":null,"agent_type":"Explore"}` yielded `Explore` as the
+# id, and the hook named a marker file after a subagent that never existed. So
+# anything that NAMES A FILE comes through here instead: node parses the payload
+# and returns the value only when it is a top-level string.
+#
+# NO FALLBACK, deliberately. On a host without node this returns nothing and the
+# caller writes no marker — the indicator degrades to "no subagents shown", which
+# is honest and harmless. An anchored-sed fallback could still mistake a nested
+# field for a top-level one, which is the exact bug being fixed; a wrong marker
+# is worse than a missing one.
+payload_string() {
+  command -v node >/dev/null 2>&1 || return 0
+  printf '%s' "$input" | SPARROW_PAYLOAD_KEY="$1" node -e '
+    let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+      try {
+        const j = JSON.parse(s);
+        if (!j || typeof j !== "object" || Array.isArray(j)) return;
+        const v = j[process.env.SPARROW_PAYLOAD_KEY];
+        if (typeof v === "string") process.stdout.write(v);
+      } catch (e) {}
+    });' 2>/dev/null || true
 }
 
 # Strip anything that would break our hand-rolled JSON, and cap the length.
@@ -269,6 +299,29 @@ file_age() {
 # restarts the age: the room shows "working (2 subagents: ...)" as fresh even
 # though the turn began earlier. Accepted deliberately -- a live picture of what
 # is running beats an accurate age for a note nobody could interpret.
+
+# --- THE PARENT'S NOTE ------------------------------------------------------
+#
+# `blocked — needs your input` is the one status that asks a HUMAN to act, and a
+# child's boundaries must never erase it. Reviewer's sequence (2026-09-17):
+# SubagentStart → Notification(permission_prompt) → SubagentStop posted
+# `working (1 subagent: …)`, `blocked — needs your input`, then plain `working`
+# — while the parent was still sitting on an unanswered dialog.
+#
+# So the condition is recorded in the state dir and every later note is composed
+# ONTO it (`blocked — needs your input (2 subagents: …)`) rather than replacing
+# it. Composing beats staying silent: the human still sees the ask, and the
+# subagent list still answers "what is it doing while it waits" — and the 140
+# cap degrades it gracefully when both are long.
+#
+# WHAT CLEARS IT is deliberately narrow: the next UserPromptSubmit, and the
+# stop/idle path -- exactly where this hook already treats the condition as over.
+# NOT a tool call, and not a subagent start or stop: a child running tools while
+# the parent waits on a dialog is precisely the case that must not clear it.
+status_base() {
+  [ -f "$NEEDS_INPUT_FILE" ] && { printf 'blocked — needs your input'; return 0; }
+  printf 'working'
+}
 
 # Delete markers too old to be real (hooks only; `sparrow skill status` is a
 # read-only command and merely ignores them).
@@ -610,8 +663,8 @@ case "$MODE" in
     # suppressed while a usage limit stands. Gating this instead would leave a
     # phantom subagent in the count for the whole blocked window.
     subagent_sweep
-    _ag=$(safe_field "$(payload_value agent_id)" 80 | tr -cd 'A-Za-z0-9_-')
-    _ty=$(safe_field "$(payload_value agent_type)" 60 | tr -cd 'A-Za-z0-9_-')
+    _ag=$(payload_string agent_id | tr -cd 'A-Za-z0-9_-' | cut -c1-80)
+    _ty=$(payload_string agent_type | tr -cd 'A-Za-z0-9_-' | cut -c1-60)
     if [ -n "$_ag" ]; then
       mkdir -p "$SUBAGENT_DIR" 2>/dev/null || true
       printf '{"version":1,"agent":"%s","type":"%s","at":"%s"}\n' \
@@ -622,7 +675,7 @@ case "$MODE" in
     # Delete exactly THIS agent's marker, by name. An id with no marker is a
     # silent no-op (an older install, a swept phantom, a stop we never saw start).
     subagent_sweep
-    _ag=$(safe_field "$(payload_value agent_id)" 80 | tr -cd 'A-Za-z0-9_-')
+    _ag=$(payload_string agent_id | tr -cd 'A-Za-z0-9_-' | cut -c1-80)
     [ -n "$_ag" ] && rm -f "$SUBAGENT_DIR/$_ag.json" 2>/dev/null
     ;;
   post-tool)
@@ -746,6 +799,59 @@ post_note() {
 # is the only note here that is not a literal).
 safe_json() { printf '%s' "$1" | tr -d '"\\' | tr '\r\n\t' '   '; }
 
+# COMPOSE AND POST AS ONE STEP, AND LEAVE THE DIRECTORY'S TRUTH BEHIND.
+#
+# THE RACE (reviewer, 2026-09-17): `subagent-start(A)` composed "1 agent", then
+# stalled inside its `GET /me/rooms`; `subagent-start(B)` completed and posted "2
+# agents"; A was released and posted -- and STAMPED -- "1 agent" last, while both
+# markers existed. Nothing ordered mutation, composition and post, and the
+# post-tool backstop cannot save it: a foreground parent runs no tool call until
+# the child finishes, which is exactly when this indicator is meant to be
+# working.
+#
+# TWO MECHANISMS, because either alone loses:
+#   1. A LOCK (`mkdir`, the POSIX atomic-create primitive available to sh) so two
+#      hooks cannot interleave compose-and-post. Bounded wait: a hook that cannot
+#      get in posts NOTHING and stamps NOTHING rather than posting a body it
+#      composed long ago -- a loser must never leave the stamp claiming a stale
+#      note. A lock left behind by a killed hook is broken on age.
+#   2. RE-COMPOSE AFTER POSTING, and post again while the picture keeps changing
+#      (bounded). That is what makes a stale snapshot unable to win even when the
+#      other hook gave up waiting: whoever holds the lock last is responsible for
+#      the final state, and it checks the directory AFTER its write rather than
+#      trusting what it read before the network.
+# The combination cannot be defeated by the same interleaving: every mutation
+# happens before its own hook tries the lock, so the final holder either sees it
+# while composing, or sees it in the re-check and posts again.
+post_composed() {
+  _pc_base="$1"
+  _pc_tries=0
+  while [ "$_pc_tries" -lt 40 ]; do
+    if mkdir "$NOTE_LOCK" 2>/dev/null; then
+      _pc_round=0
+      while [ "$_pc_round" -lt 3 ]; do
+        _pc_sum=$(subagent_summary)
+        post_note "$(compose_note "$_pc_base")" "$_pc_sum"
+        [ "$(subagent_summary)" = "$_pc_sum" ] && break
+        _pc_round=$((_pc_round + 1))
+      done
+      rmdir "$NOTE_LOCK" 2>/dev/null || true
+      return 0
+    fi
+    # A lock nobody is holding any more (a hook killed mid-post) must not wedge
+    # every later one.
+    _pc_age=$(file_age "$NOTE_LOCK")
+    [ -n "$_pc_age" ] && [ "$_pc_age" -ge 30 ] 2>/dev/null && rmdir "$NOTE_LOCK" 2>/dev/null
+    if sleep 0.05 2>/dev/null; then
+      _pc_tries=$((_pc_tries + 1))
+    else
+      sleep 1
+      _pc_tries=$((_pc_tries + 20))
+    fi
+  done
+  return 1
+}
+
 # Throttle a mode via a state-dir stamp file: succeed (and re-stamp) at most once
 # per $2 seconds. Returns 0 to proceed, 1 to skip.
 throttled() {
@@ -810,11 +916,11 @@ case "$MODE" in
       derived=$(safe_note "$prompt")
       [ -n "$derived" ] && note="$derived"
     fi
+    # A prompt is the parent moving on: whatever it was waiting for is over.
+    rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
     # Whoever is running under this turn goes in the note too (capped at 140).
-    _sum=$(subagent_summary)
-    note=$(compose_note "$note")
     refresh_presence
-    post_note "$note" "$_sum"
+    post_composed "$note"
     rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;
   subagent-start | subagent-stop)
@@ -822,17 +928,20 @@ case "$MODE" in
     # blocks its parent, so no tool call happens while it runs -- which is
     # exactly when someone is watching and wondering. The cost is the `sinceAt`
     # reset named above.
-    _sum=$(subagent_summary)
     refresh_presence
-    post_note "$(compose_note working)" "$_sum"
+    post_composed "$(status_base)"
     rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;
   notification)
     case "$ntype" in
       permission_prompt | elicitation_dialog | elicitation_url_dialog | agent_needs_input)
-        # A human is being asked something — we are stuck until they answer.
+        # A human is being asked something — we are stuck until they answer. The
+        # condition outlives this hook (see THE PARENT'S NOTE), so it is recorded
+        # rather than only posted.
+        mkdir -p "$STATE_DIR" 2>/dev/null || true
+        printf '%s\n' "$(now_iso_ms)" > "$NEEDS_INPUT_FILE" 2>/dev/null || true
         refresh_presence
-        post_status_all '{"state":"working","note":"blocked — needs your input","sticky":true}'
+        post_composed 'blocked — needs your input'
         rm -f "$IDLE_MARKER" 2>/dev/null || true
         ;;
       quota_auto_resume_fired)
@@ -861,6 +970,7 @@ case "$MODE" in
         # agent is not working, so say idle — and KEEP the resume marker so the
         # next turn's first tool call restores "working" (an idle_prompt can
         # arrive before a monitor-triggered turn). No presence refresh.
+        rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
         post_status_all '{"state":"idle"}'
         mkdir -p "$STATE_DIR" 2>/dev/null || true
         [ -f "$IDLE_MARKER" ] || : > "$IDLE_MARKER" 2>/dev/null || true
@@ -879,7 +989,9 @@ case "$MODE" in
     if [ -f "$IDLE_MARKER" ]; then
       rm -f "$IDLE_MARKER" 2>/dev/null || true
       refresh_presence
-      post_note "$(compose_note working)" "$(subagent_summary)"
+      # NOT a clearing point: a tool call is not evidence the parent's ask was
+      # answered (a child doing tool calls while the parent waits is the case).
+      post_composed "$(status_base)"
       mkdir -p "$STATE_DIR" 2>/dev/null || true
       : > "$POST_STAMP" 2>/dev/null || true
       wait 2>/dev/null || true
@@ -895,7 +1007,7 @@ case "$MODE" in
     _prev=$(cat "$SUBAGENT_NOTE_STAMP" 2>/dev/null || printf '')
     if [ "$_sum" != "$_prev" ]; then
       refresh_presence
-      post_note "$(compose_note working)" "$_sum"
+      post_composed "$(status_base)"
       mkdir -p "$STATE_DIR" 2>/dev/null || true
       : > "$POST_STAMP" 2>/dev/null || true
       wait 2>/dev/null || true
@@ -915,6 +1027,8 @@ case "$MODE" in
     rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;
   stop)
+    # The turn is over, so a pending ask is over with it.
+    rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
     post_status_all '{"state":"idle"}'
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     : > "$IDLE_MARKER" 2>/dev/null || true
