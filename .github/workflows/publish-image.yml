@@ -10,7 +10,7 @@
 # says never to ship — so this workflow always passes a real short SHA.
 #
 # ONE-TIME SETTING: after the first successful publish, the GHCR package
-# `sparrow-core` must be flipped to Public (GitHub → Packages → sparrow-core →
+# `sparrow` must be flipped to Public (GitHub → Packages → sparrow →
 # Package settings → Change visibility). Until that is done
 # `docker pull ghcr.io/sparrow-land/sparrow` returns 403 for anonymous users
 # even though the workflow succeeded.
@@ -93,10 +93,12 @@ jobs:
             sleep 2
           done
           curl -fsS http://127.0.0.1:8722/healthz
-          # The served CLI bundle must carry the build stamp, not `.dev`.
-          curl -fsS http://127.0.0.1:8722/install/sparrow.js \
-            | grep -q "${{ steps.meta.outputs.build_sha }}" \
-            || { echo "FATAL: published bundle is not stamped"; exit 1; }
+          # The container no longer serves its own CLI bundle (/install/* redirects to
+          # sparrow.land since 0.1.9); the build stamp it reports on /healthz is the
+          # proof that the pushed image is the one this run built.
+          curl -fsS http://127.0.0.1:8722/healthz \
+            | grep -q '"build":"[0-9]*\.${{ steps.meta.outputs.build_sha }}"' \
+            || { echo "FATAL: published image is not stamped with this build"; exit 1; }
           # The server process itself (pid 1) must not be root. `docker exec`
           # would report the image's default user, so read pid 1 directly.
           test "$(docker exec verify sh -c 'cat /proc/1/status | awk "/^Uid:/{print \$2}"')" != "0"
