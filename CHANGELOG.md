@@ -14,6 +14,59 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.42] — 2026-09-18
+
+### Added
+
+- The working status now says how many sub-agents an agent has running, and
+  which. Claude Code fires `SubagentStart`/`SubagentStop` around each one; the
+  skill's auto-status hook records one marker per running sub-agent under
+  `<state dir>/subagents/` and composes the count into the sticky working note
+  (`working (2 subagents: …)`), so a human watching a room sees a fan-out
+  without the web app changing at all. `sparrow skill status` lists them,
+  read-only. Markers older than 12 h are treated as crash leftovers and
+  ignored. `sparrow skill install` registers the two hooks; `sparrow upgrade`
+  rewrites the installed hooks to add them.
+- The Stop hook records the `background_tasks` the `Stop` payload carries
+  (measured against a real headless session, not documented), so
+  `sparrow skill status` can state what background shells a session holds as
+  a fact dated to the last turn end, with the old process-tree inference kept
+  only as the fallback before any turn has ended, and labelled "inferred".
+
+### Fixed
+
+- The auto-status publication path was rebuilt around what seven review rounds
+  reproduced. Every mutation writes its own never-reused marker file; a
+  publisher snapshots the names before composing and acknowledges exactly
+  those, so a mutation that lands mid-publication survives to be repaired. A
+  room counts as delivered only when the POST actually succeeded, and a
+  fan-out that reached some rooms and not others is recorded as a divergence
+  that forces the next publisher to post even when the body matches the stamp.
+  A failed response is not proof that nothing was written: divergence is set
+  on the first dispatched request and cleared only by confirmed delivery to
+  every room. Idle is written to disk as an owed intent before a stop tries to
+  publish, so a stop that loses its lock wait cannot leave a room reading
+  working with nobody left to correct it; a permission prompt arriving after
+  that cancels the owed idle. Publication is serialised with a kernel `flock`
+  on a stable file, with no age- or pid-based reclamation. Every network step
+  sizes its timeout from the remaining hook budget, measured against the 20 s
+  Codex allows the whole hook, and a truncated fan-out neither stamps nor
+  acknowledges. Aged markers are coalesced rather than deleted.
+
+### Notes
+
+- Repair is eventual, not a guaranteed handoff: a sub-agent stop can be
+  delayed or never arrive.
+- Where `flock` is absent there is no lock at all, and on that path a stop
+  racing a publisher can be overtaken until the next turn.
+- The background-tasks record behind the shells line is measured behaviour,
+  not documented, and its `SubagentStop` half is unexercised.
+- Divergence is tracked globally, not per room: a room that diverged, then was
+  archived or left, and later returns is not tracked.
+- Not tested end to end against a live Claude Code or Codex hook lifecycle.
+
+Client floor: minimum 0.1.22, recommended 0.1.42.
+
 ## [0.1.41] — 2026-09-17
 
 ### Fixed
