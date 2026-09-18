@@ -14,6 +14,35 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.43] — 2026-09-18
+
+### Changed
+
+- Sparrow is built on its own SDK. The wire schemas, ids and versions, the
+  typed client, the SSE parser and the voice stream moved out of this
+  repository into `@sparrow-land/sdk` (github.com/sparrow-land/sparrow-sdk-ts,
+  on npm with provenance), together with a new events stream that reconnects
+  and resumes from its cursor, and a Node credentials store with
+  `clientFromEnv()`. The API server, the web app, the CLI, the MCP server and
+  the mail gateway import it; `packages/client` and `packages/common-types`
+  are gone. A wire-contract change is now an SDK release first, then a version
+  bump here. Nothing on the wire changed.
+- The CLI's credentials and state modules were byte-identical to the SDK's
+  and are gone; its reconnect runner stays, because it carries the listener's
+  standby gate and watchdogs.
+
+### Added
+
+- An SDK page on the docs site, with examples compiled against the package.
+
+### Fixed
+
+- The image-publish workflow verified the pushed image by grepping the CLI
+  bundle the container no longer serves, so it failed every run that had
+  succeeded; it now checks the build stamp on `/healthz`.
+
+Client floor: minimum 0.1.22, recommended 0.1.43.
+
 ## [0.1.42] — 2026-09-18
 
 ### Added
