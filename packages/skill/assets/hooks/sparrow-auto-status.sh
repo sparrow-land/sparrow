@@ -320,6 +320,13 @@ file_age() {
 # must not clear it. A publisher clears the token only when the value is still
 # exactly the one it observed before composing.
 #
+# THAT CHECK IS NOT ATOMIC, and no shell construct makes it one: `cat`, compare,
+# `rm` is three steps. It does not need to be. The argument is the DOUBLE STAMP:
+# a clear that races a mutation is followed by that mutation's own second stamp,
+# which puts the token back. The worst a lost race costs is one redundant
+# publication, or one extra repair by a later hook -- never a change nobody
+# records.
+#
 # WHAT THIS BUYS, EXACTLY: eventual repair, not immediate correctness. A
 # publisher that runs out of rounds, or loses the lock, leaves the token set --
 # the honest on-disk record that the note is stale -- and any later hook that
@@ -901,25 +908,56 @@ safe_json() { printf '%s' "$1" | tr -d '"\\' | tr '\r\n\t' '   '; }
 # and it is CONVERGENCE -- compose immediately before posting, re-check after,
 # repeat -- plus the handoff token that corrects the note; a stale note can
 # persist until the next hook runs. That is honest, and it cannot wedge anything.
-post_composed() {
-  _pc_override="${1:-}"
+post_composed() { post_composed_with publish_rounds "${1:-}"; }
+
+post_composed_with() {
+  _pc_publish="$1"
+  _pc_override="${2:-}"
   if command -v flock >/dev/null 2>&1; then
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     if : >> "$NOTE_LOCK_FILE" 2>/dev/null; then
       exec 9>> "$NOTE_LOCK_FILE"
-      if flock -w "${NOTE_LOCK_WAIT:-8}" 9 2>/dev/null; then
-        publish_rounds "$_pc_override"
+      # Never wait past the deadline: the wait is a sub-limit, not an extra.
+      _pc_wait="${NOTE_LOCK_WAIT:-5}"
+      _pc_left=$(( NOTE_DEADLINE - $(date +%s 2>/dev/null || echo 0) ))
+      [ "$_pc_left" -lt 0 ] 2>/dev/null && _pc_left=0
+      [ "$_pc_wait" -gt "$_pc_left" ] 2>/dev/null && _pc_wait="$_pc_left"
+      flock -w "$_pc_wait" 9 2>/dev/null
+      _pc_rc=$?
+      if [ "$_pc_rc" -eq 0 ]; then
+        "$_pc_publish" "$_pc_override"
         exec 9>&- 2>/dev/null || true
         return 0
       fi
-      # Lost the wait: post nothing, stamp nothing. The token stays set, so the
-      # next hook publishes what we did not.
       exec 9>&- 2>/dev/null || true
-      return 1
+      # CONTENTION (flock's exit 1) means somebody else is publishing: post
+      # nothing, stamp nothing, leave the token for them. ANY OTHER failure means
+      # the lock is unusable here -- a read-only state dir, an fd problem, NFS
+      # without locking -- and that must degrade to the unlocked path, exactly
+      # like a host with no flock at all. Failing every publication because the
+      # lock is broken would be worse than publishing unordered.
+      [ "$_pc_rc" -eq 1 ] && return 1
     fi
   fi
-  publish_rounds "$_pc_override"
+  "$_pc_publish" "$_pc_override"
 }
+
+# What the stamp holds after an `idle` publication. A later publisher that finds
+# it -- with nothing owed -- knows the turn ENDED and must not resurrect it.
+IDLE_STAMP='idle'
+
+# `idle` goes through the same ordered path as every other publication. It is
+# trivially composed (idle supersedes any note), but ORDERING IS NOT OPTIONAL:
+# posting it outside the lock let an older `working (1 subagent: ...)`, held in a
+# slow fan-out, land after the turn had ended and resurrect it.
+publish_idle() {
+  post_status_all '{"state":"idle"}'
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s' "$IDLE_STAMP" > "$NOTE_STAMP" 2>/dev/null || true
+  rm -f "$PENDING_TOKEN" 2>/dev/null || true   # nothing is owed any more
+}
+
+post_idle() { post_composed_with publish_idle; }
 
 # The critical section: compose the WHOLE desired status from current state --
 # the parent's condition, the subagent set, the usage-limit gate -- post it if it
@@ -930,12 +968,33 @@ publish_rounds() {
   _pr_override="$1"
   _pr_round=0
   while [ "$_pr_round" -lt 3 ]; do
+    # Out of budget: stop here and leave the token set. The round cap bounds the
+    # work; this bounds the TIME, against the 20s Codex allows the whole hook.
+    [ "$(date +%s 2>/dev/null || echo 0)" -ge "${NOTE_DEADLINE:-0}" ] 2>/dev/null && return 0
     # A usage limit landing mid-flight outranks everything here.
     [ -n "$(blocked_markers | head -n 1)" ] && return 0
     _pr_token=$(cat "$PENDING_TOKEN" 2>/dev/null || printf '')
-    if [ -n "$_pr_override" ]; then _pr_base="$_pr_override"; else _pr_base=$(status_base); fi
+    # THE BASE IS READ FRESH EVERY ROUND. An override only supplies the note TEXT
+    # that nothing but the payload knows (the verbose prompt note); it must never
+    # outrank a parent condition that arrived since. So it is used only while the
+    # current base is the ordinary `working` one -- if the parent became blocked
+    # while we were posting, the ask wins and the override is dropped.
+    _pr_base=$(status_base)
+    if [ -n "$_pr_override" ] && [ "$_pr_base" = working ]; then _pr_base="$_pr_override"; fi
     _pr_body=$(compose_note "$_pr_base")
     _pr_prev=$(cat "$NOTE_STAMP" 2>/dev/null || printf '')
+    # NEVER POST A BODY THAT WAS COMPOSED BEFORE THE LAST PUBLICATION. If the
+    # stamp moved while we were composing -- the case that matters being an
+    # `idle` published by a turn that ended under us -- this body describes a
+    # world that no longer exists, and posting it would resurrect a finished
+    # turn. Re-read and go round again instead. (Inside the lock this is
+    # belt-and-braces; on the unlocked degraded path it is the only guard there
+    # is. Neither can help a fan-out already in flight: that is what the lock is
+    # for, and why the degraded path is documented as best-effort.)
+    if [ "$(cat "$NOTE_STAMP" 2>/dev/null || printf '')" != "$_pr_prev" ]; then
+      _pr_round=$((_pr_round + 1))
+      continue
+    fi
     [ "$_pr_body" != "$_pr_prev" ] && post_note "$_pr_body"
     if [ "$(cat "$PENDING_TOKEN" 2>/dev/null || printf '')" = "$_pr_token" ]; then
       [ -n "$_pr_token" ] && rm -f "$PENDING_TOKEN" 2>/dev/null
@@ -998,14 +1057,24 @@ case "$MODE" in
   *) [ -n "$(blocked_markers | head -n 1)" ] && exit 0 ;;
 esac
 
-# THE WAIT BUDGET. Measured on the installed Claude Code (2.1.272, read out of
-# the bundle): a COMMAND hook that sets no `timeout` gets the default
-# `e.timeout ? e.timeout*1000 : 600000` — 600 seconds — and our registrations set
-# none. The budget below is therefore nowhere near the harness limit; it is kept
-# small because a human is waiting, not because the timeout forces it. A
-# `UserPromptSubmit` sits in the critical path between typing and an answer, so
-# it waits 2s; a subagent boundary or a tool call waits 5s. Whatever a hook does
-# not manage inside its budget is left to the handoff token.
+# THE PUBLICATION BUDGET, measured against the TIGHTEST harness that runs this
+# script, not the loosest:
+#   * CODEX registers these same modes with EXPLICIT per-hook timeouts
+#     (packages/skill/src/provider-codex.ts): UserPromptSubmit 20s, PostToolUse
+#     20s, Stop 30s. 20 SECONDS IS THE BINDING LIMIT.
+#   * Claude Code sets none, and its default for a command hook is 600s
+#     (`e.timeout ? e.timeout*1000 : 600000`, read out of the 2.1.272 bundle).
+# So the whole publication path -- waiting for the lock, the room fan-out, and
+# every round -- lives inside ONE deadline of 8s, leaving ~12s of the Codex
+# budget for the rest of the hook (credential lookup, presence, sweeps). The lock
+# wait is a sub-limit of it, never an extra: a `UserPromptSubmit` sits in the
+# critical path between a human typing and an answer, so it waits at most 2s; any
+# other mode waits at most 5s. A hook that reaches the deadline stops and leaves
+# the handoff token set, exactly like any other budget exhaustion.
+NOTE_BUDGET="${SPARROW_NOTE_BUDGET:-8}"
+# ONE deadline for the whole hook, not one per call: the mode's own post and the
+# repair step at the end SHARE it, so a slow hook cannot spend the budget twice.
+NOTE_DEADLINE=$(( $(date +%s 2>/dev/null || echo 0) + NOTE_BUDGET ))
 case "$MODE" in
   prompt) NOTE_LOCK_WAIT=2 ;;
   *) NOTE_LOCK_WAIT=5 ;;
@@ -1084,8 +1153,8 @@ case "$MODE" in
         # agent is not working, so say idle — and KEEP the resume marker so the
         # next turn's first tool call restores "working" (an idle_prompt can
         # arrive before a monitor-triggered turn). No presence refresh.
-        rm -f "$NEEDS_INPUT_FILE" "$PENDING_TOKEN" "$NOTE_STAMP" 2>/dev/null || true
-        post_status_all '{"state":"idle"}'
+        rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
+        post_idle
         mkdir -p "$STATE_DIR" 2>/dev/null || true
         [ -f "$IDLE_MARKER" ] || : > "$IDLE_MARKER" 2>/dev/null || true
         ;;
@@ -1111,15 +1180,19 @@ case "$MODE" in
       wait 2>/dev/null || true
       exit 0
     fi
-    # THE BACKSTOP. If the subagent picture changed without one of its hooks
-    # posting -- a hook that failed, an install that predates them, a marker
-    # swept for age -- put the truth back. Deliberately NOT throttled: it fires
-    # only on a real change, and comparing the stamp costs nothing. It compares
-    # the SUBAGENT part only, so it never overwrites somebody else's note (a
-    # `blocked — needs your input`, say) just because the wording differs.
-    _sum=$(subagent_summary)
-    _prev=$(cat "$SUBAGENT_NOTE_STAMP" 2>/dev/null || printf '')
-    if [ "$_sum" != "$_prev" ]; then
+    # THE BACKSTOP. If the status we WOULD post differs from the one last
+    # posted -- a subagent hook that failed, an install predating them, a marker
+    # swept for age, or the parent becoming blocked -- put the truth back.
+    # Deliberately NOT throttled: it fires only on a real change, and the
+    # comparison is local and free. It compares the FULL body, so a change in the
+    # parent's condition counts as much as a subagent appearing; comparing only
+    # the subagent part could not see an unanswered permission prompt.
+    _body=$(compose_note "$(status_base)")
+    _prev=$(cat "$NOTE_STAMP" 2>/dev/null || printf '')
+    # An ABSENT stamp is not a drift (nothing has ever been posted here, and a
+    # tool call must not start rewriting the status); an `idle` stamp means the
+    # turn ended and the resume handshake above owns the comeback.
+    if [ -n "$_prev" ] && [ "$_prev" != "$IDLE_STAMP" ] && [ "$_body" != "$_prev" ]; then
       refresh_presence
       post_composed
       mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -1143,8 +1216,8 @@ case "$MODE" in
   stop)
     # The turn is over, so a pending ask is over with it — and the composed
     # working note is superseded by `idle`, so there is nothing left to repair.
-    rm -f "$NEEDS_INPUT_FILE" "$PENDING_TOKEN" "$NOTE_STAMP" 2>/dev/null || true
-    post_status_all '{"state":"idle"}'
+    rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
+    post_idle
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     : > "$IDLE_MARKER" 2>/dev/null || true
     ;;

@@ -3,7 +3,7 @@
  * real POSIX `sh` in an isolated HOME/state dir with a stub `curl` on PATH that
  * RECORDS every request (method + url + body) and answers `GET /me/rooms`.
  */
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1998,6 +1998,7 @@ exit 0
     ROOMS_JSON,
     SPARROW_SERVER: 'https://example.test',
     SPARROW_TOKEN: 'agk_test',
+    SPARROW_NOTE_BUDGET: '60', // ordering test: keep the deadline out of it
     ...extra,
   });
 
@@ -2020,7 +2021,7 @@ exit 0
 
     // The parent becomes blocked while A is stuck. It records needs-input, loses
     // the lock, and posts nothing.
-    runHook('notification', notify('permission_prompt'));
+    runHook('notification', notify('permission_prompt'), { SPARROW_NOTE_BUDGET: '60' });
     expect(fs.existsSync(path.join(stateDir, 'needs-input'))).toBe(true);
 
     fs.rmSync(flag, { force: true });
@@ -2153,6 +2154,9 @@ exit 0
     fs.writeFileSync(p, body);
     fs.chmodSync(p, 0o755);
   }
+  // These tests hold a hook inside its fan-out for several seconds on purpose;
+  // they are about ORDERING, so the publication budget is widened to keep the
+  // deadline (a separate concern, covered below) out of the way.
   const hookEnv = (): Record<string, string> => ({
     PATH: `${stubBin}:${process.env.PATH ?? ''}`,
     HOME: home,
@@ -2161,6 +2165,7 @@ exit 0
     ROOMS_JSON,
     SPARROW_SERVER: 'https://example.test',
     SPARROW_TOKEN: 'agk_test',
+    SPARROW_NOTE_BUDGET: '60',
   });
 
   it('is cleared by a normal single-hook post', () => {
@@ -2270,13 +2275,363 @@ exit 0
   it('a queued waiter posts nothing when the body already matches the stamp', async () => {
     writeLoopState('engaged');
     stubCurl();
-    writeSubagent('ag_1', 'explore');
-    // Publish once so the stamp is current.
-    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    // Publish once through a real boundary so the stamp is current.
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
     const before = statusPosts().length;
     expect(before).toBeGreaterThan(0);
     // A second hook with nothing to change must add no post at all.
     runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
     expect(statusPosts().length).toBe(before);
   });
+});
+
+/* ===================== THE PUBLICATION BUDGET ============================== *
+ * The binding limit is CODEX's, not Claude Code's. Codex registers these same
+ * modes with explicit per-hook timeouts (provider-codex.ts: UserPromptSubmit and
+ * PostToolUse 20s, Stop 30s), while Claude Code's default for a command hook
+ * that sets no `timeout` is 600s. So the publication path must fit inside 20s —
+ * and not just the lock wait: the fan-out and every round happen inside it too.
+ *
+ * One deadline covers the lot. A hook that reaches it stops, posts nothing
+ * further, and leaves the token set: the same honest handoff as any other
+ * budget exhaustion.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — the publication budget', () => {
+  /** A curl stub that is SLOW and mutates the token on every call, so the
+   * rounds would keep going forever if nothing bounded them. */
+  function stubSlowChurningCurl(seconds: string): void {
+    const body = `#!/bin/sh
+url=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s\\n' "$method" "$url" >> "$CURL_LOG"
+sleep ${seconds}
+# Somebody else's mutation lands during every single call — a real one, so the
+# composed BODY changes and a publisher would otherwise keep going round.
+mkdir -p "$SPARROW_STATE_DIR/subagents" 2>/dev/null || true
+n=$(ls "$SPARROW_STATE_DIR/subagents" | wc -l)
+printf '{"version":1,"agent":"c%s","type":"churn%s","at":"2026-09-18T00:00:00.000Z"}' "$n" "$n" \
+  > "$SPARROW_STATE_DIR/subagents/c$n.json"
+printf 'churn-%s' "$n" > "$SPARROW_STATE_DIR/auto-status-pending"
+case "$url" in */me/rooms) printf '%s' "$ROOMS_JSON" ;; esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+  const statusPostCount = (): number => statusPosts().length;
+
+  it('stops at the deadline, posts nothing further, and leaves the token set', () => {
+    writeLoopState('engaged');
+    stubSlowChurningCurl('1');
+    writeSubagent('ag_1', 'explore');
+    fs.writeFileSync(path.join(stateDir, 'auto-status-pending'), 'start');
+
+    const started = Date.now();
+    const r = runHook('post-tool', '{"hook_event_name":"PostToolUse"}', {
+      SPARROW_NOTE_BUDGET: '1',
+    });
+    expect(r.code).toBe(0);
+    // One publication (two rooms) and no more: the deadline stops round 1 before
+    // it composes again, where three rounds would otherwise have posted thrice.
+    expect(statusPostCount()).toBe(2);
+    expect(fs.existsSync(path.join(stateDir, 'auto-status-pending'))).toBe(true);
+    // And it did not sit there for three slow rounds.
+    expect(Date.now() - started).toBeLessThan(8_000);
+  }, 20_000);
+
+  it('the ordinary path finishes far inside the budget', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const started = Date.now();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(fs.existsSync(path.join(stateDir, 'auto-status-pending'))).toBe(false);
+  });
+});
+
+/* ============== EVERY MODE, EXECUTED, WITH STDERR WATCHED ================== *
+ * `sh -n` cannot catch an unset-variable abort, and a green suite did not catch
+ * one either: `$SUBAGENT_NOTE_STAMP` was never assigned, and under `set -u` the
+ * expansion killed the SUBSHELL it sat in — leaving an empty value, a spurious
+ * post, and a stream of stderr nobody was reading. So these assert the exit
+ * status AND that stderr is silent AND the side effect, for every mode.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — every mode runs clean', () => {
+  const runFull = (mode: string, input: string, extra: Record<string, string> = {}) =>
+    spawnSync('sh', [SCRIPT, mode], {
+      input,
+      encoding: 'utf8',
+      env: {
+        PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+        HOME: home,
+        SPARROW_STATE_DIR: stateDir,
+        CURL_LOG: curlLog,
+        ROOMS_JSON,
+        SPARROW_SERVER: 'https://example.test',
+        SPARROW_TOKEN: 'agk_test',
+        ...extra,
+      },
+    });
+
+  const MODES: [string, string][] = [
+    ['prompt', '{"hook_event_name":"UserPromptSubmit","prompt":"hi"}'],
+    ['post-tool', '{"hook_event_name":"PostToolUse"}'],
+    ['notification', '{"hook_event_name":"Notification","notification_type":"permission_prompt","notification_data":{}}'],
+    ['notification', '{"hook_event_name":"Notification","notification_type":"idle_prompt","notification_data":{}}'],
+    ['notification', '{"hook_event_name":"Notification","notification_type":"quota_auto_resume_fired","notification_data":{}}'],
+    ['stop', '{"hook_event_name":"Stop"}'],
+    ['stop-failure', '{"hook_event_name":"StopFailure","error_type":"rate_limit","session_id":"s","prompt_id":"p"}'],
+    ['subagent-start', '{"hook_event_name":"SubagentStart","agent_id":"ag_1","agent_type":"explore"}'],
+    ['subagent-stop', '{"hook_event_name":"SubagentStop","agent_id":"ag_1","agent_type":"explore"}'],
+  ];
+
+  for (const [mode, input] of MODES) {
+    const label = /"notification_type":"([a-z_]+)"/.exec(input)?.[1] ?? mode;
+    it(`${mode} (${label}) exits 0 with nothing on stderr`, () => {
+      writeLoopState('engaged');
+      stubCurl();
+      const r = runFull(mode, input);
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+    });
+  }
+
+  it('the post-tool backstop path runs and still refreshes presence', () => {
+    // The exact path the unset variable broke: a stamp exists, nothing drifted,
+    // so the backstop must fall through to the throttled presence refresh.
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    const before = presencePosts().length;
+    const r = runFull('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(r.stderr).toBe('');
+    expect(r.status).toBe(0);
+    expect(presencePosts().length).toBeGreaterThan(before); // presence still fires
+  });
+
+  it('the backstop repairs a drift on that same path, cleanly', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    writeSubagent('ag_2', 'code-review'); // drift with no hook behind it
+    fs.writeFileSync(path.join(stateDir, 'auto-status-pending'), 'drift');
+    const r = runFull('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(r.stderr).toBe('');
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(path.join(stateDir, 'auto-status-note'), 'utf8')).toBe(
+      'working (2 subagents: code-review, explore)',
+    );
+  });
+});
+
+describe('sparrow-auto-status.sh — idle is published in order', () => {
+  it('idle lands LAST when a slow publisher is still mid-fan-out', async () => {
+    // THE BARRIER. A `subagent-start` is stuck in its fan-out holding the lock
+    // when the turn ends. Before idle was part of the ordered path, it posted
+    // straight past and the older `working (1 subagent: …)` landed afterwards,
+    // resurrecting a finished turn.
+    writeLoopState('engaged');
+    const flag = path.join(stubBin, 'hang');
+    fs.writeFileSync(flag, '');
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+case "$url" in
+  */me/rooms)
+    if [ -f "${flag}" ] && [ ! -f "${flag}.used" ]; then
+      : > "${flag}.used"
+      n=0
+      while [ -f "${flag}" ] && [ "$n" -lt 100 ]; do sleep 0.05; n=$((n + 1)); done
+    fi
+    printf '%s' "$ROOMS_JSON"
+    ;;
+esac
+exit 0
+`;
+    fs.writeFileSync(path.join(stubBin, 'curl'), body);
+    fs.chmodSync(path.join(stubBin, 'curl'), 0o755);
+    const env = {
+      PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+      HOME: home,
+      SPARROW_STATE_DIR: stateDir,
+      CURL_LOG: curlLog,
+      ROOMS_JSON,
+      SPARROW_SERVER: 'https://example.test',
+      SPARROW_TOKEN: 'agk_test',
+      SPARROW_NOTE_BUDGET: '60',
+    };
+
+    const a = spawn('sh', [SCRIPT, 'subagent-start'], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+    a.stdin.end(subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    const deadline = Date.now() + 5_000;
+    while (
+      Date.now() < deadline &&
+      !(fs.existsSync(curlLog) && fs.readFileSync(curlLog, 'utf8').includes('/me/rooms'))
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // Release A shortly, so the stop's wait is long enough to queue behind it.
+    const releaser = spawn('sh', ['-c', `sleep 1; rm -f '${flag}'`], { stdio: 'ignore' });
+
+    runHook('stop', '{"hook_event_name":"Stop"}', { SPARROW_NOTE_BUDGET: '60' });
+    await waitExit(a);
+    await waitExit(releaser);
+
+    const posts = statusPosts();
+    expect(posts[posts.length - 1]!.body).toContain('"state":"idle"');
+    expect(fs.readFileSync(path.join(stateDir, 'auto-status-note'), 'utf8')).toBe('idle');
+  }, 30_000);
+
+  it('idle takes the lock like any other publication', () => {
+    // With the lock held by somebody else, idle waits its turn rather than
+    // racing — and when it cannot get in, it posts nothing at all.
+    writeLoopState('engaged');
+    stubCurl();
+    const lockFile = path.join(stateDir, 'auto-status-note.lock');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(lockFile, '');
+    const holder = spawn('sh', ['-c', `exec 9>>'${lockFile}'; flock 9; exec sleep 8`], { stdio: 'ignore' });
+    const before = statusPosts().length;
+    runHook('stop', '{"hook_event_name":"Stop"}');
+    expect(statusPosts().length).toBe(before);
+    holder.kill('SIGKILL');
+  }, 20_000);
+});
+
+describe('sparrow-auto-status.sh — a broken lock degrades, it does not silence', () => {
+  it('publishes anyway when flock exists but cannot be used', () => {
+    // A `flock` that exits non-zero for a reason that is not contention (here: a
+    // stub standing in for a read-only state dir or an NFS mount without
+    // locking) must fall through to the unlocked path, not swallow every post.
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-as-badlock-'));
+    for (const tool of ['sh', 'cat', 'sed', 'head', 'tr', 'cut', 'mkdir', 'rm', 'rmdir', 'date', 'stat', 'awk', 'sort', 'uniq', 'grep', 'wc', 'node', 'sleep', 'tail']) {
+      const real = execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim();
+      fs.symlinkSync(real, path.join(bin, tool));
+    }
+    fs.symlinkSync(path.join(stubBin, 'curl'), path.join(bin, 'curl'));
+    fs.writeFileSync(path.join(bin, 'flock'), '#!/bin/sh\nexit 64\n'); // usage/enviroment failure
+    fs.chmodSync(path.join(bin, 'flock'), 0o755);
+
+    writeLoopState('engaged');
+    stubCurl();
+    const r = spawnSync('sh', [SCRIPT, 'subagent-start'], {
+      input: subagentPayload('SubagentStart', 'ag_1', 'explore'),
+      encoding: 'utf8',
+      env: {
+        PATH: bin,
+        HOME: home,
+        SPARROW_STATE_DIR: stateDir,
+        CURL_LOG: curlLog,
+        ROOMS_JSON,
+        SPARROW_SERVER: 'https://example.test',
+        SPARROW_TOKEN: 'agk_test',
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(statusPosts().length).toBeGreaterThan(0);
+    expect(fs.readFileSync(path.join(stateDir, 'auto-status-note'), 'utf8')).toBe(
+      'working (1 subagent: explore)',
+    );
+    fs.rmSync(bin, { recursive: true, force: true });
+  }, 20_000);
+});
+
+describe('sparrow-auto-status.sh — a clear racing a mutation loses nothing', () => {
+  /**
+   * The token check is NOT compare-and-delete, and nothing in shell makes it
+   * one. The design does not need it to be: every mutation stamps the token
+   * BEFORE and AGAIN AFTER, so a clear that races a mutation is followed by that
+   * mutation's second stamp. This drives exactly that interleaving — the clear
+   * lands between the two stamps — and asserts the token ends SET, so the change
+   * is still recorded for a later hook.
+   */
+  it('ends with the token set when the clear lands between the two stamps', async () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const token = path.join(stateDir, 'auto-status-pending');
+    fs.mkdirSync(stateDir, { recursive: true });
+
+    // A mutator: stamp, (slow) mutate, stamp again — the second stamp landing
+    // after the publisher has already cleared.
+    fs.writeFileSync(token, 'mutator-before');
+    const mutator = spawn('sh', ['-c',
+      `sleep 1; printf '{"version":1,"agent":"ag_M","type":"plan","at":"2026-09-18T00:00:00.000Z"}' > '${path.join(stateDir, 'subagents', 'ag_M.json')}'; printf 'mutator-after' > '${token}'`,
+    ], { stdio: 'ignore' });
+    fs.mkdirSync(path.join(stateDir, 'subagents'), { recursive: true });
+
+    // The publisher runs now, sees `mutator-before`, publishes, and clears it.
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(fs.existsSync(token)).toBe(false); // cleared, mid-mutation
+
+    await waitExit(mutator);
+    // …and the mutation's own second stamp put it back, so nothing is lost.
+    expect(fs.readFileSync(token, 'utf8')).toBe('mutator-after');
+    expect(fs.existsSync(path.join(stateDir, 'subagents', 'ag_M.json'))).toBe(true);
+  }, 20_000);
+});
+
+describe('sparrow-auto-status.sh — the prompt note never outranks the parent', () => {
+  it('publishes the ask that arrives while the prompt is mid-post', async () => {
+    writeLoopState('engaged');
+    const flag = path.join(stubBin, 'hang');
+    fs.writeFileSync(flag, '');
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+case "$url" in
+  */me/rooms)
+    if [ -f "${flag}" ] && [ ! -f "${flag}.used" ]; then
+      : > "${flag}.used"
+      n=0
+      while [ -f "${flag}" ] && [ "$n" -lt 400 ]; do sleep 0.05; n=$((n + 1)); done
+    fi
+    printf '%s' "$ROOMS_JSON"
+    ;;
+esac
+exit 0
+`;
+    fs.writeFileSync(path.join(stubBin, 'curl'), body);
+    fs.chmodSync(path.join(stubBin, 'curl'), 0o755);
+    const env = {
+      PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+      HOME: home,
+      SPARROW_STATE_DIR: stateDir,
+      CURL_LOG: curlLog,
+      ROOMS_JSON,
+      SPARROW_SERVER: 'https://example.test',
+      SPARROW_TOKEN: 'agk_test',
+      SPARROW_NOTE_BUDGET: '60',
+    };
+
+    // The prompt composes `working` (its own note) and stalls in the fan-out.
+    const p = spawn('sh', [SCRIPT, 'prompt'], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+    p.stdin.end('{"hook_event_name":"UserPromptSubmit","prompt":"hi"}');
+    const deadline = Date.now() + 5_000;
+    while (
+      Date.now() < deadline &&
+      !(fs.existsSync(curlLog) && fs.readFileSync(curlLog, 'utf8').includes('/me/rooms'))
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    runHook('notification', notify('permission_prompt'), { SPARROW_NOTE_BUDGET: '60' });
+    fs.rmSync(flag, { force: true });
+    await waitExit(p);
+
+    const posted = statusPosts().map((x) => (/"note":"([^"]*)"/.exec(x.body) ?? [])[1] ?? '');
+    expect(posted[posted.length - 1]).toBe('blocked — needs your input');
+    expect(fs.readFileSync(path.join(stateDir, 'auto-status-note'), 'utf8')).toBe(
+      'blocked — needs your input',
+    );
+    // The ask is still in force, and the token's disposition matches what was
+    // actually published: nothing is owed, because the ask WAS published.
+    expect(fs.existsSync(path.join(stateDir, 'needs-input'))).toBe(true);
+    expect(fs.existsSync(path.join(stateDir, 'auto-status-pending'))).toBe(false);
+  }, 40_000);
 });
