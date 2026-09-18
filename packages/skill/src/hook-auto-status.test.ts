@@ -119,6 +119,14 @@ function log(): { method: string; url: string; body: string }[] {
     });
 }
 
+
+/** Wait for a child to exit — resolving at once if it already has (the `exit`
+ * event fires once, so attaching late would hang forever). */
+function waitExit(child: { exitCode: number | null; once: (e: string, f: () => void) => unknown }): Promise<void> {
+  if (child.exitCode !== null) return Promise.resolve();
+  return new Promise((resolve) => child.once('exit', () => resolve()));
+}
+
 const statusPosts = () => log().filter((e) => e.method === 'POST' && /\/rooms\/[^/]+\/status$/.test(e.url));
 const presencePosts = () => log().filter((e) => e.method === 'POST' && /\/me\/presence$/.test(e.url));
 
@@ -1912,15 +1920,16 @@ exit 0
       await new Promise((r) => setTimeout(r, 20));
     }
 
-    // B: the second subagent starts and runs to completion while A is stuck.
-    runHook('subagent-stop', '{"hook_event_name":"SubagentStop"}'); // no id: a no-op, just noise
+    // B: the second subagent starts while A is stuck. With the kernel lock it
+    // QUEUES rather than abandoning, so it publishes as soon as A is done.
     const b = spawn('sh', [SCRIPT, 'subagent-start'], { env, stdio: ['pipe', 'ignore', 'ignore'] });
     b.stdin.end(subagentPayload('SubagentStart', 'ag_B', 'code-review'));
-    await new Promise<void>((r) => b.on('exit', () => r()));
+    await new Promise((r) => setTimeout(r, 300)); // let B mutate and queue
 
-    // Release A and let it finish.
+    // Release A; both then finish, in whatever order the kernel grants.
     fs.rmSync(flag, { force: true });
-    await new Promise<void>((r) => a.on('exit', () => r()));
+    await waitExit(a);
+    await waitExit(b);
 
     // Both subagents are still running, so that is what the note must say —
     // whichever process happened to post last.
@@ -1929,8 +1938,345 @@ exit 0
     expect(notes[notes.length - 1]).toBe('working (2 subagents: code-review, explore)');
     // …and the stamp must describe what was actually posted, so the backstop
     // does not sit on a lie.
-    expect(fs.readFileSync(path.join(stateDir, 'auto-status-subagents'), 'utf8')).toBe(
-      '(2 subagents: code-review, explore)',
+    expect(fs.readFileSync(path.join(stateDir, 'auto-status-note'), 'utf8')).toBe(
+      'working (2 subagents: code-review, explore)',
     );
+    // Nothing left owing: the handoff token was cleared by whoever published last.
+    expect(fs.existsSync(path.join(stateDir, 'auto-status-pending'))).toBe(false);
+  }, 40_000);
+});
+
+
+/* ================= THE LOCK IS THE KERNEL'S, AND THE BODY IS WHOLE ========= *
+ * Two findings, one critical section.
+ *
+ * 1. NO RECLAMATION PROTOCOL. "Read the holder's pid, prove it dead, remove the
+ *    lock" is not an atomic compare-and-delete: two reclaimers can both prove
+ *    the same holder dead and both take the lock. Re-reading a token just before
+ *    the unlink narrows the window without closing it. So the lock is a plain
+ *    file that is NEVER unlinked and `flock` holds it — the kernel releases it
+ *    however the holder ends, so there is nothing to reclaim and nothing to go
+ *    stale. Where `flock` is absent there is NO lock at all, and convergence
+ *    (compose immediately before posting, then re-check) is what corrects the
+ *    note; that is honest and cannot wedge anything.
+ *
+ * 2. THE WHOLE BODY, COMPOSED INSIDE THE LOCK. Watching only the subagent list
+ *    could not see the PARENT's condition change: a Notification writing
+ *    `needs-input` while a held hook was mid-post left the final status as plain
+ *    `working (1 subagent: …)` with the ask invisible.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — composing under the lock', () => {
+  function stubHangingCurl(flag: string): void {
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+case "$url" in
+  */me/rooms)
+    if [ -f "${flag}" ] && [ ! -f "${flag}.used" ]; then
+      : > "${flag}.used"
+      n=0
+      while [ -f "${flag}" ] && [ "$n" -lt 200 ]; do sleep 0.05; n=$((n + 1)); done
+    fi
+    printf '%s' "$ROOMS_JSON"
+    ;;
+esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+  const notes = (): string[] =>
+    statusPosts().map((p) => (/"note":"([^"]*)"/.exec(p.body) ?? [])[1] ?? '');
+  const hookEnv = (extra: Record<string, string> = {}): Record<string, string> => ({
+    PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+    HOME: home,
+    SPARROW_STATE_DIR: stateDir,
+    CURL_LOG: curlLog,
+    ROOMS_JSON,
+    SPARROW_SERVER: 'https://example.test',
+    SPARROW_TOKEN: 'agk_test',
+    ...extra,
+  });
+
+  it("ends on the PARENT's blocked note when it arrives mid-post", async () => {
+    writeLoopState('engaged');
+    const flag = path.join(stubBin, 'hang');
+    fs.writeFileSync(flag, '');
+    stubHangingCurl(flag);
+
+    // A composes `working (1 subagent: explore)` and stalls in GET /me/rooms.
+    const a = spawn('sh', [SCRIPT, 'subagent-start'], { env: hookEnv(), stdio: ['pipe', 'ignore', 'ignore'] });
+    a.stdin.end(subagentPayload('SubagentStart', 'ag_A', 'explore'));
+    const deadline = Date.now() + 5_000;
+    while (
+      Date.now() < deadline &&
+      !(fs.existsSync(curlLog) && fs.readFileSync(curlLog, 'utf8').includes('/me/rooms'))
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    // The parent becomes blocked while A is stuck. It records needs-input, loses
+    // the lock, and posts nothing.
+    runHook('notification', notify('permission_prompt'));
+    expect(fs.existsSync(path.join(stateDir, 'needs-input'))).toBe(true);
+
+    fs.rmSync(flag, { force: true });
+    await waitExit(a);
+
+    const posted = notes();
+    expect(posted[posted.length - 1]).toBe('blocked — needs your input (1 subagent: explore)');
+    expect(fs.readFileSync(path.join(stateDir, 'auto-status-note'), 'utf8')).toBe(
+      'blocked — needs your input (1 subagent: explore)',
+    );
+  }, 25_000);
+
+  it('the backstop repairs a parent-condition change with an unchanged subagent set', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_A', 'explore'));
+    expect(notes()[notes().length - 1]).toBe('working (1 subagent: explore)');
+    // The condition changes without any subagent changing.
+    fs.writeFileSync(path.join(stateDir, 'needs-input'), new Date().toISOString());
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(notes()[notes().length - 1]).toBe('blocked — needs your input (1 subagent: explore)');
+  });
+
+  it('a holder killed mid-post blocks nobody: the kernel releases the lock', async () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const lockFile = path.join(stateDir, 'auto-status-note.lock');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(lockFile, '');
+    const holder = spawn('sh', ['-c', `exec 9>>'${lockFile}'; flock 9; exec sleep 30`], { stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 300));
+    holder.kill('SIGKILL');
+    await waitExit(holder);
+
+    const started = Date.now();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(Date.now() - started).toBeLessThan(1_500); // no waiting on a corpse
+    expect(notes()[notes().length - 1]).toBe('working (1 subagent: explore)');
+  }, 15_000);
+
+  it('a loser posts nothing and stamps nothing', async () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const lockFile = path.join(stateDir, 'auto-status-note.lock');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(lockFile, '');
+    const holder = spawn('sh', ['-c', `exec 9>>'${lockFile}'; flock 9; exec sleep 12`], { stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 300));
+
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(subagentFiles()).toEqual(['ag_1.json']); // bookkeeping still runs
+    expect(statusPosts()).toEqual([]);
+    expect(fs.existsSync(path.join(stateDir, 'auto-status-note'))).toBe(false);
+    holder.kill('SIGKILL');
+    await waitExit(holder);
   }, 20_000);
+
+  /**
+   * WITHOUT `flock` there is no lock, by design — a lock with no safe
+   * reclamation is worse than none. What corrects the note then is convergence:
+   * compose immediately before the post, re-check afterwards, post again while
+   * it keeps changing. This pins that the convergence path alone still lands on
+   * the truth, which is the limitation the comment describes.
+   */
+  it('reaches the right note by convergence alone when flock is absent', () => {
+    const nofl = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-as-nofl-'));
+    for (const tool of ['sh', 'cat', 'sed', 'head', 'tr', 'cut', 'mkdir', 'rm', 'rmdir', 'date', 'stat', 'awk', 'sort', 'uniq', 'grep', 'wc', 'node', 'sleep', 'tail']) {
+      const real = execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim();
+      fs.symlinkSync(real, path.join(nofl, tool));
+    }
+    fs.symlinkSync(path.join(stubBin, 'curl'), path.join(nofl, 'curl'));
+    writeLoopState('engaged');
+    stubCurl();
+    fs.writeFileSync(path.join(stateDir, 'needs-input'), new Date().toISOString());
+    const r = execFileSync('sh', [SCRIPT, 'subagent-start'], {
+      input: subagentPayload('SubagentStart', 'ag_1', 'explore'),
+      encoding: 'utf8',
+      env: {
+        PATH: nofl,
+        HOME: home,
+        SPARROW_STATE_DIR: stateDir,
+        CURL_LOG: curlLog,
+        ROOMS_JSON,
+        SPARROW_SERVER: 'https://example.test',
+        SPARROW_TOKEN: 'agk_test',
+      },
+    });
+    expect(r).toBe('');
+    expect(notes()[notes().length - 1]).toBe('blocked — needs your input (1 subagent: explore)');
+    fs.rmSync(nofl, { recursive: true, force: true });
+  }, 15_000);
+});
+
+/* ===================== THE HANDOFF TOKEN ================================== *
+ * A bounded publisher can drop the LAST mutation: with three rounds, a fourth
+ * marker arriving during round three is seen, the loop exits, and if every other
+ * hook has given up, nobody publishes it. So the round cap bounds one hook's
+ * WORK, and the token carries correctness: every mutation stamps it before AND
+ * after, a publisher clears it only when the value is exactly the one it
+ * observed before composing, and any later hook that finds it set publishes.
+ *
+ * What that buys is EVENTUAL repair, not immediate correctness — a
+ * `SubagentStop` can be delayed for a whole task or never arrive after a crash.
+ * Until a later hook runs, the note may be stale and the token says so.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — the handoff token', () => {
+  const TOKEN = () => path.join(stateDir, 'auto-status-pending');
+  const STAMP = () => path.join(stateDir, 'auto-status-note');
+  const notes = (): string[] =>
+    statusPosts().map((p) => (/"note":"([^"]*)"/.exec(p.body) ?? [])[1] ?? '');
+  function stubHangingCurl(flag: string): void {
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+case "$url" in
+  */me/rooms)
+    if [ -f "${flag}" ] && [ ! -f "${flag}.used" ]; then
+      : > "${flag}.used"
+      n=0
+      while [ -f "${flag}" ] && [ "$n" -lt 400 ]; do sleep 0.05; n=$((n + 1)); done
+    fi
+    printf '%s' "$ROOMS_JSON"
+    ;;
+esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+  const hookEnv = (): Record<string, string> => ({
+    PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+    HOME: home,
+    SPARROW_STATE_DIR: stateDir,
+    CURL_LOG: curlLog,
+    ROOMS_JSON,
+    SPARROW_SERVER: 'https://example.test',
+    SPARROW_TOKEN: 'agk_test',
+  });
+
+  it('is cleared by a normal single-hook post', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(fs.existsSync(TOKEN())).toBe(false);
+    expect(fs.readFileSync(STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
+  });
+
+  /** MUTATION-THEN-CLEAR: a publisher must not clear a token newer than the one
+   * it observed — even though it posted in between. */
+  it('does not clear a token stamped by a mutation that landed mid-post', async () => {
+    writeLoopState('engaged');
+    const flag = path.join(stubBin, 'hang');
+    fs.writeFileSync(flag, '');
+    stubHangingCurl(flag);
+
+    const a = spawn('sh', [SCRIPT, 'subagent-start'], { env: hookEnv(), stdio: ['pipe', 'ignore', 'ignore'] });
+    a.stdin.end(subagentPayload('SubagentStart', 'ag_A', 'explore'));
+    const deadline = Date.now() + 5_000;
+    while (
+      Date.now() < deadline &&
+      !(fs.existsSync(curlLog) && fs.readFileSync(curlLog, 'utf8').includes('/me/rooms'))
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // A mutation completes while A is mid-post, exactly as another hook would
+    // leave it: token stamped, marker written, token stamped again.
+    fs.writeFileSync(TOKEN(), 'later-1');
+    writeSubagent('ag_Z', 'code-review');
+    fs.writeFileSync(TOKEN(), 'later-2');
+
+    fs.rmSync(flag, { force: true });
+    await waitExit(a);
+
+    // A saw the newer token, went round again, and published the truth.
+    const posted = notes();
+    expect(posted[posted.length - 1]).toBe('working (2 subagents: code-review, explore)');
+    expect(fs.existsSync(TOKEN())).toBe(false);
+  }, 40_000);
+
+  /** CLEAR-THEN-MUTATION: a mutation after a publisher cleared must re-set it,
+   * and be repaired by the next hook rather than lost. */
+  it('is re-set by a mutation that lands after a clear, and repaired later', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(fs.existsSync(TOKEN())).toBe(false);
+
+    // A mutation that cannot publish: a usage limit stands, so the gate stops it
+    // before any post. The token must be left behind as the record.
+    writeMarker('20260917T180000-1.json', { at: new Date().toISOString() });
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_2', 'code-review'));
+    expect(fs.existsSync(TOKEN())).toBe(true);
+    expect(fs.readFileSync(STAMP(), 'utf8')).toBe('working (1 subagent: explore)'); // stale, and says so
+
+    // The block clears; the next hook — whatever its mode — repairs the note.
+    fs.rmSync(path.join(stateDir, 'blocked'), { recursive: true, force: true });
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(notes()[notes().length - 1]).toBe('working (2 subagents: code-review, explore)');
+    expect(fs.existsSync(TOKEN())).toBe(false);
+  });
+
+  /**
+   * THE REVIEWER'S FOUR-MARKER SEQUENCE. A is held while B, C and D each mutate
+   * and queue. Whoever publishes last must leave the note and the stamp saying
+   * FOUR — the round cap must not be able to drop the final mutation.
+   */
+  it('ends with all four subagents in the note and the stamp', async () => {
+    writeLoopState('engaged');
+    const flag = path.join(stubBin, 'hang');
+    fs.writeFileSync(flag, '');
+    stubHangingCurl(flag);
+
+    const a = spawn('sh', [SCRIPT, 'subagent-start'], { env: hookEnv(), stdio: ['pipe', 'ignore', 'ignore'] });
+    a.stdin.end(subagentPayload('SubagentStart', 'ag_A', 'explore'));
+    const deadline = Date.now() + 5_000;
+    while (
+      Date.now() < deadline &&
+      !(fs.existsSync(curlLog) && fs.readFileSync(curlLog, 'utf8').includes('/me/rooms'))
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    const rest = [
+      ['ag_B', 'code-review'],
+      ['ag_C', 'general-purpose'],
+      ['ag_D', 'plan'],
+    ].map(([id, type]) => {
+      const c = spawn('sh', [SCRIPT, 'subagent-start'], { env: hookEnv(), stdio: ['pipe', 'ignore', 'ignore'] });
+      c.stdin.end(subagentPayload('SubagentStart', id!, type!));
+      return c;
+    });
+    await new Promise((r) => setTimeout(r, 500)); // they mutate, then queue
+
+    fs.rmSync(flag, { force: true });
+    for (const c of [a, ...rest]) await waitExit(c);
+
+    expect(subagentFiles()).toEqual(['ag_A.json', 'ag_B.json', 'ag_C.json', 'ag_D.json']);
+    const want = 'working (4 subagents: code-review, explore, general-purpose +1 more)';
+    expect(notes()[notes().length - 1]).toBe(want);
+    expect(fs.readFileSync(STAMP(), 'utf8')).toBe(want);
+    expect(fs.existsSync(TOKEN())).toBe(false);
+  }, 60_000);
+
+  it('a queued waiter posts nothing when the body already matches the stamp', async () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeSubagent('ag_1', 'explore');
+    // Publish once so the stamp is current.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    const before = statusPosts().length;
+    expect(before).toBeGreaterThan(0);
+    // A second hook with nothing to change must add no post at all.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts().length).toBe(before);
+  });
 });

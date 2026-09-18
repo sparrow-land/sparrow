@@ -167,12 +167,18 @@ BLOCKED_DIR="$STATE_DIR/blocked"
 # One file per RUNNING SUBAGENT, named by its agent id (see THE SUBAGENT
 # INDICATOR below), plus the last subagent summary we posted.
 SUBAGENT_DIR="$STATE_DIR/subagents"
-SUBAGENT_NOTE_STAMP="$STATE_DIR/auto-status-subagents"
+# The FULL body last posted (not just its subagent part): every "has anything
+# changed" test compares against this, so a change in the PARENT's condition
+# counts as much as a subagent appearing.
+NOTE_STAMP="$STATE_DIR/auto-status-note"
+# Set BEFORE every mutation, cleared only by a publisher whose body was composed
+# after the token it observed (see THE HANDOFF TOKEN).
+PENDING_TOKEN="$STATE_DIR/auto-status-pending"
+# A plain file, NEVER unlinked: `flock` holds it and the kernel releases it.
+NOTE_LOCK_FILE="$STATE_DIR/auto-status-note.lock"
 # Set while a human is being asked something and NOT cleared by anything a child
 # does -- see THE PARENT'S NOTE below.
 NEEDS_INPUT_FILE="$STATE_DIR/needs-input"
-# Serialises compose-and-post across concurrent hooks (see post_composed).
-NOTE_LOCK="$STATE_DIR/auto-status-note.lock"
 # Longer than any session plausibly runs: past this a marker is a crash
 # leftover, not a subagent. The trade is deliberate -- 12h of a phantom in the
 # note is better than dropping a real long-running subagent from it.
@@ -300,6 +306,34 @@ file_age() {
 # though the turn began earlier. Accepted deliberately -- a live picture of what
 # is running beats an accurate age for a note nobody could interpret.
 
+# --- THE HANDOFF TOKEN ------------------------------------------------------
+#
+# A bounded publisher can drop the LAST mutation: with three rounds, a fourth
+# marker arriving during round three is seen, the loop exits, and if every other
+# hook has already given up, nobody publishes it. The round cap must bound one
+# hook's WORK, never correctness.
+#
+# So every mutation stamps this token BEFORE it mutates AND AGAIN AFTER, with a
+# value unique to that mutation (time-pid-sequence). The second stamp is what
+# makes it generation-safe: a publisher that read the token, composed, and posted
+# while the mutation was still in flight finds a DIFFERENT value afterwards and
+# must not clear it. A publisher clears the token only when the value is still
+# exactly the one it observed before composing.
+#
+# WHAT THIS BUYS, EXACTLY: eventual repair, not immediate correctness. A
+# publisher that runs out of rounds, or loses the lock, leaves the token set --
+# the honest on-disk record that the note is stale -- and any later hook that
+# finds it set publishes, whatever its own mode was. RESIDUAL, stated plainly: a
+# `SubagentStop` can be delayed for the length of a task, or never arrive at all
+# after an interrupt or a crash, so "a later hook" is not a promise about when.
+# Until one runs, the note may be stale and the token is the record of it.
+_pending_seq=0
+mark_pending() {
+  _pending_seq=$((_pending_seq + 1))
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s-%s-%s\n' "$(now_iso_ms)" "$$" "$_pending_seq" > "$PENDING_TOKEN" 2>/dev/null || true
+}
+
 # --- THE PARENT'S NOTE ------------------------------------------------------
 #
 # `blocked — needs your input` is the one status that asks a HUMAN to act, and a
@@ -331,7 +365,11 @@ subagent_sweep() {
     [ -f "$_sf" ] || continue
     _sa=$(file_age "$_sf")
     [ -n "$_sa" ] || continue
-    [ "$_sa" -ge "$SUBAGENT_STALE" ] 2>/dev/null && rm -f "$_sf" 2>/dev/null
+    if [ "$_sa" -ge "$SUBAGENT_STALE" ] 2>/dev/null; then
+      mark_pending
+      rm -f "$_sf" 2>/dev/null
+      mark_pending
+    fi
   done
   return 0
 }
@@ -666,9 +704,11 @@ case "$MODE" in
     _ag=$(payload_string agent_id | tr -cd 'A-Za-z0-9_-' | cut -c1-80)
     _ty=$(payload_string agent_type | tr -cd 'A-Za-z0-9_-' | cut -c1-60)
     if [ -n "$_ag" ]; then
+      mark_pending
       mkdir -p "$SUBAGENT_DIR" 2>/dev/null || true
       printf '{"version":1,"agent":"%s","type":"%s","at":"%s"}\n' \
         "$_ag" "${_ty:-unknown}" "$(now_iso_ms)" > "$SUBAGENT_DIR/$_ag.json" 2>/dev/null || true
+      mark_pending   # again: the mutation is COMPLETE, and this value proves it
     fi
     ;;
   subagent-stop)
@@ -676,7 +716,11 @@ case "$MODE" in
     # silent no-op (an older install, a swept phantom, a stop we never saw start).
     subagent_sweep
     _ag=$(payload_string agent_id | tr -cd 'A-Za-z0-9_-' | cut -c1-80)
-    [ -n "$_ag" ] && rm -f "$SUBAGENT_DIR/$_ag.json" 2>/dev/null
+    if [ -n "$_ag" ] && [ -f "$SUBAGENT_DIR/$_ag.json" ]; then
+      mark_pending
+      rm -f "$SUBAGENT_DIR/$_ag.json" 2>/dev/null
+      mark_pending
+    fi
     ;;
   post-tool)
     subagent_sweep
@@ -792,7 +836,7 @@ post_status_all() {
 post_note() {
   post_status_all "{\"state\":\"working\",\"note\":\"$(safe_json "$1")\",\"sticky\":true}"
   mkdir -p "$STATE_DIR" 2>/dev/null || true
-  printf '%s' "$2" > "$SUBAGENT_NOTE_STAMP" 2>/dev/null || true
+  printf '%s' "$1" > "$NOTE_STAMP" 2>/dev/null || true
 }
 
 # Strip anything that would break the hand-rolled JSON body (the composed note
@@ -814,7 +858,18 @@ safe_json() { printf '%s' "$1" | tr -d '"\\' | tr '\r\n\t' '   '; }
 #      hooks cannot interleave compose-and-post. Bounded wait: a hook that cannot
 #      get in posts NOTHING and stamps NOTHING rather than posting a body it
 #      composed long ago -- a loser must never leave the stamp claiming a stale
-#      note. A lock left behind by a killed hook is broken on age.
+#      note.
+#
+#      A LOCK IS BROKEN ON DEATH, NEVER ON AGE -- the same rule the arming lock
+#      settled on, and rejected an age rule for, for the same reason: age is a
+#      guess about a process, and it guesses wrong exactly when it matters. A
+#      legitimate fan-out across many rooms can outlast any timer, and a timer
+#      would then hand the lock to a waiter while the holder is still posting --
+#      two concurrent posts, older one possibly last, which is the race the lock
+#      exists to stop. So the holder writes its pid into the lock, and a waiter
+#      breaks it only on PROOF the holder is gone. A live pid, an EPERM, a
+#      missing or unreadable pid file: no proof, no break, and the waiter gives
+#      up its attempt like any other loser.
 #   2. RE-COMPOSE AFTER POSTING, and post again while the picture keeps changing
 #      (bounded). That is what makes a stale snapshot unable to win even when the
 #      other hook gave up waiting: whoever holds the lock last is responsible for
@@ -823,33 +878,73 @@ safe_json() { printf '%s' "$1" | tr -d '"\\' | tr '\r\n\t' '   '; }
 # The combination cannot be defeated by the same interleaving: every mutation
 # happens before its own hook tries the lock, so the final holder either sees it
 # while composing, or sees it in the re-check and posts again.
+# THE LOCK IS THE KERNEL'S.
+#
+# A reclamation protocol cannot be made atomic in shell: "read the holder's pid,
+# prove it dead, remove the lock" is not a compare-and-delete, so two reclaimers
+# can both prove the same holder dead and both take it -- and re-reading a token
+# just before the unlink narrows that window without closing it. (Age-based
+# breaking is worse still: a legitimate fan-out across many rooms outlasts any
+# timer, and then a LIVE holder loses its lock.) So the lock file is a stable
+# inode that is never unlinked, `flock` holds it, and the kernel releases it
+# however the holder ends -- exit, SIGKILL, container stop. Nothing to reclaim,
+# nothing to go stale.
+#
+# WAITING IS THEREFORE SAFE, so a loser QUEUES instead of abandoning: on
+# acquiring it composes fresh and posts only if the body differs from the stamp,
+# so a queue of waiters collapses to at most one extra post. The wait is still
+# bounded, per mode -- a UserPromptSubmit sits in the human's critical path and
+# waits briefly; a subagent boundary or a tool call can afford longer.
+#
+# WITHOUT `flock` (probed, never assumed) THERE IS NO LOCK AT ALL. A lock with no
+# safe reclamation is worse than none. Two concurrent hooks can then interleave,
+# and it is CONVERGENCE -- compose immediately before posting, re-check after,
+# repeat -- plus the handoff token that corrects the note; a stale note can
+# persist until the next hook runs. That is honest, and it cannot wedge anything.
 post_composed() {
-  _pc_base="$1"
-  _pc_tries=0
-  while [ "$_pc_tries" -lt 40 ]; do
-    if mkdir "$NOTE_LOCK" 2>/dev/null; then
-      _pc_round=0
-      while [ "$_pc_round" -lt 3 ]; do
-        _pc_sum=$(subagent_summary)
-        post_note "$(compose_note "$_pc_base")" "$_pc_sum"
-        [ "$(subagent_summary)" = "$_pc_sum" ] && break
-        _pc_round=$((_pc_round + 1))
-      done
-      rmdir "$NOTE_LOCK" 2>/dev/null || true
+  _pc_override="${1:-}"
+  if command -v flock >/dev/null 2>&1; then
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    if : >> "$NOTE_LOCK_FILE" 2>/dev/null; then
+      exec 9>> "$NOTE_LOCK_FILE"
+      if flock -w "${NOTE_LOCK_WAIT:-8}" 9 2>/dev/null; then
+        publish_rounds "$_pc_override"
+        exec 9>&- 2>/dev/null || true
+        return 0
+      fi
+      # Lost the wait: post nothing, stamp nothing. The token stays set, so the
+      # next hook publishes what we did not.
+      exec 9>&- 2>/dev/null || true
+      return 1
+    fi
+  fi
+  publish_rounds "$_pc_override"
+}
+
+# The critical section: compose the WHOLE desired status from current state --
+# the parent's condition, the subagent set, the usage-limit gate -- post it if it
+# differs from what was last posted, and go round again while anything changed
+# underneath. Watching only the subagent list could not see the parent become
+# blocked, which left an unanswered permission prompt invisible.
+publish_rounds() {
+  _pr_override="$1"
+  _pr_round=0
+  while [ "$_pr_round" -lt 3 ]; do
+    # A usage limit landing mid-flight outranks everything here.
+    [ -n "$(blocked_markers | head -n 1)" ] && return 0
+    _pr_token=$(cat "$PENDING_TOKEN" 2>/dev/null || printf '')
+    if [ -n "$_pr_override" ]; then _pr_base="$_pr_override"; else _pr_base=$(status_base); fi
+    _pr_body=$(compose_note "$_pr_base")
+    _pr_prev=$(cat "$NOTE_STAMP" 2>/dev/null || printf '')
+    [ "$_pr_body" != "$_pr_prev" ] && post_note "$_pr_body"
+    if [ "$(cat "$PENDING_TOKEN" 2>/dev/null || printf '')" = "$_pr_token" ]; then
+      [ -n "$_pr_token" ] && rm -f "$PENDING_TOKEN" 2>/dev/null
       return 0
     fi
-    # A lock nobody is holding any more (a hook killed mid-post) must not wedge
-    # every later one.
-    _pc_age=$(file_age "$NOTE_LOCK")
-    [ -n "$_pc_age" ] && [ "$_pc_age" -ge 30 ] 2>/dev/null && rmdir "$NOTE_LOCK" 2>/dev/null
-    if sleep 0.05 2>/dev/null; then
-      _pc_tries=$((_pc_tries + 1))
-    else
-      sleep 1
-      _pc_tries=$((_pc_tries + 20))
-    fi
+    _pr_round=$((_pr_round + 1))
   done
-  return 1
+  # Out of rounds with the token still set: left set on purpose.
+  return 0
 }
 
 # Throttle a mode via a state-dir stamp file: succeed (and re-stamp) at most once
@@ -903,6 +998,19 @@ case "$MODE" in
   *) [ -n "$(blocked_markers | head -n 1)" ] && exit 0 ;;
 esac
 
+# THE WAIT BUDGET. Measured on the installed Claude Code (2.1.272, read out of
+# the bundle): a COMMAND hook that sets no `timeout` gets the default
+# `e.timeout ? e.timeout*1000 : 600000` — 600 seconds — and our registrations set
+# none. The budget below is therefore nowhere near the harness limit; it is kept
+# small because a human is waiting, not because the timeout forces it. A
+# `UserPromptSubmit` sits in the critical path between typing and an answer, so
+# it waits 2s; a subagent boundary or a tool call waits 5s. Whatever a hook does
+# not manage inside its budget is left to the handoff token.
+case "$MODE" in
+  prompt) NOTE_LOCK_WAIT=2 ;;
+  *) NOTE_LOCK_WAIT=5 ;;
+esac
+
 # --- modes -----------------------------------------------------------------
 
 case "$MODE" in
@@ -917,7 +1025,11 @@ case "$MODE" in
       [ -n "$derived" ] && note="$derived"
     fi
     # A prompt is the parent moving on: whatever it was waiting for is over.
-    rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
+    if [ -f "$NEEDS_INPUT_FILE" ]; then
+      mark_pending
+      rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
+      mark_pending
+    fi
     # Whoever is running under this turn goes in the note too (capped at 140).
     refresh_presence
     post_composed "$note"
@@ -929,7 +1041,7 @@ case "$MODE" in
     # exactly when someone is watching and wondering. The cost is the `sinceAt`
     # reset named above.
     refresh_presence
-    post_composed "$(status_base)"
+    post_composed
     rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;
   notification)
@@ -938,10 +1050,12 @@ case "$MODE" in
         # A human is being asked something — we are stuck until they answer. The
         # condition outlives this hook (see THE PARENT'S NOTE), so it is recorded
         # rather than only posted.
+        mark_pending
         mkdir -p "$STATE_DIR" 2>/dev/null || true
         printf '%s\n' "$(now_iso_ms)" > "$NEEDS_INPUT_FILE" 2>/dev/null || true
+        mark_pending
         refresh_presence
-        post_composed 'blocked — needs your input'
+        post_composed
         rm -f "$IDLE_MARKER" 2>/dev/null || true
         ;;
       quota_auto_resume_fired)
@@ -970,7 +1084,7 @@ case "$MODE" in
         # agent is not working, so say idle — and KEEP the resume marker so the
         # next turn's first tool call restores "working" (an idle_prompt can
         # arrive before a monitor-triggered turn). No presence refresh.
-        rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
+        rm -f "$NEEDS_INPUT_FILE" "$PENDING_TOKEN" "$NOTE_STAMP" 2>/dev/null || true
         post_status_all '{"state":"idle"}'
         mkdir -p "$STATE_DIR" 2>/dev/null || true
         [ -f "$IDLE_MARKER" ] || : > "$IDLE_MARKER" 2>/dev/null || true
@@ -991,7 +1105,7 @@ case "$MODE" in
       refresh_presence
       # NOT a clearing point: a tool call is not evidence the parent's ask was
       # answered (a child doing tool calls while the parent waits is the case).
-      post_composed "$(status_base)"
+      post_composed
       mkdir -p "$STATE_DIR" 2>/dev/null || true
       : > "$POST_STAMP" 2>/dev/null || true
       wait 2>/dev/null || true
@@ -1007,7 +1121,7 @@ case "$MODE" in
     _prev=$(cat "$SUBAGENT_NOTE_STAMP" 2>/dev/null || printf '')
     if [ "$_sum" != "$_prev" ]; then
       refresh_presence
-      post_composed "$(status_base)"
+      post_composed
       mkdir -p "$STATE_DIR" 2>/dev/null || true
       : > "$POST_STAMP" 2>/dev/null || true
       wait 2>/dev/null || true
@@ -1027,8 +1141,9 @@ case "$MODE" in
     rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;
   stop)
-    # The turn is over, so a pending ask is over with it.
-    rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
+    # The turn is over, so a pending ask is over with it — and the composed
+    # working note is superseded by `idle`, so there is nothing left to repair.
+    rm -f "$NEEDS_INPUT_FILE" "$PENDING_TOKEN" "$NOTE_STAMP" 2>/dev/null || true
     post_status_all '{"state":"idle"}'
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     : > "$IDLE_MARKER" 2>/dev/null || true
@@ -1036,6 +1151,21 @@ case "$MODE" in
   *)
     exit 0
     ;;
+esac
+
+# THE REPAIR STEP. A token still on disk means somebody's mutation never reached
+# the note, so this hook publishes it — whatever its own mode was, and even if
+# that mode would not otherwise post. Skipped where the intended state is `idle`
+# (a stop, or the idle notification), which supersedes the composed note.
+case "$MODE" in
+  stop) ;;
+  notification)
+    case "$ntype" in
+      idle_prompt) ;;
+      *) [ -f "$PENDING_TOKEN" ] && post_composed ;;
+    esac
+    ;;
+  *) [ -f "$PENDING_TOKEN" ] && post_composed ;;
 esac
 
 # Let backgrounded presence finish without holding the session (bounded by its
