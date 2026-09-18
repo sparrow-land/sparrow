@@ -182,6 +182,33 @@ PENDING_LEGACY="$STATE_DIR/auto-status-pending"
 # Written by `stop` BEFORE it tries to publish, so the INTENT to go idle is
 # durable state rather than one process's plan (see IDLE IS OWED, NOT INTENDED).
 IDLE_OWED="$STATE_DIR/auto-status-idle-owed"
+# --- WHEN THE ROOMS DISAGREE WITH THE STAMP ---------------------------------
+#
+# $NOTE_STAMP means ONE thing: "this is what EVERY room was last told". A fan-out
+# that reached some rooms and not others makes that sentence false of the world,
+# and the single stamp cannot express which rooms -- so the fact was kept only
+# inside the process that discovered it, and died with it.
+#
+# The consequence (coordinator, 2026-09-18), with no failure needed after the
+# first: a publisher posts body B to rooms 1-3 of 10 and stops (budget gone, or
+# their POSTs refused). Correctly, nothing is stamped and nothing acknowledged,
+# so the stamp still reads A. The state then REVERTS to A -- a subagent starts
+# and stops -- and the next publisher composes A, finds it equal to the stamp,
+# posts nothing, and acknowledges everything. Rooms 1-3 show B forever: the
+# drift check compares one composed body against one global stamp and they
+# agree, so only a later publication of some DIFFERENT body, or a stop's idle,
+# ever heals it.
+#
+# So the divergence is written down. While this marker stands, a publisher posts
+# even when its body equals the stamp, because the stamp is not true of every
+# room. It is NOT the pending records: those are answered by an idle (idle
+# supersedes any composed note), whereas a working note delivered to three rooms
+# of ten is answered by nothing except a complete publication.
+#
+# SET AND CLEARED IN ONE PLACE, `post_status_all`, so every publication path --
+# composed notes, idle, and the literal blocked/quota bodies -- is covered by
+# construction.
+NOTE_DIVERGED="$STATE_DIR/auto-status-diverged"
 # A plain file, NEVER unlinked: `flock` holds it and the kernel releases it.
 NOTE_LOCK_FILE="$STATE_DIR/auto-status-note.lock"
 # Set while a human is being asked something and NOT cleared by anything a child
@@ -390,15 +417,12 @@ pending_ack() {
   return 0
 }
 
-# Nothing is owed any more (only `idle` may say this: it supersedes every
-# composed note, so every outstanding mutation is answered by it).
-pending_clear() {
-  [ -d "$PENDING_DIR" ] || return 0
-  for _pc in "$PENDING_DIR"/*; do
-    [ -f "$_pc" ] && rm -f "$_pc" 2>/dev/null
-  done
-  return 0
-}
+# Does anything on disk say the note is not yet true of the world? Either a
+# mutation nobody published, or a publication that reached only some rooms. The
+# repair step's whole question, and the two answers are not interchangeable:
+# markers are answered by any publication that covers them, divergence only by a
+# complete fan-out.
+repair_owed() { pending_any || [ -f "$NOTE_DIVERGED" ]; }
 
 # MIGRATION, once per hook run. An install upgrading in place can have a legacy
 # single-token regular file at the old path. It records a real mutation, so it is
@@ -409,22 +433,43 @@ pending_migrate() {
   rm -f "$PENDING_LEGACY" 2>/dev/null || true
 }
 
-# BOUND THE GROWTH. Names are never reused, so nothing overwrites anything and a
-# host whose posts always fail (no network, wrong token, a permanently held
-# lock) would accumulate one marker per mutation forever. A marker this old will
-# never be usefully repaired -- the note it was owed describes a turn that ended
-# hours ago -- so it is swept, once per hook run, exactly like a stale subagent.
+# BOUND THE STORAGE, NOT THE DEBT. Names are never reused, so nothing overwrites
+# anything and a host whose publications never succeed -- no network, a wrong
+# token, a permanently held lock -- would accumulate one marker per mutation
+# forever. That is a STORAGE problem, and it is the only problem here.
+#
+# AGE IS NOT STALENESS, and the first version of this comment claimed it was:
+# "a marker this old will never be usefully repaired -- the note it was owed
+# describes a turn that ended hours ago". That is simply false. A marker carries
+# no note. It carries one fact -- "a publication is owed" -- and the body is
+# composed from CURRENT state at publish time, so an hour-old marker sitting
+# next to a live subagent is exactly as valid as a fresh one. Deleting markers
+# on age therefore destroyed the only repair signal there was: after an outage,
+# the sweep cleared the debt, the absent-stamp rule made the post-tool backstop
+# stand down, the repair step found nothing owed, and a running subagent was
+# never shown at all.
+#
+# SO THE DEBT IS COALESCED, NEVER DISCARDED: every marker past the threshold is
+# replaced by ONE fresh marker. An arbitrarily long outage collapses to a single
+# outstanding marker plus whatever arrived recently, which is the bound; the
+# fact that something is owed survives, which is the meaning. The replacement is
+# stamped NOW, so it cannot be swept on this run or the next, and if it ever is
+# old enough to be swept it is coalesced again -- the debt has no way to reach
+# zero except by being published.
 PENDING_STALE="${SPARROW_PENDING_STALE:-3600}"
 pending_sweep() {
   [ -d "$PENDING_DIR" ] || return 0
+  _psw_found=0
   for _ps in "$PENDING_DIR"/*; do
     [ -f "$_ps" ] || continue
     _pg=$(file_age "$_ps")
     [ -n "$_pg" ] || continue
     if [ "$_pg" -ge "$PENDING_STALE" ] 2>/dev/null; then
       rm -f "$_ps" 2>/dev/null
+      _psw_found=1
     fi
   done
+  [ "$_psw_found" = 1 ] && mark_pending
   return 0
 }
 
@@ -971,9 +1016,21 @@ safe_note() {
 # whole hook. Now the fan-out stops the moment the budget is gone, and a
 # TRUNCATED fan-out is a different fact from a finished one: some rooms were
 # never told, so nothing downstream may claim they were. That is what the exit
-# status carries -- 0 COMPLETE (every room in the capped list was attempted),
+# status carries -- 0 COMPLETE (every room in the capped list was DELIVERED TO),
 # 1 PARTIAL -- and it is why `post_note` will not stamp and `publish_rounds`
 # will not acknowledge on a 1.
+#
+# DELIVERED, NOT ATTEMPTED. The count used to increment under a `curl ... ||
+# true`, so a fan-out whose every write was refused reported COMPLETE and the
+# stamp claimed rooms had been told that never heard anything (reviewer,
+# 2026-09-18: a valid one-room listing whose status POST exits 22). `-f` already
+# makes an HTTP error status a curl failure, so the test is simply whether curl
+# exited 0; a transport error, a timeout and a 500 are all "this room was not
+# told". NOTHING IS RETRIED HERE -- the pending record is the retry mechanism,
+# and retrying inside the loop would spend the budget the other rooms need.
+#
+# AND A DIVERGENT FAN-OUT IS RECORDED ON DISK ($NOTE_DIVERGED), because it is a
+# fact that outlives this process -- see WHEN THE ROOMS DISAGREE below.
 #
 # THE LOOP RUNS IN THIS SHELL, NOT A SUBSHELL. It used to be `room_ids | while`,
 # and a pipeline's loop body is a subshell that cannot report anything back --
@@ -1009,14 +1066,39 @@ EOF
     [ "$_ps_left" -gt 0 ] 2>/dev/null || break
     _ps_max=4
     [ "$_ps_left" -lt "$_ps_max" ] 2>/dev/null && _ps_max="$_ps_left"
-    curl -fsS --max-time "$_ps_max" -X POST "$server/api/v1/rooms/$rid/status" \
+    # Counted only on a 0 exit: with `-f`, that means the room actually took it.
+    if curl -fsS --max-time "$_ps_max" -X POST "$server/api/v1/rooms/$rid/status" \
       -H "authorization: Bearer $token" -H 'content-type: application/json' \
-      -d "$_ps_body" >/dev/null 2>&1 || true
-    _ps_sent=$((_ps_sent + 1))
+      -d "$_ps_body" >/dev/null 2>&1; then
+      _ps_sent=$((_ps_sent + 1))
+    fi
   done <<EOF
 $_ps_rooms
 EOF
-  [ "$_ps_sent" -eq "$_ps_total" ] 2>/dev/null
+  if [ "$_ps_sent" -eq "$_ps_total" ] 2>/dev/null; then
+    # Every room in the capped list took this body, so no room disagrees with
+    # the stamp that is about to be written. That holds VACUOUSLY when the list
+    # was empty: a successful listing that found no rooms means there is no room
+    # to disagree, and it would be incoherent to stamp "every room was told
+    # this" (which `post_note` does for the same reason) while still claiming
+    # some room was not. RESIDUAL, named: a room that diverged and was then
+    # archived or left, and later returns, is not tracked -- per-room truth
+    # would need per-room state, which this design deliberately does not keep.
+    rm -f "$NOTE_DIVERGED" 2>/dev/null || true
+    return 0
+  fi
+  # SOMETHING LANDED, BUT NOT EVERYWHERE. The rooms that took it now hold a body
+  # the others do not, and the stamp (deliberately not written) describes
+  # neither group. Recorded, because that fact outlives this process.
+  #
+  # Nothing landed at all (`_ps_sent` = 0) is a different case and must NOT set
+  # it: no room's contents changed, so no new divergence was created -- and it
+  # must not CLEAR it either, which is why only the complete branch above does.
+  if [ "$_ps_sent" -gt 0 ] 2>/dev/null; then
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    : > "$NOTE_DIVERGED" 2>/dev/null || true
+  fi
+  return 1
 }
 
 # Post a composed note to every room AND remember the subagent part of it, so
@@ -1144,16 +1226,55 @@ IDLE_STAMP='idle'
 #
 # IT USES THE SAME BOUNDED FAN-OUT as every other publication, and treats a
 # truncated one the same way: no stamp, nothing acknowledged, and `IDLE_OWED`
-# left standing so the next hook finishes the job.
+# left standing so the next hook finishes the job. THAT IS DELIBERATE on the
+# flag as well as the markers: if some rooms never heard idle, the turn's end is
+# still owed to them, so the intent has to outlive this attempt too.
+#
+# IT ACKNOWLEDGES BY SNAPSHOT, like everything else in this file. It used to
+# clear the WHOLE directory, and that was the original compare-and-delete
+# mistake surviving in the one place a bulk clear was left (reviewer,
+# 2026-09-18): a `permission_prompt` arriving while a held `stop` was inside its
+# room GET wrote its own markers and cleared the idle intent correctly, and then
+# the stop's bulk clear deleted markers it had never covered -- leaving `idle`
+# standing while a human was being asked to act, with nothing on disk owed.
+# Idle genuinely answers every mutation that existed BEFORE it was composed,
+# because idle supersedes any composed note; it answers nothing that arrived
+# afterwards, and the snapshot is exactly that distinction.
+#
+# THE INTENT IS READ AS LATE AS IT CAN BE, immediately before dispatch, when
+# this publication exists only because the flag said so ($1 = owed). An ask that
+# has already cancelled the intent therefore wins outright rather than being
+# published over and corrected afterwards. Once the fan-out IS in flight that is
+# no longer possible, and the honest outcome is a visible idle-then-blocked
+# transition that the next round corrects -- a race resolving in the open. There
+# is no retroactive cancellation here and none is implied anywhere.
+#
+# THE FLAG IS CLEARED ONLY WHEN NOTHING IS OUTSTANDING. Another `stop` can write
+# its own intent (and its own markers) while this fan-out runs, and removing the
+# flag unconditionally would drop that one exactly the way the bulk clear
+# dropped markers. If anything is still owed, the flag stands and the next round
+# decides afresh.
+#
+# Returns: 0 published, 1 incomplete (flag and markers stand), 2 stood down
+# because the intent was cancelled before dispatch.
 publish_idle() {
-  post_status_all '{"state":"idle"}' || return 0
+  _pi_why="${1:-}"
+  _pi_names=$(pending_names)
+  [ "$_pi_why" = owed ] && [ ! -f "$IDLE_OWED" ] && return 2
+  post_status_all '{"state":"idle"}' || return 1
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   printf '%s' "$IDLE_STAMP" > "$NOTE_STAMP" 2>/dev/null || true
-  pending_clear                               # nothing is owed any more
-  rm -f "$IDLE_OWED" 2>/dev/null || true      # …and idle is no longer owed
+  pending_ack "$_pi_names"
+  pending_any || rm -f "$IDLE_OWED" 2>/dev/null || true
   return 0
 }
 
+# The direct idle path, now used by ONE caller: the `idle_prompt` notification.
+# It never sets $IDLE_OWED -- the turn ended long before (a stop already ran),
+# nothing is racing it, and there is no intent for a later round to reconsider --
+# so it publishes idle once, ordered by the lock like everything else. The `stop`
+# mode deliberately does NOT come through here: it records the intent and goes
+# through `publish_rounds`, which can reconcile what lands mid-fan-out.
 post_idle() { post_composed_with publish_idle; }
 
 # The critical section: compose the WHOLE desired status from current state --
@@ -1177,7 +1298,31 @@ publish_rounds() {
     # sees it on its next round, and a queued publisher honours a stop whose own
     # lock wait expired. Composing a `working` note now would resurrect a
     # finished turn.
-    if [ -f "$IDLE_OWED" ]; then publish_idle; return 0; fi
+    #
+    # IT IS AN ORDINARY ROUND OUTCOME, NOT AN EXIT. Publishing idle and returning
+    # made this loop unable to reconcile anything that arrived during the idle
+    # fan-out -- and for the `stop` mode, which the repair step deliberately
+    # skips, "unable" meant "never". So idle publishes, acknowledges its own
+    # snapshot, and the loop GOES ROUND AGAIN: the next round re-reads the flag
+    # (an ask may have cancelled it), composes against a stamp that now reads
+    # `idle`, and publishes the truth. The round cap bounds the whole thing.
+    #
+    # The "never post a body composed before the last publication" guard below is
+    # stable across that hand-off: the only thing that moved the stamp is our own
+    # `publish_idle`, in this process, before this round composed anything --
+    # checked, not assumed.
+    if [ -f "$IDLE_OWED" ]; then
+      publish_idle owed
+      _pr_rc=$?
+      # Incomplete: rooms are still owed the end of the turn, and so is the note.
+      [ "$_pr_rc" -eq 1 ] && return 0
+      # Published, and nothing arrived while it ran: done.
+      [ "$_pr_rc" -eq 0 ] && { pending_any || return 0; }
+      # rc 2 means the intent was cancelled before dispatch; either way, go round
+      # and decide again from what is on disk now.
+      _pr_round=$((_pr_round + 1))
+      continue
+    fi
     # THE SNAPSHOT: the names on disk BEFORE anything is read or composed. What
     # this body publishes is exactly what these names were owed.
     _pr_names=$(pending_names)
@@ -1202,7 +1347,12 @@ publish_rounds() {
       _pr_round=$((_pr_round + 1))
       continue
     fi
-    if [ "$_pr_body" != "$_pr_prev" ]; then
+    # POST WHEN THE BODY CHANGED, OR WHEN THE STAMP IS NOT TRUE OF EVERY ROOM.
+    # The second case is the one a single global stamp cannot see: after a
+    # divergent fan-out the stamp describes neither group of rooms, so "body
+    # equals stamp" is not evidence that anybody already has it (see WHEN THE
+    # ROOMS DISAGREE). Posting is what heals the rooms that were left behind.
+    if [ "$_pr_body" != "$_pr_prev" ] || [ -f "$NOTE_DIVERGED" ]; then
       # A TRUNCATED PUBLICATION ACKNOWLEDGES NOTHING: some rooms never heard it,
       # so every snapshotted mutation is still owed and stays on disk.
       post_note "$_pr_body" || return 0
@@ -1217,6 +1367,28 @@ publish_rounds() {
   done
   # Out of rounds with markers still on disk: left standing on purpose.
   return 0
+}
+
+# THE `stop` MODE'S PUBLISHER: the ordinary rounds, behind one guard.
+#
+# Going through `publish_rounds` is what lets a stop reconcile whatever landed
+# during its own idle fan-out (see the `stop` mode). But the rounds decide what
+# to publish from the FLAG, and by the time this hook finally holds the lock the
+# flag may be gone -- either another publisher honoured the intent on our behalf
+# (it publishes idle when it sees the flag, exactly as designed), or a prompt or
+# an ask cancelled it because the turn came back to life.
+#
+# In both cases this invocation has nothing left to say, and saying something
+# would be actively wrong: `publish_rounds` with no flag composes a `working`
+# note, which would resurrect a turn that has ended or contradict the prompt
+# that revived it. So a stop that arrives to find the intent already resolved
+# stands down, and posts nothing.
+#
+# The guard reads the flag AFTER the lock is held, which is the latest point at
+# which standing down is still free.
+publish_stop() {
+  [ -f "$IDLE_OWED" ] || return 0
+  publish_rounds "$@"
 }
 
 # Throttle a mode via a state-dir stamp file: succeed (and re-stamp) at most once
@@ -1352,19 +1524,29 @@ case "$MODE" in
         # AND IT CANCELS WHAT IDLE WAS OWED, for the same reason a prompt does: a
         # dialog cannot be open on a turn that has ended, so being asked is proof
         # the turn is live. Without this, a stop whose publication failed left
-        # `IDLE_OWED` standing, `publish_rounds` published `idle` instead of the
-        # ask, and `publish_idle`'s clear took the ask's own markers with it --
-        # leaving `idle` on the board with nothing on disk to repair it. Nor
-        # could anything: the repair step finds nothing owed, and the post-tool
-        # backstop cannot run because the tool call is blocked on the very dialog
-        # nobody has answered. The status would then read `idle` for exactly as
-        # long as a human is being asked to act. That is the failure THE PARENT'S
-        # NOTE exists to prevent, reached by another road, and it is reachable:
-        # an autonomous turn resumes with no UserPromptSubmit and its first tool
-        # call needs permission, so the Notification is the turn's FIRST hook.
+        # `IDLE_OWED` standing and the next publisher posted `idle` instead of
+        # the ask -- and nothing could put it right afterwards: the post-tool
+        # backstop cannot run, because the tool call is blocked on the very
+        # dialog nobody has answered. The status would then read `idle` for
+        # exactly as long as a human is being asked to act. That is the failure
+        # THE PARENT'S NOTE exists to prevent, reached by another road, and it is
+        # reachable: an autonomous turn resumes with no UserPromptSubmit and its
+        # first tool call needs permission, so the Notification is the turn's
+        # FIRST hook.
+        #
+        # WHAT THIS DOES AND DOES NOT PROMISE. Clearing the flag wins outright
+        # whenever it happens before an idle fan-out dispatches -- `publish_idle`
+        # re-reads the intent immediately before it posts for exactly that
+        # reason. Once idle IS in flight, this does not reach back and stop it:
+        # the room shows idle and the following round posts the ask over it. A
+        # brief idle-then-blocked transition is the honest outcome of a race that
+        # resolved the other way, and no cancellation of an in-flight publication
+        # is implied here or anywhere else.
         #
         # The unlink sits INSIDE the double stamp with the mutation it belongs
-        # to, so the record of it survives a publication that cannot complete.
+        # to, so the record of it survives a publication that cannot complete --
+        # and since `publish_idle` acknowledges by snapshot, an idle already in
+        # flight can no longer delete these markers either.
         #
         # NOT WIDENED TO THE SUBAGENT BOUNDARIES, deliberately: a subagent
         # boundary racing a stop is exactly the holder that finding 2's fix
@@ -1496,11 +1678,21 @@ case "$MODE" in
     # `idle` overtaken by the holder's `working`, which then stands until the
     # next turn's first hook. That is the same honest limitation the unlocked
     # path carries everywhere else.
+    #
+    # AND IT PUBLISHES THROUGH THE ORDINARY LOOP, not a private idle path. The
+    # flag is what tells `publish_rounds` that idle is the right publication, so
+    # this mode has nothing special left to say -- and going through the loop is
+    # what lets a mutation that lands DURING the idle fan-out be reconciled in
+    # the following round. On the private path it could not be: the repair step
+    # at the bottom is skipped for this mode, so there was nothing after the
+    # fan-out at all. `publish_stop` is that loop plus the one guard the change
+    # needs -- stand down if the intent is already resolved by the time we hold
+    # the lock.
     mark_pending
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     : > "$IDLE_OWED" 2>/dev/null || true
     mark_pending
-    post_idle
+    post_composed_with publish_stop
     : > "$IDLE_MARKER" 2>/dev/null || true
     ;;
   *)
@@ -1508,21 +1700,28 @@ case "$MODE" in
     ;;
 esac
 
-# THE REPAIR STEP. A marker still on disk means somebody's mutation never reached
-# the note, so this hook publishes it — whatever its own mode was, and even if
-# that mode would not otherwise post. (And if `IDLE_OWED` is what is outstanding,
-# `publish_rounds` turns this into the idle publication a stop could not make.)
-# Skipped where the intended state is `idle` (a stop, or the idle notification),
-# which supersedes the composed note and has already published it itself.
+# THE REPAIR STEP. Anything still owed on disk means the note is not yet true of
+# the world, so this hook publishes it — whatever its own mode was, and even if
+# that mode would not otherwise post. TWO KINDS OF DEBT, both durable: a marker
+# (somebody's mutation never reached the note) and the divergence flag (a
+# publication reached only some rooms, so the stamp is true of none of them).
+# The second needs its own answer because a later publisher can compose a body
+# that equals the stamp and would otherwise stand down. (And if `IDLE_OWED` is
+# what is outstanding, `publish_rounds` turns this into the idle publication a
+# stop could not make.)
+#
+# Skipped where the intended state is `idle` (a stop, or the idle notification):
+# both publish through the loop themselves, and for `stop` that loop now also
+# reconciles whatever landed during its fan-out.
 case "$MODE" in
   stop) ;;
   notification)
     case "$ntype" in
       idle_prompt) ;;
-      *) pending_any && post_composed ;;
+      *) repair_owed && post_composed ;;
     esac
     ;;
-  *) pending_any && post_composed ;;
+  *) repair_owed && post_composed ;;
 esac
 
 # Let backgrounded presence finish without holding the session (bounded by its

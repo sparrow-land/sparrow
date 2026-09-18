@@ -3014,7 +3014,7 @@ describe('sparrow-auto-status.sh — pending markers migrate and are bounded', (
     expect(pendingNames()).toHaveLength(1);
   });
 
-  it('sweeps markers older than an hour and keeps the fresh ones', () => {
+  it('bounds markers older than an hour without dropping the debt', () => {
     writeLoopState('engaged');
     stubCurl();
     writeMarker('20260918T000000-1.json', { at: new Date().toISOString() });
@@ -3025,7 +3025,12 @@ describe('sparrow-auto-status.sh — pending markers migrate and are bounded', (
 
     runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
 
-    expect(pendingNames()).toEqual(['fresh-one']);
+    // The aged marker is replaced, not deleted: age cannot establish that a
+    // publication is no longer owed (see the sweep's own section, and the
+    // dedicated coverage below).
+    expect(pendingNames()).toHaveLength(2);
+    expect(pendingNames()).toContain('fresh-one');
+    expect(pendingNames()).not.toContain('stale-one');
   });
 });
 
@@ -3265,4 +3270,415 @@ exit 0
       fs.rmSync(bin, { recursive: true, force: true });
     });
   }
+});
+
+/** The durable "some rooms hold a body the others do not" record. */
+const DIVERGED = () => path.join(stateDir, 'auto-status-diverged');
+
+/* ===== DEFECT 3: DELIVERED, NOT ATTEMPTED ================================== *
+ * Reviewer, third round. The POST was written `curl … || true` with the counter
+ * incrementing underneath it, so a fan-out whose every write was refused still
+ * reported COMPLETE: the stamp claimed rooms had been told what they had never
+ * heard, and every pending marker was acknowledged. Same error as the failed
+ * listing, one level down — the listing learned to distinguish "could not find
+ * out" from "nothing to do", while each individual write still read "refused,
+ * 500, or timed out" as "delivered".
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — a room is told only when the POST succeeds', () => {
+  /** A curl whose status POSTs fail for the room ids in `failing` (all, if empty). */
+  function stubCurlStatusPostsFail(failing: string[] = []): void {
+    const guard =
+      failing.length === 0
+        ? '  */status) exit 22 ;;'
+        : failing.map((id) => `  */rooms/${id}/status) exit 22 ;;`).join('\n') + '\n  */status) exit 0 ;;';
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+case "$url" in
+  */me/rooms) printf '%s' "$ROOMS_JSON"; exit 0 ;;
+${guard}
+esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+
+  const ONE_ROOM = JSON.stringify({
+    items: [
+      { room: { id: 'rom_only', name: 'O', orgId: 'org_1', kind: 'dm', archivedAt: null }, memberId: 'm', roomRole: 'member' },
+    ],
+  });
+
+  it('a single room whose status POST is refused is not a complete fan-out', () => {
+    writeLoopState('engaged');
+    stubCurlStatusPostsFail();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'), {
+      ROOMS_JSON: ONE_ROOM,
+    });
+
+    // It tried (and the repair step retried once, which is the loop doing its
+    // job) — every attempt aimed at the one room, and none of them landed.
+    expect(statusPosts().length).toBeGreaterThan(0);
+    for (const p of statusPosts()) expect(p.url).toContain('rom_only');
+    expect(fs.existsSync(NOTE_STAMP())).toBe(false); // …and never claimed success
+    expect(pendingCount()).toBeGreaterThan(0); // …so the mutation is still owed
+  });
+
+  it('a mixed fan-out — some delivered, some refused — is partial too', () => {
+    writeLoopState('engaged');
+    stubCurlStatusPostsFail(['rom_b']); // rom_a takes it, rom_b refuses
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+
+    const urls = statusPosts().map((p) => p.url);
+    expect(urls.some((u) => u.includes('rom_a'))).toBe(true);
+    expect(urls.some((u) => u.includes('rom_b'))).toBe(true); // both attempted
+    expect(fs.existsSync(NOTE_STAMP())).toBe(false);
+    expect(pendingCount()).toBeGreaterThan(0);
+  });
+
+  it('a later hook repairs it once the rooms accept writes again', () => {
+    writeLoopState('engaged');
+    stubCurlStatusPostsFail();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(pendingCount()).toBeGreaterThan(0);
+
+    stubCurl();
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    const posts = statusPosts();
+    expect((/"note":"([^"]*)"/.exec(posts[posts.length - 1]!.body) ?? [])[1]).toBe(
+      'working (1 subagent: explore)',
+    );
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
+    expect(pendingCount()).toBe(0);
+  });
+});
+
+/* ===== DEFECT 4: A DIVERGENT FAN-OUT IS DURABLE STATE ====================== *
+ * Coordinator, third round. Body B reaches some rooms and not others: correctly
+ * nothing is stamped and nothing acknowledged, so the stamp still reads A. The
+ * state then REVERTS to A, the next publisher composes A, finds it equal to the
+ * stamp, posts nothing and acknowledges everything — and the rooms that took B
+ * show it forever, because the drift check compares one composed body against
+ * one global stamp and they agree.
+ *
+ * Step 1 here is driven by BUDGET TRUNCATION rather than a failed POST, so that
+ * this test isolates defect 4: truncation was already reported as partial before
+ * defect 3 was fixed, and the only thing that can make this test pass is the
+ * divergence record.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — rooms left behind by a partial fan-out are healed', () => {
+  const EIGHT_ROOMS = JSON.stringify({
+    items: Array.from({ length: 8 }, (_, i) => ({
+      room: { id: `rom_${i}`, name: `R${i}`, orgId: 'org_1', kind: 'project', archivedAt: null },
+      memberId: `mem_${i}`,
+      roomRole: 'member',
+    })),
+  });
+
+  /** A curl that succeeds but burns ~1s per call, so the budget truncates. */
+  function stubSlowCurl(): void {
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+sleep 1
+case "$url" in */me/rooms) printf '%s' "$ROOMS_JSON" ;; esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+
+  const noteOf = (e: { body: string }): string => (/"note":"([^"]*)"/.exec(e.body) ?? [])[1] ?? '';
+
+  it('republishes a body equal to the stamp while some rooms still disagree', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const env = { ROOMS_JSON: EIGHT_ROOMS, SPARROW_NOTE_BUDGET: '30' };
+
+    // Stamp A, delivered everywhere.
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'), env);
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
+    expect(statusPosts().length).toBe(8);
+    expect(fs.existsSync(DIVERGED())).toBe(false);
+    expect(pendingCount()).toBe(0);
+
+    // 1. B reaches SOME of the eight and the budget stops the rest.
+    stubSlowCurl();
+    const beforeB = statusPosts().length;
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_2', 'code-review'), {
+      ROOMS_JSON: EIGHT_ROOMS,
+      SPARROW_NOTE_BUDGET: '3',
+    });
+    const bPosts = statusPosts().slice(beforeB);
+    expect(bPosts.length).toBeGreaterThan(0);
+    expect(bPosts.length).toBeLessThan(8); // …and not all of them
+    for (const p of bPosts) expect(noteOf(p)).toBe('working (2 subagents: code-review, explore)');
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)'); // unmoved
+    expect(pendingCount()).toBeGreaterThan(0);
+    expect(fs.existsSync(DIVERGED())).toBe(true); // the divergence is on disk
+
+    // 2. The composition REVERTS to exactly what the stamp already says.
+    stubCurl();
+    const beforeC = statusPosts().length;
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_2', 'code-review'), env);
+
+    // 3. It is published anyway, to every room — the stamp was true of none.
+    const cPosts = statusPosts().slice(beforeC);
+    expect(cPosts.length).toBe(8);
+    for (const p of cPosts) expect(noteOf(p)).toBe('working (1 subagent: explore)');
+    expect(fs.existsSync(DIVERGED())).toBe(false); // healed
+    expect(pendingCount()).toBe(0); // …and only now acknowledged
+  }, 40_000);
+
+  it('a fan-out that delivered to nobody records no divergence', () => {
+    // Nothing landed, so no room's contents changed and nothing diverged — the
+    // markers alone carry the debt.
+    writeLoopState('engaged');
+    stubCurl({ fail: true });
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(fs.existsSync(DIVERGED())).toBe(false);
+    expect(pendingCount()).toBeGreaterThan(0);
+  });
+
+  it('a listing that finds NO rooms clears the divergence, vacuously', () => {
+    // The decision, made explicit: "no room disagrees with the stamp" is true of
+    // an empty room set, and `post_note` already stamps "every room was told
+    // this" on the same vacuous grounds. Doing one and not the other would be
+    // incoherent, and holding the flag would make every future publication post
+    // unconditionally to nobody, forever.
+    writeLoopState('engaged');
+    stubCurl();
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(DIVERGED(), '');
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'), {
+      ROOMS_JSON: JSON.stringify({ items: [] }),
+    });
+    expect(fs.existsSync(DIVERGED())).toBe(false);
+    expect(pendingCount()).toBe(0);
+  });
+
+  it('the repair step fires on divergence alone, with no markers left', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(pendingCount()).toBe(0);
+    // Divergence with an empty pending directory: only `repair_owed` can see it.
+    fs.writeFileSync(DIVERGED(), '');
+    const before = statusPosts().length;
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts().length).toBeGreaterThan(before);
+    expect(fs.existsSync(DIVERGED())).toBe(false);
+  });
+});
+
+/* ===== DEFECT 5: AN IDLE PUBLICATION MUST NOT WIPE WHAT ARRIVED DURING IT == *
+ * Reviewer, third round, under real flock. Hold `stop` inside its locked room
+ * GET; run a `permission_prompt` notification to completion; release the stop.
+ * The ask behaved correctly — it cleared the idle intent and wrote its own
+ * markers — but the stop was already inside `publish_idle`, whose `pending_clear`
+ * deleted EVERY marker including those two. Nothing reconciled afterwards,
+ * because idle was a short-circuit exit from `publish_rounds` and the repair
+ * step is skipped for the `stop` mode. Final state: idle on the board, a human
+ * being asked to act, and nothing on disk owed.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — an ask arriving during an idle publication', () => {
+  function stubHangingCurl(flag: string): void {
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+case "$url" in
+  */me/rooms)
+    if [ -f "${flag}" ] && [ ! -f "${flag}.used" ]; then
+      : > "${flag}.used"
+      n=0
+      while [ -f "${flag}" ] && [ "$n" -lt 900 ]; do sleep 0.05; n=$((n + 1)); done
+    fi
+    printf '%s' "$ROOMS_JSON"
+    ;;
+esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+  const noteOf = (e: { body: string }): string => (/"note":"([^"]*)"/.exec(e.body) ?? [])[1] ?? '';
+
+  it('survives it, and the ask is what stands at the end', async () => {
+    writeLoopState('engaged');
+    const flag = path.join(stubBin, 'hang');
+    fs.writeFileSync(flag, '');
+    stubHangingCurl(flag);
+
+    const env = {
+      PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+      HOME: home,
+      SPARROW_STATE_DIR: stateDir,
+      CURL_LOG: curlLog,
+      ROOMS_JSON,
+      SPARROW_SERVER: 'https://example.test',
+      SPARROW_TOKEN: 'agk_test',
+      SPARROW_NOTE_BUDGET: '60',
+    };
+    // The stop records that idle is owed, then stalls inside its room GET.
+    const s = spawn('sh', [SCRIPT, 'stop'], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+    s.stdin.end('{"hook_event_name":"Stop"}');
+    const deadline = Date.now() + 10_000;
+    while (
+      Date.now() < deadline &&
+      !(fs.existsSync(curlLog) && fs.readFileSync(curlLog, 'utf8').includes('/me/rooms'))
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    // The ask lands mid-flight: it cancels the intent and records itself.
+    runHook('notification', notify('permission_prompt'), { SPARROW_NOTE_BUDGET: '2' });
+    expect(fs.existsSync(path.join(stateDir, 'needs-input'))).toBe(true);
+    expect(fs.existsSync(IDLE_OWED())).toBe(false);
+
+    fs.rmSync(flag, { force: true });
+    await waitExit(s);
+
+    // The idle that was already dispatched lands — a race resolving in the open
+    // — and the SAME publisher then goes round again and posts the ask over it.
+    const posts = statusPosts();
+    expect(posts.some((p) => p.body.includes('"state":"idle"'))).toBe(true);
+    expect(noteOf(posts[posts.length - 1]!)).toBe('blocked — needs your input');
+    // The note and the needs-input record agree, and nothing is left owed.
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('blocked — needs your input');
+    expect(fs.existsSync(path.join(stateDir, 'needs-input'))).toBe(true);
+    expect(pendingCount()).toBe(0);
+    expect(fs.existsSync(IDLE_OWED())).toBe(false);
+  }, 60_000);
+
+  it('an ask that lands BEFORE dispatch wins outright, with no idle at all', async () => {
+    // The intent is read as late as it can be. Here the stop is stuck waiting
+    // for the lock rather than mid-fan-out, so the ask cancels it before any
+    // idle is composed and nobody ever sees idle.
+    writeLoopState('engaged');
+    stubCurl();
+    fs.mkdirSync(stateDir, { recursive: true });
+    const lockFile = path.join(stateDir, 'auto-status-note.lock');
+    fs.writeFileSync(lockFile, '');
+    const holder = spawn('sh', ['-c', `exec 9>>'${lockFile}'; flock 9; exec sleep 30`], { stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 300));
+
+    runHook('stop', '{"hook_event_name":"Stop"}', { SPARROW_NOTE_BUDGET: '2' });
+    expect(fs.existsSync(IDLE_OWED())).toBe(true);
+    runHook('notification', notify('permission_prompt'), { SPARROW_NOTE_BUDGET: '2' });
+    expect(fs.existsSync(IDLE_OWED())).toBe(false);
+
+    holder.kill('SIGKILL');
+    await waitExit(holder);
+
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    const posts = statusPosts();
+    expect(posts.some((p) => p.body.includes('"state":"idle"'))).toBe(false);
+    expect(noteOf(posts[posts.length - 1]!)).toBe('blocked — needs your input');
+  }, 40_000);
+
+  it('an INCOMPLETE idle leaves both the owed flag and the markers', () => {
+    writeLoopState('engaged');
+    stubCurl({ fail: true }); // the rooms listing cannot even be made
+    runHook('stop', '{"hook_event_name":"Stop"}');
+    expect(fs.existsSync(IDLE_OWED())).toBe(true);
+    expect(pendingCount()).toBeGreaterThan(0);
+    expect(fs.existsSync(NOTE_STAMP())).toBe(false);
+
+    // …and the next hook to take the lock finishes the job.
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    const posts = statusPosts();
+    expect(posts[posts.length - 1]!.body).toContain('"state":"idle"');
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('idle');
+    expect(fs.existsSync(IDLE_OWED())).toBe(false);
+    expect(pendingCount()).toBe(0);
+  });
+});
+
+/* ===== DEFECT 6: THE SWEEP MUST BOUND STORAGE, NOT DISCARD THE DEBT ======== *
+ * Coordinator, third round. A marker carries no note — it carries the single
+ * fact "a publication is owed", and the body is composed from CURRENT state at
+ * publish time. So age says nothing about whether the publication is still
+ * owed, and deleting markers on age destroyed the only repair signal there was:
+ * after an outage the sweep cleared the debt, the absent-stamp rule made the
+ * backstop stand down, the repair step found nothing owed, and a live subagent
+ * was never shown at all.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — the sweep coalesces the debt, it does not drop it', () => {
+  const ageFile = (p: string, seconds: number): void => {
+    const when = new Date(Date.now() - seconds * 1000);
+    fs.utimesSync(p, when, when);
+  };
+
+  it('still publishes a live subagent after an outage longer than the threshold', () => {
+    writeLoopState('engaged');
+    // The listing fails, so markers are written and no stamp is ever created.
+    stubCurl({ fail: true });
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(fs.existsSync(NOTE_STAMP())).toBe(false);
+    expect(pendingCount()).toBeGreaterThan(0);
+
+    // The outage lasts past the sweep threshold.
+    for (const n of pendingNames()) ageFile(path.join(PENDING_DIR(), n), 2 * 3600);
+
+    // The network comes back and an ordinary tool call runs.
+    stubCurl();
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0); // a status IS posted
+    expect((/"note":"([^"]*)"/.exec(posts[posts.length - 1]!.body) ?? [])[1]).toBe(
+      'working (1 subagent: explore)', // …and it names the live subagent
+    );
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
+    expect(pendingCount()).toBe(0); // the debt is acknowledged, not discarded
+  });
+
+  it('collapses many aged markers to exactly one rather than keeping them all', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    // A usage limit stands, so nothing can publish: what is left is the sweep.
+    writeMarker('20260918T000000-1.json', { at: new Date().toISOString() });
+    for (let i = 0; i < 12; i += 1) {
+      stampPending(`aged-${i}`);
+      ageFile(path.join(PENDING_DIR(), `aged-${i}`), 2 * 3600);
+    }
+    stampPending('fresh-one');
+    expect(pendingCount()).toBe(13);
+
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+
+    // Twelve aged markers became one; the fresh one is untouched.
+    expect(pendingNames()).toHaveLength(2);
+    expect(pendingNames()).toContain('fresh-one');
+    expect(pendingNames().filter((n) => n.startsWith('aged-'))).toEqual([]);
+  });
+
+  it('the coalesced marker is not itself swept on the next run', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeMarker('20260918T000000-1.json', { at: new Date().toISOString() });
+    stampPending('aged-one');
+    ageFile(path.join(PENDING_DIR(), 'aged-one'), 2 * 3600);
+
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(pendingNames()).toHaveLength(1);
+    const coalesced = pendingNames()[0]!;
+    expect(coalesced).not.toBe('aged-one');
+
+    // A second run must not reduce it to nothing: the debt has no way to reach
+    // zero except by being published.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(pendingNames()).toEqual([coalesced]);
+  });
 });
