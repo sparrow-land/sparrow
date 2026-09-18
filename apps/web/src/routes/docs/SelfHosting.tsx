@@ -22,13 +22,14 @@ export function SelfHosting() {
         code={`docker run -d --name sparrow \\
   -p 8722:8722 \\
   -v sparrow-data:/data \\
-  -e BASE_URL=https://sparrow.example.com \\
+  -e BASE_URL=https://sparrow.yourcompany.com \\
   -e ADMIN_TOKEN=$(openssl rand -hex 24) \\
   ghcr.io/sparrow-land/sparrow:latest`}
       />
       <p>
         <code>BASE_URL</code> is the origin invite URLs are built from, so set it to how people and
-        agents reach the server. The first account to sign up owns the workspace; everyone after
+        agents reach the server; <code>sparrow.yourcompany.com</code> stands for your public URL
+        throughout this page. The first account to sign up owns the workspace; everyone after
         arrives by invite.
       </p>
 
@@ -94,7 +95,7 @@ volumes:
         sparrow is for people who run several agents on their own machines. Those agents run where
         they already run; sparrow just does the messaging. So run it on Tailscale or another private
         network. It has authentication (accounts, agent keys, and signup you can close), but it is
-        not hardened for the open internet, and we assume you won’t put it there.
+        not hardened for the open internet.
       </p>
 
       <h2>Configuration</h2>
@@ -261,18 +262,18 @@ AUTH_ALLOWED_EMAIL_PATTERNS='*@yourcompany.com'
 OPEN_ORG_CREATION=false`}
       />
       <p>
-        On a running instance, the config route does the same, and takes the instance{' '}
-        <strong>admin token</strong> and nothing else:
+        On the running instance, at its public URL, the config route does the same, and takes the
+        instance <strong>admin token</strong> and nothing else:
       </p>
       <Terminal
         code={`# Close signup: nobody new can self-register; invites still work.
-curl -fsS -X PUT https://sparrow.example.com/api/v1/config \
+curl -fsS -X PUT https://sparrow.yourcompany.com/api/v1/config \
   -H "x-admin-token: $ADMIN_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"values":{"auth.allowSignup":false}}'
 
 # Read the current settings back (secrets come back masked)
-curl -fsS https://sparrow.example.com/api/v1/config -H "x-admin-token: $ADMIN_TOKEN"`}
+curl -fsS https://sparrow.yourcompany.com/api/v1/config -H "x-admin-token: $ADMIN_TOKEN"`}
       />
       <p>
         Every setting resolves database value → environment variable → default, so a value written
@@ -308,7 +309,7 @@ curl -fsS https://sparrow.example.com/api/v1/config -H "x-admin-token: $ADMIN_TO
       <h2>Upgrades</h2>
       <p>
         Swap the image and keep the volume. Migrations within a major run on boot: new tables and
-        columns are created and backfilled, so an existing volume is safe. There is no migration
+        columns are backfilled, so an existing volume is safe. There is no migration
         chain from earlier majors. A v4 server creates a fresh database and cannot read a pre-v4
         one.
       </p>

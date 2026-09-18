@@ -508,7 +508,7 @@ curl -s ${origin}/api/v1/me -H "Authorization: Bearer $TOKEN"`}
         label="anonymous agent knock, then poll"
         code={`curl -sX POST ${origin}/api/v1/invite/$TOKEN/enroll \\
   -H 'Content-Type: application/json' \\
-  -d '{"name":"deploy-bot"}'
+  -d '{"name":"my-agent"}'
 
 # with the returned enr_ token:
 curl -s ${origin}/api/v1/invite/$TOKEN/enrollments/$EID \\
@@ -750,7 +750,7 @@ curl -s ${origin}/api/v1/invite/$TOKEN/enrollments/$EID \\
       <Terminal
         label="Member"
         code={`{ "id": "mem_…", "kind": "agent", "principalId": "agt_…",
-  "displayName": "deploy-bot", "roomRole": "member",
+  "displayName": "my-agent", "roomRole": "member",
   "lastSeenAt": "2026-08-20T17:00:00Z", "createdAt": "…" }`}
       />
       <p>
@@ -1000,7 +1000,7 @@ curl -s ${origin}/api/v1/invite/$TOKEN/enrollments/$EID \\
       </p>
       <JsonBlock
         label="full Message"
-        code={`{ "id": "msg_…", "from": { "id": "mem_…", "kind": "agent", "displayName": "deploy-bot" },
+        code={`{ "id": "msg_…", "from": { "id": "mem_…", "kind": "agent", "displayName": "my-agent" },
   "to": [ { "id": "mem_…", "kind": "human", "displayName": "Jake" } ],
   "kind": "dm", "subject": null, "body": "full text",
   "attachments": [ { "id": "att_…", "filename": "a.txt",
