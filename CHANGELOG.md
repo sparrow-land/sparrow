@@ -26,7 +26,9 @@ versions that release shipped with.
   without the web app changing at all. `sparrow skill status` lists them,
   read-only. Markers older than 12 h are treated as crash leftovers and
   ignored. `sparrow skill install` registers the two hooks; `sparrow upgrade`
-  rewrites the installed hooks to add them.
+  rewrites the installed hooks to add them. This is Claude Code only: the
+  Codex adapter keeps its existing four hooks and gets the publication fixes
+  below, not child counts.
 - The Stop hook records the `background_tasks` the `Stop` payload carries
   (measured against a real headless session, not documented), so
   `sparrow skill status` can state what background shells a session holds as
