@@ -205,6 +205,28 @@ IDLE_OWED="$STATE_DIR/auto-status-idle-owed"
 # supersedes any composed note), whereas a working note delivered to three rooms
 # of ten is answered by nothing except a complete publication.
 #
+# IT RECORDS WHAT MIGHT HAVE LANDED, NOT WHAT WAS CONFIRMED -- the one point
+# where this differs from the delivery COUNT above, and the distinction is the
+# whole of it. A non-zero curl exit does not mean the server rejected the write.
+# A timeout, a dropped connection and a response lost on the way back are all
+# indistinguishable from a refusal at the client, and in every one of them the
+# server may already have applied the body. Reviewer, 2026-09-18, against a real
+# local server: it APPLIED body B and dropped the connection before replying, so
+# a rule that marked divergence only after a confirmed delivery marked nothing,
+# the state reverted to A, the next publisher found A equal to the stamp, posted
+# nothing and acknowledged everything -- and the room held B forever. Exactly
+# the failure this marker exists to prevent, reintroduced by trusting a failure
+# response to prove a negative.
+#
+# Hence the asymmetry, which is deliberate and is the safe direction on both
+# sides: ANY DISPATCHED WRITE makes divergence possible, so the flag is set once,
+# on the first request of a fan-out, BEFORE its outcome is known; and only
+# CONFIRMED DELIVERY to every room in the capped list makes divergence
+# impossible, so only that clears it. A fan-out that dispatches nothing at all --
+# no rooms, or no budget left before the first request -- sets nothing, because
+# no write was ever in flight. The ordinary case costs nothing: a complete
+# fan-out sets the flag on its first POST and clears it on the same pass.
+#
 # SET AND CLEARED IN ONE PLACE, `post_status_all`, so every publication path --
 # composed notes, idle, and the literal blocked/quota bodies -- is covered by
 # construction.
@@ -1058,6 +1080,7 @@ $_ps_rooms
 EOF
   _ps_n=0
   _ps_sent=0
+  _ps_any=0
   while IFS= read -r rid; do
     [ -n "$rid" ] || continue
     _ps_n=$((_ps_n + 1))
@@ -1066,6 +1089,15 @@ EOF
     [ "$_ps_left" -gt 0 ] 2>/dev/null || break
     _ps_max=4
     [ "$_ps_left" -lt "$_ps_max" ] 2>/dev/null && _ps_max="$_ps_left"
+    # DIVERGENCE IS MARKED BEFORE THE FIRST OUTCOME IS KNOWN, not after a
+    # confirmed delivery -- see WHEN THE ROOMS DISAGREE. From this line on, a
+    # write is in flight and the rooms MAY disagree; only a fan-out that
+    # confirms delivery everywhere can say they do not.
+    if [ "$_ps_any" = 0 ]; then
+      _ps_any=1
+      mkdir -p "$STATE_DIR" 2>/dev/null || true
+      : > "$NOTE_DIVERGED" 2>/dev/null || true
+    fi
     # Counted only on a 0 exit: with `-f`, that means the room actually took it.
     if curl -fsS --max-time "$_ps_max" -X POST "$server/api/v1/rooms/$rid/status" \
       -H "authorization: Bearer $token" -H 'content-type: application/json' \
@@ -1087,17 +1119,9 @@ EOF
     rm -f "$NOTE_DIVERGED" 2>/dev/null || true
     return 0
   fi
-  # SOMETHING LANDED, BUT NOT EVERYWHERE. The rooms that took it now hold a body
-  # the others do not, and the stamp (deliberately not written) describes
-  # neither group. Recorded, because that fact outlives this process.
-  #
-  # Nothing landed at all (`_ps_sent` = 0) is a different case and must NOT set
-  # it: no room's contents changed, so no new divergence was created -- and it
-  # must not CLEAR it either, which is why only the complete branch above does.
-  if [ "$_ps_sent" -gt 0 ] 2>/dev/null; then
-    mkdir -p "$STATE_DIR" 2>/dev/null || true
-    : > "$NOTE_DIVERGED" 2>/dev/null || true
-  fi
+  # NOT EVERY ROOM CONFIRMED IT. The divergence flag was already set above, the
+  # moment the first write went out, and it stays set: see WHEN THE ROOMS
+  # DISAGREE for why a failed response is not evidence that nothing landed.
   return 1
 }
 

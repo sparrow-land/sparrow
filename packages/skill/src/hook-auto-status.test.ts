@@ -3437,12 +3437,15 @@ exit 0
     expect(pendingCount()).toBe(0); // …and only now acknowledged
   }, 40_000);
 
-  it('a fan-out that delivered to nobody records no divergence', () => {
-    // Nothing landed, so no room's contents changed and nothing diverged — the
-    // markers alone carry the debt.
+  it('a fan-out that DISPATCHED nothing records no divergence', () => {
+    // The listing itself fails, so no write was ever in flight and no room can
+    // hold anything unexpected — the markers alone carry the debt. (Contrast a
+    // fan-out whose writes went out and failed: see the ambiguous-write case,
+    // where a failure response proves nothing about what the server applied.)
     writeLoopState('engaged');
     stubCurl({ fail: true });
     runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(log().some((e) => /\/rooms\/[^/]+\/status$/.test(e.url))).toBe(false);
     expect(fs.existsSync(DIVERGED())).toBe(false);
     expect(pendingCount()).toBeGreaterThan(0);
   });
@@ -3680,5 +3683,112 @@ describe('sparrow-auto-status.sh — the sweep coalesces the debt, it does not d
     // zero except by being published.
     runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
     expect(pendingNames()).toEqual([coalesced]);
+  });
+});
+
+/* ===== DEFECT 7: A FAILED RESPONSE DOES NOT PROVE THE WRITE DID NOT LAND === *
+ * Reviewer, fourth round, against a real local HTTP server. Baseline body A
+ * succeeds everywhere; the server then APPLIES body B and drops the connection
+ * before replying; the desired state reverts to A. With divergence marked only
+ * after a confirmed delivery, nothing was marked — the client saw a failure and
+ * concluded no room's contents had changed — so the next publisher found A equal
+ * to the stamp, posted nothing, acknowledged everything, and the room held B
+ * forever. Precisely the defect 4 failure, reintroduced by trusting a failure
+ * response to prove a negative.
+ *
+ * A timeout, a dropped connection and a lost response are indistinguishable from
+ * a refusal at the client, so ANY dispatched write makes divergence possible and
+ * only confirmed delivery everywhere makes it impossible.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — a write that may have landed counts as divergence', () => {
+  const applied = () => path.join(stubBin, 'server-applied.log');
+
+  /** A curl whose status POSTs APPLY the body (recording it) and then fail
+   * without replying — the ambiguous outcome a client cannot tell from a
+   * refusal. The room listing and presence behave normally. */
+  function stubCurlAppliesThenDrops(): void {
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+case "$url" in
+  */me/rooms) printf '%s' "$ROOMS_JSON"; exit 0 ;;
+  */status)
+    # The server APPLIES it, then the connection drops before the reply.
+    printf '%s %s\\n' "$url" "$data" >> '${applied()}'
+    exit 22
+    ;;
+esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+
+  const noteOf = (e: { body: string }): string => (/"note":"([^"]*)"/.exec(e.body) ?? [])[1] ?? '';
+  const serverHolds = (): string =>
+    fs.existsSync(applied()) ? fs.readFileSync(applied(), 'utf8').trim().split('\n').pop()! : '';
+
+  it('republishes after an applied-but-unacknowledged write, even on a revert', () => {
+    writeLoopState('engaged');
+    stubCurl();
+
+    // Baseline: A, delivered and confirmed everywhere.
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
+    expect(fs.existsSync(DIVERGED())).toBe(false);
+    expect(pendingCount()).toBe(0);
+
+    // B is applied by the server; the response never arrives.
+    stubCurlAppliesThenDrops();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_2', 'code-review'));
+    expect(serverHolds()).toContain('working (2 subagents: code-review, explore)');
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)'); // unmoved
+    expect(pendingCount()).toBeGreaterThan(0);
+    // The client cannot know the write landed — so it must assume it might have.
+    expect(fs.existsSync(DIVERGED())).toBe(true);
+
+    // The state reverts to exactly what the stamp says.
+    stubCurl();
+    const before = statusPosts().length;
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_2', 'code-review'));
+
+    // It is republished anyway, to every room, rather than skipped.
+    const after = statusPosts().slice(before);
+    expect(after.length).toBe(2);
+    for (const p of after) expect(noteOf(p)).toBe('working (1 subagent: explore)');
+    expect(fs.existsSync(DIVERGED())).toBe(false);
+    expect(pendingCount()).toBe(0);
+  });
+
+  it('marks divergence even when NOT ONE write was confirmed', () => {
+    // The case the old `_ps_sent > 0` rule got backwards: every response failed,
+    // so nothing was confirmed — and every one of those writes may have landed.
+    writeLoopState('engaged');
+    stubCurlAppliesThenDrops();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(statusPosts().length).toBeGreaterThan(0);
+    expect(fs.existsSync(DIVERGED())).toBe(true);
+    expect(fs.existsSync(NOTE_STAMP())).toBe(false);
+    expect(pendingCount()).toBeGreaterThan(0);
+  });
+
+  it('the ordinary case sets and clears it on the same pass, leaving nothing behind', () => {
+    // The flag is set on the first POST of every fan-out, so the thing to prove
+    // is that a confirmed fan-out does not leave it standing.
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(statusPosts().length).toBe(2);
+    expect(fs.existsSync(DIVERGED())).toBe(false);
+    expect(pendingCount()).toBe(0);
+
+    // …and a second, entirely ordinary hook still posts nothing extra.
+    const before = statusPosts().length;
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts().length).toBe(before);
+    expect(fs.existsSync(DIVERGED())).toBe(false);
   });
 });
