@@ -43,7 +43,9 @@
 #                     write for a type we actually understand.
 #   stop          (Stop) → idle across every room. Invoked by sparrow-stop-check.sh
 #                 ONLY on its allow (non-blocking) paths, so a blocked stop (loop
-#                 drift) never flickers you idle.
+#                 drift) never flickers you idle. It records that idle is OWED
+#                 before it tries to publish, so the intent outlives the process:
+#                 see IDLE IS OWED, NOT MERELY INTENDED in the mode below.
 #   stop-failure  (StopFailure) → the USAGE-LIMIT mode. Claude Code fires
 #                 StopFailure — NOT the plain Stop hook — when a turn ends on an
 #                 API error, naming it in `error_type`. A session that has hit
@@ -171,9 +173,15 @@ SUBAGENT_DIR="$STATE_DIR/subagents"
 # changed" test compares against this, so a change in the PARENT's condition
 # counts as much as a subagent appearing.
 NOTE_STAMP="$STATE_DIR/auto-status-note"
-# Set BEFORE every mutation, cleared only by a publisher whose body was composed
-# after the token it observed (see THE HANDOFF TOKEN).
-PENDING_TOKEN="$STATE_DIR/auto-status-pending"
+# ONE FILE PER MUTATION, never reused, acknowledged only from a snapshot of
+# names (see THE PENDING RECORD).
+PENDING_DIR="$STATE_DIR/auto-status-pending.d"
+# The pre-2026-09-18 single-token path. An install upgrading in place may still
+# have a regular file here; `pending_migrate` converts it once per hook run.
+PENDING_LEGACY="$STATE_DIR/auto-status-pending"
+# Written by `stop` BEFORE it tries to publish, so the INTENT to go idle is
+# durable state rather than one process's plan (see IDLE IS OWED, NOT INTENDED).
+IDLE_OWED="$STATE_DIR/auto-status-idle-owed"
 # A plain file, NEVER unlinked: `flock` holds it and the kernel releases it.
 NOTE_LOCK_FILE="$STATE_DIR/auto-status-note.lock"
 # Set while a human is being asked something and NOT cleared by anything a child
@@ -306,39 +314,118 @@ file_age() {
 # though the turn began earlier. Accepted deliberately -- a live picture of what
 # is running beats an accurate age for a note nobody could interpret.
 
-# --- THE HANDOFF TOKEN ------------------------------------------------------
+# --- THE PENDING RECORD -----------------------------------------------------
 #
 # A bounded publisher can drop the LAST mutation: with three rounds, a fourth
 # marker arriving during round three is seen, the loop exits, and if every other
 # hook has already given up, nobody publishes it. The round cap must bound one
-# hook's WORK, never correctness.
+# hook's WORK, never correctness. So every mutation leaves an on-disk record
+# that the note owes it a publication, and any later hook that finds one
+# publishes -- whatever its own mode was.
 #
-# So every mutation stamps this token BEFORE it mutates AND AGAIN AFTER, with a
-# value unique to that mutation (time-pid-sequence). The second stamp is what
-# makes it generation-safe: a publisher that read the token, composed, and posted
-# while the mutation was still in flight finds a DIFFERENT value afterwards and
-# must not clear it. A publisher clears the token only when the value is still
-# exactly the one it observed before composing.
+# ONE FILE PER MUTATION, AND NAMES ARE NEVER REUSED. `mark_pending` creates a
+# NEW, uniquely named empty file (time-pid-sequence, sanitised to a safe
+# filename) under $PENDING_DIR. It never overwrites a previous marker, so no
+# record can be clobbered by a later one.
 #
-# THAT CHECK IS NOT ATOMIC, and no shell construct makes it one: `cat`, compare,
-# `rm` is three steps. It does not need to be. The argument is the DOUBLE STAMP:
-# a clear that races a mutation is followed by that mutation's own second stamp,
-# which puts the token back. The worst a lost race costs is one redundant
-# publication, or one extra repair by a later hook -- never a change nobody
-# records.
+# THE DOUBLE STAMP STAYS, and now means something stronger: every mutation site
+# calls `mark_pending` BEFORE it mutates and AGAIN AFTER, producing two
+# DIFFERENT names. The "after" name is created only once the mutation is
+# complete on disk.
+#
+# ACKNOWLEDGEMENT IS BY SNAPSHOT, BY NAME, WITH NO COMPARISON ANYWHERE. A
+# publisher lists the directory BEFORE it composes, and after it has posted it
+# unlinks exactly the names in that list. The argument:
+#   * A name in the snapshot existed before the publisher read the state, so for
+#     an "after" stamp the mutation it records had already completed and the
+#     body just posted covers it. (Its "before" twin is covered a fortiori.)
+#   * A mutation that completes later stamps a name that was never in the
+#     snapshot, so it survives the unlink and a later hook repairs it.
+#   * Unlinking a snapshotted name can never destroy a record the publisher did
+#     not cover, because names are never reused -- there is no value to compare
+#     and therefore no compare-and-delete to lose a race in. THIS IS THE FIX for
+#     the reviewer's 2026-09-18 sequence: a publisher paused between its old
+#     equality check and its `rm` deleted a token that a `permission_prompt`
+#     notification had re-stamped in the gap, and the ask went unpublished with
+#     nothing left on disk to say so. That gap no longer exists.
+#   * Acknowledgement is unconditional on whether a post was actually needed: a
+#     body identical to the stamp still means "every room already has this",
+#     which is exactly what the snapshotted mutations were owed.
 #
 # WHAT THIS BUYS, EXACTLY: eventual repair, not immediate correctness. A
-# publisher that runs out of rounds, or loses the lock, leaves the token set --
-# the honest on-disk record that the note is stale -- and any later hook that
-# finds it set publishes, whatever its own mode was. RESIDUAL, stated plainly: a
+# publisher that runs out of rounds, or loses the lock, leaves markers behind --
+# the honest on-disk record that the note is stale. RESIDUAL, stated plainly: a
 # `SubagentStop` can be delayed for the length of a task, or never arrive at all
 # after an interrupt or a crash, so "a later hook" is not a promise about when.
-# Until one runs, the note may be stale and the token is the record of it.
+# Until one runs, the note may be stale and the markers are the record of it.
 _pending_seq=0
 mark_pending() {
   _pending_seq=$((_pending_seq + 1))
-  mkdir -p "$STATE_DIR" 2>/dev/null || true
-  printf '%s-%s-%s\n' "$(now_iso_ms)" "$$" "$_pending_seq" > "$PENDING_TOKEN" 2>/dev/null || true
+  mkdir -p "$PENDING_DIR" 2>/dev/null || true
+  _mp_name=$(printf '%s-%s-%s' "$(now_iso_ms)" "$$" "$_pending_seq" | tr -cd 'A-Za-z0-9._-')
+  [ -n "$_mp_name" ] || _mp_name="$$-$_pending_seq"
+  : > "$PENDING_DIR/$_mp_name" 2>/dev/null || true
+}
+
+# The NAMES of every marker on disk, one per line (the publisher's snapshot).
+pending_names() {
+  [ -d "$PENDING_DIR" ] || return 0
+  for _pn in "$PENDING_DIR"/*; do
+    [ -f "$_pn" ] || continue
+    printf '%s\n' "${_pn##*/}"
+  done
+}
+
+# Is anything owed? (The repair step's whole question.)
+pending_any() { [ -n "$(pending_names | head -n 1)" ]; }
+
+# Unlink exactly the snapshotted names, by name. Anything created since is
+# untouched, because a name is only ever used once.
+pending_ack() {
+  [ -n "${1:-}" ] || return 0
+  printf '%s\n' "$1" | while IFS= read -r _pa; do
+    [ -n "$_pa" ] || continue
+    rm -f "$PENDING_DIR/$_pa" 2>/dev/null || true
+  done
+  return 0
+}
+
+# Nothing is owed any more (only `idle` may say this: it supersedes every
+# composed note, so every outstanding mutation is answered by it).
+pending_clear() {
+  [ -d "$PENDING_DIR" ] || return 0
+  for _pc in "$PENDING_DIR"/*; do
+    [ -f "$_pc" ] && rm -f "$_pc" 2>/dev/null
+  done
+  return 0
+}
+
+# MIGRATION, once per hook run. An install upgrading in place can have a legacy
+# single-token regular file at the old path. It records a real mutation, so it is
+# CONVERTED (one fresh marker) rather than dropped.
+pending_migrate() {
+  [ -f "$PENDING_LEGACY" ] || return 0
+  mark_pending
+  rm -f "$PENDING_LEGACY" 2>/dev/null || true
+}
+
+# BOUND THE GROWTH. Names are never reused, so nothing overwrites anything and a
+# host whose posts always fail (no network, wrong token, a permanently held
+# lock) would accumulate one marker per mutation forever. A marker this old will
+# never be usefully repaired -- the note it was owed describes a turn that ended
+# hours ago -- so it is swept, once per hook run, exactly like a stale subagent.
+PENDING_STALE="${SPARROW_PENDING_STALE:-3600}"
+pending_sweep() {
+  [ -d "$PENDING_DIR" ] || return 0
+  for _ps in "$PENDING_DIR"/*; do
+    [ -f "$_ps" ] || continue
+    _pg=$(file_age "$_ps")
+    [ -n "$_pg" ] || continue
+    if [ "$_pg" -ge "$PENDING_STALE" ] 2>/dev/null; then
+      rm -f "$_ps" 2>/dev/null
+    fi
+  done
+  return 0
 }
 
 # --- THE PARENT'S NOTE ------------------------------------------------------
@@ -551,6 +638,13 @@ fi
 [ -f "$LOOP_STATE_FILE" ] || exit 0
 state=$(tr -d ' \t\r\n' < "$LOOP_STATE_FILE" 2>/dev/null || echo "")
 [ "$state" = "engaged" ] || exit 0
+
+# Once per run, before anything reads the pending record: carry a legacy token
+# across, and drop markers too old to be worth repairing. Both are local
+# bookkeeping, so they run ahead of the credential and blocked gates -- a hook
+# that cannot post must still not lose or hoard records.
+pending_migrate
+pending_sweep
 
 # --- the re-arm nudge (prompt mode only) -----------------------------------
 
@@ -787,8 +881,32 @@ server=$(printf '%s' "$server" | sed 's:/*$::')
 
 # --- helpers ---------------------------------------------------------------
 
+# WHOLE SECONDS LEFT IN THE PUBLICATION BUDGET, floored at 0. Every network step
+# on the publication path sizes its own `--max-time` from this and refuses to
+# start when it is 0, so the budget bounds the WORK IN FLIGHT and not merely the
+# decision to begin a round (see THE PUBLICATION BUDGET below).
+#
+# A BROKEN CLOCK DEGRADES TO THE OLD BEHAVIOUR, NOT TO SILENCE: with no usable
+# `date` the deadline cannot be evaluated at all, and reporting 0 would mean
+# never posting anything again. So it reports the whole budget -- every call
+# still gets a bounded `--max-time`, and the round cap is what stops the hook.
+budget_left() {
+  _bl_now=$(date +%s 2>/dev/null || printf 0)
+  case "$_bl_now" in
+    '' | *[!0-9]*) _bl_now=0 ;;
+  esac
+  if [ "$_bl_now" -eq 0 ]; then printf '%s' "${NOTE_BUDGET:-8}"; return 0; fi
+  _bl=$(( ${NOTE_DEADLINE:-0} - _bl_now ))
+  [ "$_bl" -lt 0 ] && _bl=0
+  printf '%s' "$_bl"
+}
+
 # Fire a presence heartbeat (best-effort, tight timeout). Backgrounded so a turn
 # is never delayed by the network.
+#
+# DELIBERATELY OUTSIDE THE BUDGET: it is backgrounded with its own tight 3s
+# timeout and nothing waits on it mid-path, so it cannot push the publication
+# past the deadline.
 refresh_presence() {
   curl -fsS --max-time 3 -X POST "$server/api/v1/me/presence" \
     -H "authorization: Bearer $token" -H 'content-type: application/json' \
@@ -797,12 +915,34 @@ refresh_presence() {
 
 # List my non-archived room ids (one per line, capped). Requires node to parse
 # the JSON; without it we simply skip the status fan-out (best-effort).
+#
+# BUDGETED. With nothing left this makes NO REQUEST AT ALL rather than starting a
+# 5s call the hook has no time for; otherwise it waits at most whatever is left.
+#
+# "NO ROOMS" AND "I COULD NOT FIND OUT" ARE DIFFERENT ANSWERS, and the exit
+# status is what separates them. Empty output used to mean both, and once
+# `post_status_all` started reporting completeness that ambiguity became a bug of
+# exactly the kind the pending record exists to prevent: a failed listing looked
+# like a fan-out with nothing to do, so the note was stamped as "every room has
+# this" and every snapshotted marker was acknowledged -- on a publication that
+# told nobody anything, with no record left that it had not.
+#
+# So: NON-ZERO whenever the listing could not be made -- no node, no budget, an
+# empty body (a failed, refused or timed-out GET), or a body node could not
+# parse. ZERO with empty output means one thing only: the listing succeeded and
+# this profile genuinely has no non-archived rooms, which is vacuously complete.
 room_ids() {
-  command -v node >/dev/null 2>&1 || return 0
-  body=$(curl -fsS --max-time 5 "$server/api/v1/me/rooms" \
+  command -v node >/dev/null 2>&1 || return 1
+  _ri_left=$(budget_left)
+  [ "$_ri_left" -gt 0 ] 2>/dev/null || return 1
+  _ri_max=5
+  [ "$_ri_left" -lt "$_ri_max" ] 2>/dev/null && _ri_max="$_ri_left"
+  body=$(curl -fsS --max-time "$_ri_max" "$server/api/v1/me/rooms" \
     -H "authorization: Bearer $token" 2>/dev/null || true)
-  [ -n "$body" ] || return 0
-  printf '%s' "$body" | node -e '
+  [ -n "$body" ] || return 1
+  # The assignment carries the substitution's exit status, so a parse failure
+  # (node sets a non-zero exitCode) propagates instead of reading as "no rooms".
+  _ri_out=$(printf '%s' "$body" | node -e '
     let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
       try {
         const j = JSON.parse(s);
@@ -811,8 +951,10 @@ room_ids() {
           const r = it && it.room;
           if (r && r.id && !r.archivedAt) process.stdout.write(r.id + "\n");
         }
-      } catch {}
-    });' 2>/dev/null || true
+      } catch { process.exitCode = 1; }
+    });' 2>/dev/null) || return 1
+  [ -n "$_ri_out" ] && printf '%s\n' "$_ri_out"
+  return 0
 }
 
 # Emit a JSON string for a note, hand-escaped so our hand-rolled body stays
@@ -821,18 +963,60 @@ safe_note() {
   printf '%s' "$1" | tr -d '"\\' | tr '\r\n\t' '   ' | cut -c1-50
 }
 
-# Fan a body out to /rooms/<id>/status for each non-archived room (cap MAX_ROOMS).
+# Fan a body out to /rooms/<id>/status for each non-archived room (cap
+# MAX_ROOMS), RE-CHECKING THE BUDGET BEFORE EVERY SINGLE POST.
+#
+# WHY IT REPORTS COMPLETENESS. One round used to be able to run a 5s room GET
+# plus MAX_ROOMS sequential 4s POSTs -- 45s against Codex's binding 20s for the
+# whole hook. Now the fan-out stops the moment the budget is gone, and a
+# TRUNCATED fan-out is a different fact from a finished one: some rooms were
+# never told, so nothing downstream may claim they were. That is what the exit
+# status carries -- 0 COMPLETE (every room in the capped list was attempted),
+# 1 PARTIAL -- and it is why `post_note` will not stamp and `publish_rounds`
+# will not acknowledge on a 1.
+#
+# THE LOOP RUNS IN THIS SHELL, NOT A SUBSHELL. It used to be `room_ids | while`,
+# and a pipeline's loop body is a subshell that cannot report anything back --
+# which is precisely why the old truncation was invisible. So the list is
+# captured first and the loop is driven from a heredoc redirect instead. (A temp
+# file to smuggle the count back out would be the same bug wearing a hat.)
 post_status_all() {
-  body="$1"
-  n=0
-  room_ids | while IFS= read -r rid; do
+  _ps_body="$1"
+  [ "$(budget_left)" -gt 0 ] 2>/dev/null || return 1   # no budget: nothing was told
+  # A LISTING THAT FAILED IS A PARTIAL FAN-OUT, not an empty one. Without the
+  # rooms there is no way to tell anybody anything, so nothing may be stamped and
+  # nothing may be acknowledged. (One call site, and a plain assignment with a
+  # command substitution carries that substitution's status -- so this is the
+  # whole of the plumbing.)
+  _ps_rooms=$(room_ids) || return 1
+  # How many rooms this fan-out is RESPONSIBLE for: the list, capped. Counted
+  # here so "was every one of them attempted" has an answer at the end.
+  _ps_total=0
+  while IFS= read -r rid; do
     [ -n "$rid" ] || continue
-    n=$((n + 1))
-    [ "$n" -le "$MAX_ROOMS" ] || break
-    curl -fsS --max-time 4 -X POST "$server/api/v1/rooms/$rid/status" \
+    _ps_total=$((_ps_total + 1))
+    if [ "$_ps_total" -ge "$MAX_ROOMS" ]; then break; fi
+  done <<EOF
+$_ps_rooms
+EOF
+  _ps_n=0
+  _ps_sent=0
+  while IFS= read -r rid; do
+    [ -n "$rid" ] || continue
+    _ps_n=$((_ps_n + 1))
+    [ "$_ps_n" -le "$MAX_ROOMS" ] || break
+    _ps_left=$(budget_left)
+    [ "$_ps_left" -gt 0 ] 2>/dev/null || break
+    _ps_max=4
+    [ "$_ps_left" -lt "$_ps_max" ] 2>/dev/null && _ps_max="$_ps_left"
+    curl -fsS --max-time "$_ps_max" -X POST "$server/api/v1/rooms/$rid/status" \
       -H "authorization: Bearer $token" -H 'content-type: application/json' \
-      -d "$body" >/dev/null 2>&1 || true
-  done
+      -d "$_ps_body" >/dev/null 2>&1 || true
+    _ps_sent=$((_ps_sent + 1))
+  done <<EOF
+$_ps_rooms
+EOF
+  [ "$_ps_sent" -eq "$_ps_total" ] 2>/dev/null
 }
 
 # Post a composed note to every room AND remember the subagent part of it, so
@@ -840,8 +1024,15 @@ post_status_all() {
 # wrote a different note". (A same-note repost is free server-side: `sinceAt` is
 # preserved when the text is identical, so this stamp is a network optimisation,
 # not a correctness dependency.)
+#
+# A PARTIAL FAN-OUT DOES NOT STAMP. The stamp means "this is what EVERY room was
+# last told", and the post-tool backstop trusts it to decide whether anything
+# drifted; writing it after a truncated fan-out would tell the backstop that
+# rooms which never heard the note are up to date, and nothing would ever repair
+# them. So a truncated publication returns 1, leaves the stamp alone, and (via
+# `publish_rounds`) leaves the pending markers standing for a later hook.
 post_note() {
-  post_status_all "{\"state\":\"working\",\"note\":\"$(safe_json "$1")\",\"sticky\":true}"
+  post_status_all "{\"state\":\"working\",\"note\":\"$(safe_json "$1")\",\"sticky\":true}" || return 1
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   printf '%s' "$1" > "$NOTE_STAMP" 2>/dev/null || true
 }
@@ -906,7 +1097,7 @@ safe_json() { printf '%s' "$1" | tr -d '"\\' | tr '\r\n\t' '   '; }
 # WITHOUT `flock` (probed, never assumed) THERE IS NO LOCK AT ALL. A lock with no
 # safe reclamation is worse than none. Two concurrent hooks can then interleave,
 # and it is CONVERGENCE -- compose immediately before posting, re-check after,
-# repeat -- plus the handoff token that corrects the note; a stale note can
+# repeat -- plus the pending records that correct the note; a stale note can
 # persist until the next hook runs. That is honest, and it cannot wedge anything.
 post_composed() { post_composed_with publish_rounds "${1:-}"; }
 
@@ -931,7 +1122,7 @@ post_composed_with() {
       fi
       exec 9>&- 2>/dev/null || true
       # CONTENTION (flock's exit 1) means somebody else is publishing: post
-      # nothing, stamp nothing, leave the token for them. ANY OTHER failure means
+      # nothing, stamp nothing, leave the markers for them. ANY OTHER failure means
       # the lock is unusable here -- a read-only state dir, an fd problem, NFS
       # without locking -- and that must degrade to the unlocked path, exactly
       # like a host with no flock at all. Failing every publication because the
@@ -950,11 +1141,17 @@ IDLE_STAMP='idle'
 # trivially composed (idle supersedes any note), but ORDERING IS NOT OPTIONAL:
 # posting it outside the lock let an older `working (1 subagent: ...)`, held in a
 # slow fan-out, land after the turn had ended and resurrect it.
+#
+# IT USES THE SAME BOUNDED FAN-OUT as every other publication, and treats a
+# truncated one the same way: no stamp, nothing acknowledged, and `IDLE_OWED`
+# left standing so the next hook finishes the job.
 publish_idle() {
-  post_status_all '{"state":"idle"}'
+  post_status_all '{"state":"idle"}' || return 0
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   printf '%s' "$IDLE_STAMP" > "$NOTE_STAMP" 2>/dev/null || true
-  rm -f "$PENDING_TOKEN" 2>/dev/null || true   # nothing is owed any more
+  pending_clear                               # nothing is owed any more
+  rm -f "$IDLE_OWED" 2>/dev/null || true      # …and idle is no longer owed
+  return 0
 }
 
 post_idle() { post_composed_with publish_idle; }
@@ -968,12 +1165,22 @@ publish_rounds() {
   _pr_override="$1"
   _pr_round=0
   while [ "$_pr_round" -lt 3 ]; do
-    # Out of budget: stop here and leave the token set. The round cap bounds the
-    # work; this bounds the TIME, against the 20s Codex allows the whole hook.
-    [ "$(date +%s 2>/dev/null || echo 0)" -ge "${NOTE_DEADLINE:-0}" ] 2>/dev/null && return 0
+    # Out of budget: stop here and leave the markers standing. The round cap
+    # bounds the work; this bounds the TIME, against the 20s Codex allows the
+    # whole hook. (Each network step re-checks it too -- see `budget_left`.)
+    [ "$(budget_left)" -gt 0 ] 2>/dev/null || return 0
     # A usage limit landing mid-flight outranks everything here.
     [ -n "$(blocked_markers | head -n 1)" ] && return 0
-    _pr_token=$(cat "$PENDING_TOKEN" 2>/dev/null || printf '')
+    # IDLE IS OWED, NOT INTENDED (see the `stop` mode). The flag is durable state
+    # written before the stop even tries to publish, so whoever gets here next is
+    # the one that owes idle: a holder that was mid-fan-out when the turn ended
+    # sees it on its next round, and a queued publisher honours a stop whose own
+    # lock wait expired. Composing a `working` note now would resurrect a
+    # finished turn.
+    if [ -f "$IDLE_OWED" ]; then publish_idle; return 0; fi
+    # THE SNAPSHOT: the names on disk BEFORE anything is read or composed. What
+    # this body publishes is exactly what these names were owed.
+    _pr_names=$(pending_names)
     # THE BASE IS READ FRESH EVERY ROUND. An override only supplies the note TEXT
     # that nothing but the payload knows (the verbose prompt note); it must never
     # outrank a parent condition that arrived since. So it is used only while the
@@ -995,14 +1202,20 @@ publish_rounds() {
       _pr_round=$((_pr_round + 1))
       continue
     fi
-    [ "$_pr_body" != "$_pr_prev" ] && post_note "$_pr_body"
-    if [ "$(cat "$PENDING_TOKEN" 2>/dev/null || printf '')" = "$_pr_token" ]; then
-      [ -n "$_pr_token" ] && rm -f "$PENDING_TOKEN" 2>/dev/null
-      return 0
+    if [ "$_pr_body" != "$_pr_prev" ]; then
+      # A TRUNCATED PUBLICATION ACKNOWLEDGES NOTHING: some rooms never heard it,
+      # so every snapshotted mutation is still owed and stays on disk.
+      post_note "$_pr_body" || return 0
     fi
+    # Acknowledge from the SNAPSHOT, by name, whether or not a post was needed:
+    # a body identical to the stamp still means every room already has it.
+    # Anything stamped since has a name that was never in the list, so it
+    # survives and a later hook repairs it.
+    pending_ack "$_pr_names"
+    pending_any || return 0
     _pr_round=$((_pr_round + 1))
   done
-  # Out of rounds with the token still set: left set on purpose.
+  # Out of rounds with markers still on disk: left standing on purpose.
   return 0
 }
 
@@ -1070,7 +1283,18 @@ esac
 # wait is a sub-limit of it, never an extra: a `UserPromptSubmit` sits in the
 # critical path between a human typing and an answer, so it waits at most 2s; any
 # other mode waits at most 5s. A hook that reaches the deadline stops and leaves
-# the handoff token set, exactly like any other budget exhaustion.
+# the pending markers standing, exactly like any other budget exhaustion.
+#
+# THE DEADLINE BOUNDS EVERY STEP, NOT JUST THE DECISION TO START A ROUND. It used
+# to be consulted only at round entry, so a round that began with one second left
+# could still run a 5s room GET followed by up to MAX_ROOMS sequential 4s POSTs --
+# 45s of work inside an "8s" budget, and more than twice Codex's whole-hook
+# limit. Now `budget_left` is re-read before the room GET and before EVERY room
+# POST: each sizes its own `--max-time` from what is left, and a step with
+# nothing left is not started at all. The fan-out that stops early says so (see
+# `post_status_all`), so nothing downstream claims rooms were told when they
+# were not. Presence is the one deliberate exception -- backgrounded, its own 3s
+# timeout, nothing waits on it.
 NOTE_BUDGET="${SPARROW_NOTE_BUDGET:-8}"
 # ONE deadline for the whole hook, not one per call: the mode's own post and the
 # repair step at the end SHARE it, so a slow hook cannot spend the budget twice.
@@ -1099,10 +1323,15 @@ case "$MODE" in
       rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
       mark_pending
     fi
+    # THE TURN HAS RESUMED, SO NEITHER IDLE FILE MAY OUTLIVE THIS POINT -- and
+    # both are cleared BEFORE the publication, not after it. `IDLE_OWED` is read
+    # by `publish_rounds` at the top of every round: a stop that failed to
+    # publish would otherwise make this prompt post `idle` and return, leaving a
+    # working turn advertised as idle until the next tool call.
+    rm -f "$IDLE_MARKER" "$IDLE_OWED" 2>/dev/null || true
     # Whoever is running under this turn goes in the note too (capped at 140).
     refresh_presence
     post_composed "$note"
-    rm -f "$IDLE_MARKER" 2>/dev/null || true
     ;;
   subagent-start | subagent-stop)
     # POST THE NOTE HERE, not only at turn boundaries: a FOREGROUND subagent
@@ -1119,9 +1348,31 @@ case "$MODE" in
         # A human is being asked something — we are stuck until they answer. The
         # condition outlives this hook (see THE PARENT'S NOTE), so it is recorded
         # rather than only posted.
+        #
+        # AND IT CANCELS WHAT IDLE WAS OWED, for the same reason a prompt does: a
+        # dialog cannot be open on a turn that has ended, so being asked is proof
+        # the turn is live. Without this, a stop whose publication failed left
+        # `IDLE_OWED` standing, `publish_rounds` published `idle` instead of the
+        # ask, and `publish_idle`'s clear took the ask's own markers with it --
+        # leaving `idle` on the board with nothing on disk to repair it. Nor
+        # could anything: the repair step finds nothing owed, and the post-tool
+        # backstop cannot run because the tool call is blocked on the very dialog
+        # nobody has answered. The status would then read `idle` for exactly as
+        # long as a human is being asked to act. That is the failure THE PARENT'S
+        # NOTE exists to prevent, reached by another road, and it is reachable:
+        # an autonomous turn resumes with no UserPromptSubmit and its first tool
+        # call needs permission, so the Notification is the turn's FIRST hook.
+        #
+        # The unlink sits INSIDE the double stamp with the mutation it belongs
+        # to, so the record of it survives a publication that cannot complete.
+        #
+        # NOT WIDENED TO THE SUBAGENT BOUNDARIES, deliberately: a subagent
+        # boundary racing a stop is exactly the holder that finding 2's fix
+        # relies on to honour the flag.
         mark_pending
         mkdir -p "$STATE_DIR" 2>/dev/null || true
         printf '%s\n' "$(now_iso_ms)" > "$NEEDS_INPUT_FILE" 2>/dev/null || true
+        rm -f "$IDLE_OWED" 2>/dev/null || true
         mark_pending
         refresh_presence
         post_composed
@@ -1170,7 +1421,9 @@ case "$MODE" in
     # doing nothing while it works. The stop mode leaves a marker; the FIRST
     # tool call of the next turn restores sticky `working` and consumes it.
     if [ -f "$IDLE_MARKER" ]; then
-      rm -f "$IDLE_MARKER" 2>/dev/null || true
+      # Same reasoning as the prompt mode: the turn has resumed, so idle is no
+      # longer owed, and that has to be true BEFORE `publish_rounds` looks.
+      rm -f "$IDLE_MARKER" "$IDLE_OWED" 2>/dev/null || true
       refresh_presence
       # NOT a clearing point: a tool call is not evidence the parent's ask was
       # answered (a child doing tool calls while the parent waits is the case).
@@ -1217,8 +1470,37 @@ case "$MODE" in
     # The turn is over, so a pending ask is over with it — and the composed
     # working note is superseded by `idle`, so there is nothing left to repair.
     rm -f "$NEEDS_INPUT_FILE" 2>/dev/null || true
-    post_idle
+    # IDLE IS OWED, NOT MERELY INTENDED.
+    #
+    # Reviewer, 2026-09-18: a `subagent-start` held inside its locked room GET
+    # for longer than this mode's lock wait made the stop return WITHOUT posting
+    # idle; the holder was then released and published `working (1 subagent: …)`,
+    # and no idle publisher remained. The intent to go idle existed only as this
+    # one process's plan, so when the process gave up, the intent vanished with
+    # it and nothing could recover it.
+    #
+    # So the intent is written to disk FIRST, and it is a mutation like any
+    # other: stamped before and after, so a publisher that never gets to act on
+    # the flag still leaves a record that somebody must.
+    #
+    # THE ORDERING ARGUMENT. The flag lands at T0; only then does this mode wait
+    # up to NOTE_LOCK_WAIT for the lock. A holder that checks the flag after T0
+    # sees it and publishes idle itself. A holder that checks BEFORE T0 must
+    # release the lock before T0 + wait, or it would still be holding it when the
+    # wait began -- so either this stop acquires the lock itself, or some later
+    # hook finds the flag and publishes. Either way the intent survives the
+    # process that formed it.
+    #
+    # RESIDUAL, named rather than hidden: on the degraded no-flock path there is
+    # no lock to serialise anything, so a stop racing a holder can still have its
+    # `idle` overtaken by the holder's `working`, which then stands until the
+    # next turn's first hook. That is the same honest limitation the unlocked
+    # path carries everywhere else.
+    mark_pending
     mkdir -p "$STATE_DIR" 2>/dev/null || true
+    : > "$IDLE_OWED" 2>/dev/null || true
+    mark_pending
+    post_idle
     : > "$IDLE_MARKER" 2>/dev/null || true
     ;;
   *)
@@ -1226,19 +1508,21 @@ case "$MODE" in
     ;;
 esac
 
-# THE REPAIR STEP. A token still on disk means somebody's mutation never reached
+# THE REPAIR STEP. A marker still on disk means somebody's mutation never reached
 # the note, so this hook publishes it — whatever its own mode was, and even if
-# that mode would not otherwise post. Skipped where the intended state is `idle`
-# (a stop, or the idle notification), which supersedes the composed note.
+# that mode would not otherwise post. (And if `IDLE_OWED` is what is outstanding,
+# `publish_rounds` turns this into the idle publication a stop could not make.)
+# Skipped where the intended state is `idle` (a stop, or the idle notification),
+# which supersedes the composed note and has already published it itself.
 case "$MODE" in
   stop) ;;
   notification)
     case "$ntype" in
       idle_prompt) ;;
-      *) [ -f "$PENDING_TOKEN" ] && post_composed ;;
+      *) pending_any && post_composed ;;
     esac
     ;;
-  *) [ -f "$PENDING_TOKEN" ] && post_composed ;;
+  *) pending_any && post_composed ;;
 esac
 
 # Let backgrounded presence finish without holding the session (bounded by its

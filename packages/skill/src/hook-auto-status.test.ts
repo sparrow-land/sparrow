@@ -130,6 +130,27 @@ function waitExit(child: { exitCode: number | null; once: (e: string, f: () => v
 const statusPosts = () => log().filter((e) => e.method === 'POST' && /\/rooms\/[^/]+\/status$/.test(e.url));
 const presencePosts = () => log().filter((e) => e.method === 'POST' && /\/me\/presence$/.test(e.url));
 
+/* --- the pending record ----------------------------------------------------
+ * Every mutation leaves ONE immutable, uniquely named file under
+ * `auto-status-pending.d/`, and a publisher acknowledges exactly the names it
+ * snapshotted. `pendingCount` counts records in EITHER layout — the directory
+ * and the single-token file a pre-upgrade install leaves behind — so a test
+ * that asserts "the record survived" means the same thing before and after the
+ * migration, and cannot pass merely because the old path moved. */
+const PENDING_DIR = () => path.join(stateDir, 'auto-status-pending.d');
+const PENDING_LEGACY = () => path.join(stateDir, 'auto-status-pending');
+const pendingNames = (): string[] =>
+  fs.existsSync(PENDING_DIR()) ? fs.readdirSync(PENDING_DIR()).sort() : [];
+const pendingCount = (): number => pendingNames().length + (fs.existsSync(PENDING_LEGACY()) ? 1 : 0);
+/** Stamp one marker exactly as another hook's `mark_pending` would. */
+function stampPending(name: string): void {
+  fs.mkdirSync(PENDING_DIR(), { recursive: true });
+  fs.writeFileSync(path.join(PENDING_DIR(), name), '');
+}
+/** The durable "this turn ended, idle is owed" flag (NOT the resume marker). */
+const IDLE_OWED = () => path.join(stateDir, 'auto-status-idle-owed');
+const NOTE_STAMP = () => path.join(stateDir, 'auto-status-note');
+
 describe('sparrow-auto-status.sh — prompt mode', () => {
   it('sets a sticky working status in every non-archived room', () => {
     writeLoopState('engaged');
@@ -1941,8 +1962,8 @@ exit 0
     expect(fs.readFileSync(path.join(stateDir, 'auto-status-note'), 'utf8')).toBe(
       'working (2 subagents: code-review, explore)',
     );
-    // Nothing left owing: the handoff token was cleared by whoever published last.
-    expect(fs.existsSync(path.join(stateDir, 'auto-status-pending'))).toBe(false);
+    // Nothing left owing: the last publisher acknowledged every marker it saw.
+    expect(pendingCount()).toBe(0);
   }, 40_000);
 });
 
@@ -2115,20 +2136,20 @@ exit 0
   }, 15_000);
 });
 
-/* ===================== THE HANDOFF TOKEN ================================== *
+/* ===================== THE PENDING RECORD ================================= *
  * A bounded publisher can drop the LAST mutation: with three rounds, a fourth
  * marker arriving during round three is seen, the loop exits, and if every other
  * hook has given up, nobody publishes it. So the round cap bounds one hook's
- * WORK, and the token carries correctness: every mutation stamps it before AND
- * after, a publisher clears it only when the value is exactly the one it
- * observed before composing, and any later hook that finds it set publishes.
+ * WORK, and the pending record carries correctness: every mutation creates its
+ * own uniquely named marker before AND after it mutates, a publisher unlinks
+ * exactly the names it snapshotted before composing, and any later hook that
+ * finds a marker publishes.
  *
  * What that buys is EVENTUAL repair, not immediate correctness — a
  * `SubagentStop` can be delayed for a whole task or never arrive after a crash.
- * Until a later hook runs, the note may be stale and the token says so.
+ * Until a later hook runs, the note may be stale and the markers say so.
  * ========================================================================== */
-describe('sparrow-auto-status.sh — the handoff token', () => {
-  const TOKEN = () => path.join(stateDir, 'auto-status-pending');
+describe('sparrow-auto-status.sh — the pending record', () => {
   const STAMP = () => path.join(stateDir, 'auto-status-note');
   const notes = (): string[] =>
     statusPosts().map((p) => (/"note":"([^"]*)"/.exec(p.body) ?? [])[1] ?? '');
@@ -2172,13 +2193,13 @@ exit 0
     writeLoopState('engaged');
     stubCurl();
     runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
-    expect(fs.existsSync(TOKEN())).toBe(false);
+    expect(pendingCount()).toBe(0);
     expect(fs.readFileSync(STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
   });
 
-  /** MUTATION-THEN-CLEAR: a publisher must not clear a token newer than the one
-   * it observed — even though it posted in between. */
-  it('does not clear a token stamped by a mutation that landed mid-post', async () => {
+  /** MUTATION-THEN-ACK: a publisher must not acknowledge a marker that was not
+   * in its snapshot — even though it posted in between. */
+  it('does not acknowledge a mutation stamped after its snapshot', async () => {
     writeLoopState('engaged');
     const flag = path.join(stubBin, 'hang');
     fs.writeFileSync(flag, '');
@@ -2195,39 +2216,39 @@ exit 0
     }
     // A mutation completes while A is mid-post, exactly as another hook would
     // leave it: token stamped, marker written, token stamped again.
-    fs.writeFileSync(TOKEN(), 'later-1');
+    stampPending('later-1');
     writeSubagent('ag_Z', 'code-review');
-    fs.writeFileSync(TOKEN(), 'later-2');
+    stampPending('later-2');
 
     fs.rmSync(flag, { force: true });
     await waitExit(a);
 
-    // A saw the newer token, went round again, and published the truth.
+    // A saw the unacknowledged markers, went round again, and published the truth.
     const posted = notes();
     expect(posted[posted.length - 1]).toBe('working (2 subagents: code-review, explore)');
-    expect(fs.existsSync(TOKEN())).toBe(false);
+    expect(pendingCount()).toBe(0);
   }, 40_000);
 
-  /** CLEAR-THEN-MUTATION: a mutation after a publisher cleared must re-set it,
-   * and be repaired by the next hook rather than lost. */
-  it('is re-set by a mutation that lands after a clear, and repaired later', () => {
+  /** ACK-THEN-MUTATION: a mutation after a publisher acknowledged leaves its own
+   * new marker, and is repaired by the next hook rather than lost. */
+  it('leaves a new marker for a mutation that lands after an ack, repaired later', () => {
     writeLoopState('engaged');
     stubCurl();
     runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
-    expect(fs.existsSync(TOKEN())).toBe(false);
+    expect(pendingCount()).toBe(0);
 
     // A mutation that cannot publish: a usage limit stands, so the gate stops it
     // before any post. The token must be left behind as the record.
     writeMarker('20260917T180000-1.json', { at: new Date().toISOString() });
     runHook('subagent-start', subagentPayload('SubagentStart', 'ag_2', 'code-review'));
-    expect(fs.existsSync(TOKEN())).toBe(true);
+    expect(pendingCount()).toBeGreaterThan(0);
     expect(fs.readFileSync(STAMP(), 'utf8')).toBe('working (1 subagent: explore)'); // stale, and says so
 
     // The block clears; the next hook — whatever its mode — repairs the note.
     fs.rmSync(path.join(stateDir, 'blocked'), { recursive: true, force: true });
     runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
     expect(notes()[notes().length - 1]).toBe('working (2 subagents: code-review, explore)');
-    expect(fs.existsSync(TOKEN())).toBe(false);
+    expect(pendingCount()).toBe(0);
   });
 
   /**
@@ -2269,7 +2290,7 @@ exit 0
     const want = 'working (4 subagents: code-review, explore, general-purpose +1 more)';
     expect(notes()[notes().length - 1]).toBe(want);
     expect(fs.readFileSync(STAMP(), 'utf8')).toBe(want);
-    expect(fs.existsSync(TOKEN())).toBe(false);
+    expect(pendingCount()).toBe(0);
   }, 60_000);
 
   it('a queued waiter posts nothing when the body already matches the stamp', async () => {
@@ -2312,7 +2333,8 @@ mkdir -p "$SPARROW_STATE_DIR/subagents" 2>/dev/null || true
 n=$(ls "$SPARROW_STATE_DIR/subagents" | wc -l)
 printf '{"version":1,"agent":"c%s","type":"churn%s","at":"2026-09-18T00:00:00.000Z"}' "$n" "$n" \
   > "$SPARROW_STATE_DIR/subagents/c$n.json"
-printf 'churn-%s' "$n" > "$SPARROW_STATE_DIR/auto-status-pending"
+mkdir -p "$SPARROW_STATE_DIR/auto-status-pending.d" 2>/dev/null || true
+: > "$SPARROW_STATE_DIR/auto-status-pending.d/churn-$n"
 case "$url" in */me/rooms) printf '%s' "$ROOMS_JSON" ;; esac
 exit 0
 `;
@@ -2322,21 +2344,30 @@ exit 0
   }
   const statusPostCount = (): number => statusPosts().length;
 
-  it('stops at the deadline, posts nothing further, and leaves the token set', () => {
+  it('stops at the deadline, posts nothing further, and leaves the markers set', () => {
     writeLoopState('engaged');
     stubSlowChurningCurl('1');
     writeSubagent('ag_1', 'explore');
-    fs.writeFileSync(path.join(stateDir, 'auto-status-pending'), 'start');
+    stampPending('start');
 
     const started = Date.now();
     const r = runHook('post-tool', '{"hook_event_name":"PostToolUse"}', {
-      SPARROW_NOTE_BUDGET: '1',
+      SPARROW_NOTE_BUDGET: '3',
     });
     expect(r.code).toBe(0);
-    // One publication (two rooms) and no more: the deadline stops round 1 before
-    // it composes again, where three rounds would otherwise have posted thrice.
-    expect(statusPostCount()).toBe(2);
-    expect(fs.existsSync(path.join(stateDir, 'auto-status-pending'))).toBe(true);
+    // AT MOST one publication (two rooms) and no more, where three unbounded
+    // rounds against this churning stub would have posted six times.
+    //
+    // The bound, not an exact count, is the honest assertion: `budget_left`
+    // works in whole seconds, so the effective deadline is fuzzy by up to one
+    // second and this fan-out either completes or is truncated one POST in.
+    // Both are the budget doing its job, and pinning the count to 2 made this
+    // test flake (seen 2026-09-18). What must hold either way is that the loop
+    // stopped and the markers are still owed.
+    expect(statusPostCount()).toBeGreaterThan(0);
+    expect(statusPostCount()).toBeLessThanOrEqual(2);
+    // The churn that landed during the fan-out is still owed, and says so.
+    expect(pendingCount()).toBeGreaterThan(0);
     // And it did not sit there for three slow rounds.
     expect(Date.now() - started).toBeLessThan(8_000);
   }, 20_000);
@@ -2347,7 +2378,7 @@ exit 0
     const started = Date.now();
     runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
     expect(Date.now() - started).toBeLessThan(2_000);
-    expect(fs.existsSync(path.join(stateDir, 'auto-status-pending'))).toBe(false);
+    expect(pendingCount()).toBe(0);
   });
 });
 
@@ -2398,6 +2429,23 @@ describe('sparrow-auto-status.sh — every mode runs clean', () => {
     });
   }
 
+  // The paths added on 2026-09-18: the idle-owed flag (read at the top of every
+  // publication round) and the legacy-token migration (run once per hook).
+  for (const [mode, input] of MODES) {
+    const label = /"notification_type":"([a-z_]+)"/.exec(input)?.[1] ?? mode;
+    it(`${mode} (${label}) exits 0 with nothing on stderr while idle is owed`, () => {
+      writeLoopState('engaged');
+      stubCurl();
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(IDLE_OWED(), '');
+      fs.writeFileSync(PENDING_LEGACY(), 'legacy'); // …and a migration to do
+      const r = runFull(mode, input);
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      expect(fs.existsSync(PENDING_LEGACY())).toBe(false); // converted, never dropped
+    });
+  }
+
   it('the post-tool backstop path runs and still refreshes presence', () => {
     // The exact path the unset variable broke: a stamp exists, nothing drifted,
     // so the backstop must fall through to the throttled presence refresh.
@@ -2416,7 +2464,7 @@ describe('sparrow-auto-status.sh — every mode runs clean', () => {
     stubCurl();
     runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
     writeSubagent('ag_2', 'code-review'); // drift with no hook behind it
-    fs.writeFileSync(path.join(stateDir, 'auto-status-pending'), 'drift');
+    stampPending('drift');
     const r = runFull('post-tool', '{"hook_event_name":"PostToolUse"}');
     expect(r.stderr).toBe('');
     expect(r.status).toBe(0);
@@ -2540,36 +2588,35 @@ describe('sparrow-auto-status.sh — a broken lock degrades, it does not silence
   }, 20_000);
 });
 
-describe('sparrow-auto-status.sh — a clear racing a mutation loses nothing', () => {
+describe('sparrow-auto-status.sh — an ack racing a mutation loses nothing', () => {
   /**
-   * The token check is NOT compare-and-delete, and nothing in shell makes it
-   * one. The design does not need it to be: every mutation stamps the token
-   * BEFORE and AGAIN AFTER, so a clear that races a mutation is followed by that
-   * mutation's second stamp. This drives exactly that interleaving — the clear
-   * lands between the two stamps — and asserts the token ends SET, so the change
-   * is still recorded for a later hook.
+   * There is no compare-and-delete left to race. A publisher unlinks exactly the
+   * NAMES it snapshotted, and names are never reused, so a mutation that
+   * completes after the snapshot leaves a marker the publisher cannot touch.
+   * This drives that interleaving — the ack lands between the mutation's two
+   * stamps — and asserts the mutation's own record survives it.
    */
-  it('ends with the token set when the clear lands between the two stamps', async () => {
+  it('keeps the later marker when the ack lands between the two stamps', async () => {
     writeLoopState('engaged');
     stubCurl();
-    const token = path.join(stateDir, 'auto-status-pending');
-    fs.mkdirSync(stateDir, { recursive: true });
-
-    // A mutator: stamp, (slow) mutate, stamp again — the second stamp landing
-    // after the publisher has already cleared.
-    fs.writeFileSync(token, 'mutator-before');
-    const mutator = spawn('sh', ['-c',
-      `sleep 1; printf '{"version":1,"agent":"ag_M","type":"plan","at":"2026-09-18T00:00:00.000Z"}' > '${path.join(stateDir, 'subagents', 'ag_M.json')}'; printf 'mutator-after' > '${token}'`,
-    ], { stdio: 'ignore' });
     fs.mkdirSync(path.join(stateDir, 'subagents'), { recursive: true });
 
-    // The publisher runs now, sees `mutator-before`, publishes, and clears it.
+    // A mutator: stamp, (slow) mutate, stamp again — the second stamp landing
+    // after the publisher has already acknowledged everything it saw.
+    stampPending('mutator-before');
+    const mutator = spawn('sh', ['-c',
+      `sleep 1; printf '{"version":1,"agent":"ag_M","type":"plan","at":"2026-09-18T00:00:00.000Z"}' > '${path.join(stateDir, 'subagents', 'ag_M.json')}'; : > '${path.join(stateDir, 'auto-status-pending.d', 'mutator-after')}'`,
+    ], { stdio: 'ignore' });
+
+    // The publisher runs now, snapshots `mutator-before` with its own two, and
+    // acknowledges exactly those.
     runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
-    expect(fs.existsSync(token)).toBe(false); // cleared, mid-mutation
+    expect(pendingNames()).toEqual([]); // acknowledged, mid-mutation
 
     await waitExit(mutator);
-    // …and the mutation's own second stamp put it back, so nothing is lost.
-    expect(fs.readFileSync(token, 'utf8')).toBe('mutator-after');
+    // …and the mutation's own second stamp is a NAME THAT WAS NEVER SNAPSHOTTED,
+    // so nothing could have erased it.
+    expect(pendingNames()).toEqual(['mutator-after']);
     expect(fs.existsSync(path.join(stateDir, 'subagents', 'ag_M.json'))).toBe(true);
   }, 20_000);
 });
@@ -2632,6 +2679,590 @@ exit 0
     // The ask is still in force, and the token's disposition matches what was
     // actually published: nothing is owed, because the ask WAS published.
     expect(fs.existsSync(path.join(stateDir, 'needs-input'))).toBe(true);
-    expect(fs.existsSync(path.join(stateDir, 'auto-status-pending'))).toBe(false);
+    expect(pendingCount()).toBe(0);
   }, 40_000);
+});
+
+/* ========== FINDING 1: A PENDING RECORD CANNOT BE ERASED =================== *
+ * Reviewer, 2026-09-18. The old protocol wrote a unique VALUE to one reused
+ * filename and acknowledged it with `cat`, compare, `rm` — a compare-and-delete
+ * that is three steps, not one. Pause a publisher AFTER its equality test has
+ * succeeded but BEFORE its `rm`; run a `notification(permission_prompt)` hook to
+ * completion in the gap (it stamps, writes needs-input, stamps again, loses its
+ * own lock wait and exits); release the publisher. Its `rm` then deleted a token
+ * that recorded a mutation it never published, and the final state was:
+ * needs-input standing, nothing owed on disk, note reading `working (1 subagent:
+ * …)`, and no publisher left to repair it. The old double-stamp argument only
+ * covered a clear landing BETWEEN the two stamps; this one lands after BOTH.
+ *
+ * The fix is per-mutation immutable names acknowledged from a snapshot, so both
+ * of the notification's stamps produce names the publisher never saw.
+ *
+ * WHY THE BLOCK IS ON `rm` AND NOT ON `curl`: nothing but the `[` test runs
+ * between the old compare and its unlink, so no curl stub can reach that window.
+ * A one-shot sentinel on the unlink itself can, and it is the SAME point in both
+ * protocols — the publisher's unlink — so the interleaving means the same thing
+ * before and after the fix. No sleeps order anything here: the sentinel is
+ * released only once the notification process has exited.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — a mutation completed before the unlink survives it', () => {
+  /** A stub `rm` that blocks the FIRST unlink of a pending record (either
+   * layout) while `sentinel` exists, then delegates to the real one. */
+  function stubBlockingRm(sentinel: string): void {
+    const realRm = execFileSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).trim();
+    const p = path.join(stubBin, 'rm');
+    fs.writeFileSync(p, `#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    *auto-status-pending*)
+      if [ ! -f '${sentinel}.used' ]; then
+        : > '${sentinel}.used'
+        n=0
+        while [ -f '${sentinel}' ] && [ "$n" -lt 900 ]; do sleep 0.05; n=$((n + 1)); done
+      fi
+      ;;
+  esac
+done
+exec ${realRm} "$@"
+`);
+    fs.chmodSync(p, 0o755);
+  }
+
+  const notes = (): string[] =>
+    statusPosts().map((p) => (/"note":"([^"]*)"/.exec(p.body) ?? [])[1] ?? '');
+
+  it('is still owed after a permission prompt lands across the publisher unlink', async () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const sentinel = path.join(stubBin, 'hold-rm');
+    fs.writeFileSync(sentinel, '');
+    stubBlockingRm(sentinel);
+
+    const env = {
+      PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+      HOME: home,
+      SPARROW_STATE_DIR: stateDir,
+      CURL_LOG: curlLog,
+      ROOMS_JSON,
+      SPARROW_SERVER: 'https://example.test',
+      SPARROW_TOKEN: 'agk_test',
+      // A short budget so the publisher cannot repair anything itself once it is
+      // released: by then its deadline is long gone and it must hand over.
+      SPARROW_NOTE_BUDGET: '3',
+    };
+
+    // A publishes `working (1 subagent: explore)`, then stops at its unlink.
+    const a = spawn('sh', [SCRIPT, 'subagent-start'], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+    a.stdin.end(subagentPayload('SubagentStart', 'ag_A', 'explore'));
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && !fs.existsSync(`${sentinel}.used`)) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(fs.existsSync(`${sentinel}.used`)).toBe(true);
+
+    // The parent is asked something, RIGHT ACROSS the unlink: it stamps, writes
+    // needs-input, stamps again, loses its lock wait twice over, and exits.
+    runHook('notification', notify('permission_prompt'), { SPARROW_NOTE_BUDGET: '20' });
+    expect(fs.existsSync(path.join(stateDir, 'needs-input'))).toBe(true);
+
+    fs.rmSync(sentinel, { force: true });
+    await waitExit(a);
+
+    // The publisher never published the ask — its body predates it…
+    expect(notes()[notes().length - 1]).toBe('working (1 subagent: explore)');
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
+    // …so the record of it MUST still be on disk. This is the assertion the old
+    // compare-and-delete failed: it unlinked a token it had never seen.
+    expect(pendingCount()).toBeGreaterThan(0);
+
+    // And the record is what gets the truth published.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(notes()[notes().length - 1]).toBe('blocked — needs your input (1 subagent: explore)');
+    expect(pendingCount()).toBe(0);
+  }, 90_000);
+});
+
+/* ========== FINDING 2: `idle` IS OWED, NOT MERELY INTENDED ================= *
+ * Reviewer, 2026-09-18. Hold a `subagent-start` inside its locked `GET
+ * /me/rooms` for longer than the stop mode's lock wait: the `stop` hook returns
+ * when its wait expires WITHOUT posting idle, and the released holder publishes
+ * `working (1 subagent: …)` with no idle publisher left anywhere. The intended
+ * idle existed only as that one process's intention, so nothing could recover
+ * it.
+ *
+ * The fix makes the intent durable state, written BEFORE the stop tries to
+ * publish and read at the top of every publication round.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — idle is owed, not merely intended', () => {
+  /** A curl stub that blocks the first `GET /me/rooms` while the flag exists. */
+  function stubHangingCurl(flag: string): void {
+    const body = `#!/bin/sh
+url=; data=; prev=
+for a in "$@"; do case "$a" in http://*|https://*) url=$a ;; esac; [ "$prev" = "-d" ] && data=$a; prev=$a; done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+case "$url" in
+  */me/rooms)
+    if [ -f "${flag}" ] && [ ! -f "${flag}.used" ]; then
+      : > "${flag}.used"
+      n=0
+      while [ -f "${flag}" ] && [ "$n" -lt 900 ]; do sleep 0.05; n=$((n + 1)); done
+    fi
+    printf '%s' "$ROOMS_JSON"
+    ;;
+esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+
+  it('a holder released after the stop gave up publishes idle, not working', async () => {
+    writeLoopState('engaged');
+    const flag = path.join(stubBin, 'hang');
+    fs.writeFileSync(flag, '');
+    stubHangingCurl(flag);
+
+    const env = {
+      PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+      HOME: home,
+      SPARROW_STATE_DIR: stateDir,
+      CURL_LOG: curlLog,
+      ROOMS_JSON,
+      SPARROW_SERVER: 'https://example.test',
+      SPARROW_TOKEN: 'agk_test',
+      SPARROW_NOTE_BUDGET: '60',
+    };
+    const a = spawn('sh', [SCRIPT, 'subagent-start'], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+    a.stdin.end(subagentPayload('SubagentStart', 'ag_A', 'explore'));
+    const deadline = Date.now() + 10_000;
+    while (
+      Date.now() < deadline &&
+      !(fs.existsSync(curlLog) && fs.readFileSync(curlLog, 'utf8').includes('/me/rooms'))
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    // The turn ends while the holder is stuck. The stop's 2s lock wait expires.
+    const before = statusPosts().length;
+    runHook('stop', '{"hook_event_name":"Stop"}', { SPARROW_NOTE_BUDGET: '2' });
+    expect(statusPosts().length).toBe(before); // it published nothing at all…
+    expect(fs.existsSync(IDLE_OWED())).toBe(true); // …but the intent is on disk
+
+    fs.rmSync(flag, { force: true });
+    await waitExit(a);
+
+    // The holder finished its own (now stale) publication and then honoured the
+    // stop, because the flag outlived the process that formed the intent.
+    const posts = statusPosts();
+    expect(posts[posts.length - 1]!.body).toContain('"state":"idle"');
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('idle');
+    expect(fs.existsSync(IDLE_OWED())).toBe(false);
+    expect(pendingCount()).toBe(0);
+  }, 60_000);
+
+  it('a stop whose wait expires is honoured by the NEXT hook to take the lock', async () => {
+    writeLoopState('engaged');
+    stubCurl();
+    const lockFile = path.join(stateDir, 'auto-status-note.lock');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(lockFile, '');
+    const holder = spawn('sh', ['-c', `exec 9>>'${lockFile}'; flock 9; exec sleep 30`], { stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Nothing of this stop's own remains to check the lock again…
+    runHook('stop', '{"hook_event_name":"Stop"}', { SPARROW_NOTE_BUDGET: '2' });
+    expect(statusPosts()).toEqual([]);
+    expect(fs.existsSync(IDLE_OWED())).toBe(true);
+
+    holder.kill('SIGKILL');
+    await waitExit(holder);
+
+    // …so whoever takes the lock next owes idle, whatever its own mode was.
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0);
+    expect(posts[posts.length - 1]!.body).toContain('"state":"idle"');
+    expect(posts.some((p) => p.body.includes('subagent'))).toBe(false);
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('idle');
+    expect(fs.existsSync(IDLE_OWED())).toBe(false);
+  }, 40_000);
+
+  it('a prompt that resumes the turn cancels what idle was owed', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(IDLE_OWED(), ''); // a stop that never managed to publish
+    runHook('prompt', '{"hook_event_name":"UserPromptSubmit","prompt":"go"}');
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0);
+    expect(posts[posts.length - 1]!.body).toContain('"state":"working"');
+    expect(fs.existsSync(IDLE_OWED())).toBe(false);
+  });
+});
+
+/* ========== FINDING 3: THE BUDGET BOUNDS THE WORK IN FLIGHT ================ *
+ * Reviewer, 2026-09-18. `NOTE_DEADLINE` was consulted only at round entry, so a
+ * round that began with a second left could still run a 5s room GET plus up to
+ * MAX_ROOMS sequential 4s POSTs — far past the budget, and well past Codex's
+ * binding 20s for the whole hook. `publish_idle` checked nothing at all.
+ *
+ * Now every step re-reads what is left, sizes its own `--max-time` from it, and
+ * refuses to start with nothing left — and a fan-out that stops early SAYS SO,
+ * so the stamp (which means "this is what every room was last told") is not
+ * written and the pending markers are not acknowledged.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — the budget bounds the work in flight', () => {
+  /** Eight active rooms: enough that a full fan-out cannot fit the budget. */
+  const MANY_ROOMS = JSON.stringify({
+    items: Array.from({ length: 8 }, (_, i) => ({
+      room: { id: `rom_${i}`, name: `R${i}`, orgId: 'org_1', kind: 'project', archivedAt: null },
+      memberId: `mem_${i}`,
+      roomRole: 'member',
+    })),
+  });
+
+  /** A curl that burns ~1s per call and records the `--max-time` it was given. */
+  function stubSlowCurl(): void {
+    const body = `#!/bin/sh
+url=; mt=; prev=
+for a in "$@"; do
+  case "$a" in http://*|https://*) url=$a ;; esac
+  [ "$prev" = "--max-time" ] && mt=$a
+  prev=$a
+done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s \\n' "$method" "$url" >> "$CURL_LOG"
+printf '%s %s %s\\n' "$method" "$url" "$mt" >> "$CURL_LOG.mt"
+sleep 1
+case "$url" in */me/rooms) printf '%s' "$ROOMS_JSON" ;; esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+
+  /** The `--max-time` of every PUBLICATION call (presence has its own timeout). */
+  const publicationMaxTimes = (): number[] =>
+    fs.existsSync(`${curlLog}.mt`)
+      ? fs
+          .readFileSync(`${curlLog}.mt`, 'utf8')
+          .split('\n')
+          .filter((l) => l.trim() !== '' && !l.includes('/me/presence'))
+          .map((l) => Number(l.trim().split(' ')[2]))
+      : [];
+
+  it('truncates the fan-out at the deadline, stamps nothing, and keeps the markers', () => {
+    writeLoopState('engaged');
+    stubSlowCurl();
+
+    const started = Date.now();
+    const r = runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'), {
+      ROOMS_JSON: MANY_ROOMS,
+      SPARROW_NOTE_BUDGET: '3',
+    });
+    const elapsed = Date.now() - started;
+    expect(r.code).toBe(0);
+
+    // (a) A REAL BOUND: the budget, plus at most one in-flight call's worth of
+    // slack — not the old fixture's loose "under 8s".
+    expect(elapsed).toBeLessThan(5_500);
+
+    // (b) The fan-out stopped early rather than telling all eight rooms.
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0);
+    expect(posts.length).toBeLessThan(8);
+    // …and no single call was allowed to outlast the budget.
+    const mts = publicationMaxTimes();
+    expect(mts.length).toBeGreaterThan(0);
+    for (const mt of mts) expect(mt).toBeLessThanOrEqual(3);
+
+    // (c) The stamp means "every room has this", so a truncated publication must
+    // not write it — the post-tool backstop relies on that.
+    expect(fs.existsSync(NOTE_STAMP())).toBe(false);
+
+    // (d) …and nothing was acknowledged, so a later hook retries.
+    expect(pendingCount()).toBeGreaterThan(0);
+  }, 40_000);
+
+  it('a complete fan-out inside the budget still stamps and acknowledges', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'), {
+      SPARROW_NOTE_BUDGET: '8',
+    });
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
+    expect(pendingCount()).toBe(0);
+  });
+});
+
+describe('sparrow-auto-status.sh — pending markers migrate and are bounded', () => {
+  it('converts a legacy single-token file rather than dropping it', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    // A usage limit stands, so nothing can publish and nothing can acknowledge:
+    // whatever survives here is the migration alone.
+    writeMarker('20260918T000000-1.json', { at: new Date().toISOString() });
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(PENDING_LEGACY(), 'old-token-value');
+
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+
+    expect(fs.existsSync(PENDING_LEGACY())).toBe(false);
+    expect(pendingNames()).toHaveLength(1);
+  });
+
+  it('sweeps markers older than an hour and keeps the fresh ones', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    writeMarker('20260918T000000-1.json', { at: new Date().toISOString() });
+    stampPending('stale-one');
+    stampPending('fresh-one');
+    const old = new Date(Date.now() - 2 * 3600 * 1000);
+    fs.utimesSync(path.join(PENDING_DIR(), 'stale-one'), old, old);
+
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+
+    expect(pendingNames()).toEqual(['fresh-one']);
+  });
+});
+
+/* ===== A DIALOG CANNOT BE OPEN ON A TURN THAT HAS ENDED ==================== *
+ * Reviewer, second round. `IDLE_OWED` left standing by a stop that could not
+ * publish made the NEXT publication idle — including a `permission_prompt`'s.
+ * `publish_idle` then cleared every marker, including the two the ask had just
+ * written, so the repair step found nothing owed and nothing could put it right:
+ * the post-tool backstop cannot run, because the tool call is blocked on the
+ * very dialog nobody has answered. The status read `idle` for exactly as long as
+ * a human was being asked to act.
+ *
+ * It is a reachable ordering, not a theoretical one: an autonomous turn resumes
+ * with no UserPromptSubmit and its first tool call needs permission, so the
+ * Notification is the turn's FIRST hook with the previous stop's flag standing.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — being asked something cancels what idle was owed', () => {
+  const notes = (): string[] =>
+    statusPosts().map((p) => (/"note":"([^"]*)"/.exec(p.body) ?? [])[1] ?? '');
+
+  for (const type of [
+    'permission_prompt',
+    'elicitation_dialog',
+    'elicitation_url_dialog',
+    'agent_needs_input',
+  ]) {
+    it(`publishes the ask, not idle, when ${type} arrives with idle owed`, () => {
+      writeLoopState('engaged');
+      stubCurl();
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(IDLE_OWED(), ''); // a stop that never managed to publish
+
+      runHook('notification', notify(type));
+
+      const posts = statusPosts();
+      expect(posts.length).toBeGreaterThan(0);
+      expect(posts.some((p) => p.body.includes('"state":"idle"'))).toBe(false);
+      expect(notes()[notes().length - 1]).toBe('blocked — needs your input');
+      expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('blocked — needs your input');
+      expect(fs.existsSync(IDLE_OWED())).toBe(false);
+      expect(fs.existsSync(path.join(stateDir, 'needs-input'))).toBe(true);
+      expect(pendingCount()).toBe(0);
+    });
+  }
+
+  it('keeps the record of the ask when it cannot be published at all', async () => {
+    writeLoopState('engaged');
+    stubCurl();
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(IDLE_OWED(), '');
+    const lockFile = path.join(stateDir, 'auto-status-note.lock');
+    fs.writeFileSync(lockFile, '');
+    const holder = spawn('sh', ['-c', `exec 9>>'${lockFile}'; flock 9; exec sleep 30`], { stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 300));
+
+    runHook('notification', notify('permission_prompt'), { SPARROW_NOTE_BUDGET: '2' });
+    expect(statusPosts()).toEqual([]); // it never got the lock…
+    expect(fs.existsSync(IDLE_OWED())).toBe(false); // …but the turn is live
+    expect(pendingCount()).toBeGreaterThan(0); // …and the ask is still owed
+
+    holder.kill('SIGKILL');
+    await waitExit(holder);
+
+    // The next hook publishes the ASK. Before the fix it published `idle`,
+    // because the flag the stop left behind had outlived the turn it described.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(notes()[notes().length - 1]).toBe('blocked — needs your input');
+    expect(statusPosts().some((p) => p.body.includes('"state":"idle"'))).toBe(false);
+  }, 40_000);
+});
+
+/* ===== "NO ROOMS" AND "I COULD NOT FIND OUT" ARE DIFFERENT ANSWERS ========= *
+ * Reviewer, second round. `room_ids` returned 0 with empty output for a failed
+ * GET just as it did for a profile with no rooms. Once the fan-out started
+ * reporting completeness, that ambiguity read as "a complete fan-out with
+ * nothing to do": the note was stamped as what every room was last told, and
+ * every snapshotted marker was acknowledged — on a publication that reached
+ * nobody, leaving nothing on disk to say so. Same class as finding 1, arrived at
+ * from the other end.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — a failed room listing is not an empty one', () => {
+  it('stamps nothing and acknowledges nothing when the listing fails', () => {
+    writeLoopState('engaged');
+    stubCurl({ fail: true }); // every call, the rooms GET included, exits 22
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+
+    expect(statusPosts()).toEqual([]); // nobody was told anything…
+    expect(fs.existsSync(NOTE_STAMP())).toBe(false); // …so nothing may claim they were
+    expect(pendingCount()).toBeGreaterThan(0); // …and the mutation is still owed
+  });
+
+  it('a later hook repairs it once the listing works again', () => {
+    writeLoopState('engaged');
+    stubCurl({ fail: true });
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    expect(pendingCount()).toBeGreaterThan(0);
+
+    stubCurl(); // the server comes back
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0);
+    expect((/"note":"([^"]*)"/.exec(posts[posts.length - 1]!.body) ?? [])[1]).toBe(
+      'working (1 subagent: explore)',
+    );
+    expect(pendingCount()).toBe(0);
+  });
+
+  it('a SUCCESSFUL listing with no rooms is complete, and does acknowledge', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'), {
+      ROOMS_JSON: JSON.stringify({ items: [] }),
+    });
+
+    expect(statusPosts()).toEqual([]); // nothing to post to, vacuously
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
+    expect(pendingCount()).toBe(0);
+  });
+
+  it('a listing of only ARCHIVED rooms is complete too', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'), {
+      ROOMS_JSON: JSON.stringify({
+        items: [
+          {
+            room: { id: 'rom_z', name: 'Z', orgId: 'org_1', kind: 'project', archivedAt: '2026-01-01T00:00:00Z' },
+            memberId: 'mem_z',
+            roomRole: 'member',
+          },
+        ],
+      }),
+    });
+    expect(statusPosts()).toEqual([]);
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working (1 subagent: explore)');
+    expect(pendingCount()).toBe(0);
+  });
+
+  it('an unparseable body is a failed listing, not an empty one', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'), {
+      ROOMS_JSON: 'not json at all',
+    });
+    expect(statusPosts()).toEqual([]);
+    expect(fs.existsSync(NOTE_STAMP())).toBe(false);
+    expect(pendingCount()).toBeGreaterThan(0);
+  });
+});
+
+/* ===== A BROKEN CLOCK DEGRADES, IT DOES NOT SILENCE ======================== *
+ * `budget_left` is the one thing every publication step now consults, so what
+ * it does with an unusable `date` decides whether a host with a broken clock
+ * publishes at all. Reporting 0 would be the natural floor and would mean never
+ * posting anything again; it reports the WHOLE budget instead, so each call is
+ * still bounded and the round cap is what stops the hook. These drive the hook
+ * with `date` actually broken — both spellings, missing and garbage — rather
+ * than reasoning about the branch.
+ * ========================================================================== */
+describe('sparrow-auto-status.sh — the budget with no usable clock', () => {
+  /** A PATH with every tool the hook needs, and a `date` that behaves as given. */
+  function clocklessBin(dateBody: string): string {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'sparrow-as-noclock-'));
+    for (const tool of ['sh', 'cat', 'sed', 'head', 'tr', 'cut', 'mkdir', 'rm', 'rmdir', 'stat', 'awk', 'sort', 'uniq', 'grep', 'wc', 'node', 'sleep', 'tail', 'flock']) {
+      const real = execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim();
+      fs.symlinkSync(real, path.join(bin, tool));
+    }
+    fs.symlinkSync(path.join(stubBin, 'curl'), path.join(bin, 'curl'));
+    fs.writeFileSync(path.join(bin, 'date'), dateBody);
+    fs.chmodSync(path.join(bin, 'date'), 0o755);
+    return bin;
+  }
+
+  /** A curl that records the `--max-time` each publication call was given. */
+  function stubCurlRecordingMaxTime(): void {
+    const body = `#!/bin/sh
+url=; mt=; prev=; data=
+for a in "$@"; do
+  case "$a" in http://*|https://*) url=$a ;; esac
+  [ "$prev" = "--max-time" ] && mt=$a
+  [ "$prev" = "-d" ] && data=$a
+  prev=$a
+done
+case " $* " in *" -X POST "*) method=POST ;; *) method=GET ;; esac
+printf '%s %s %s\\n' "$method" "$url" "$data" >> "$CURL_LOG"
+printf '%s %s %s\\n' "$method" "$url" "$mt" >> "$CURL_LOG.mt"
+case "$url" in */me/rooms) printf '%s' "$ROOMS_JSON" ;; esac
+exit 0
+`;
+    const p = path.join(stubBin, 'curl');
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+
+  const publicationMaxTimes = (): number[] =>
+    fs.existsSync(`${curlLog}.mt`)
+      ? fs
+          .readFileSync(`${curlLog}.mt`, 'utf8')
+          .split('\n')
+          .filter((l) => l.trim() !== '' && !l.includes('/me/presence'))
+          .map((l) => Number(l.trim().split(' ')[2]))
+      : [];
+
+  for (const [label, dateBody] of [
+    ['a `date` that always fails', '#!/bin/sh\nexit 1\n'],
+    ['a `date` that prints garbage', "#!/bin/sh\nprintf 'not-a-time\\n'\nexit 0\n"],
+  ] as [string, string][]) {
+    it(`still publishes, bounded, with ${label}`, () => {
+      const bin = clocklessBin(dateBody);
+      writeLoopState('engaged');
+      stubCurlRecordingMaxTime();
+      const r = spawnSync('sh', [SCRIPT, 'subagent-start'], {
+        input: subagentPayload('SubagentStart', 'ag_1', 'explore'),
+        encoding: 'utf8',
+        env: {
+          PATH: bin,
+          HOME: home,
+          SPARROW_STATE_DIR: stateDir,
+          CURL_LOG: curlLog,
+          ROOMS_JSON,
+          SPARROW_SERVER: 'https://example.test',
+          SPARROW_TOKEN: 'agk_test',
+          SPARROW_NOTE_BUDGET: '2',
+        },
+      });
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      // NOT SILENCE: the publication still happened and was acknowledged.
+      expect(statusPosts().length).toBe(2);
+      expect(fs.existsSync(NOTE_STAMP())).toBe(true);
+      expect(pendingCount()).toBe(0);
+      // …and STILL BOUNDED: `budget_left` reported the whole budget, so every
+      // call was capped by it rather than running unbounded or being refused.
+      const mts = publicationMaxTimes();
+      expect(mts.length).toBeGreaterThan(0);
+      for (const mt of mts) expect(mt).toBe(2);
+      fs.rmSync(bin, { recursive: true, force: true });
+    });
+  }
 });
