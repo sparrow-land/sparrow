@@ -22,9 +22,9 @@ importers:
       '@fastify/websocket':
         specifier: ^11.3.0
         version: 11.3.0
-      '@sparrow/common-types':
-        specifier: workspace:*
-        version: link:../../packages/common-types
+      '@sparrow-land/sdk':
+        specifier: 0.1.0
+        version: 0.1.0
       better-sqlite3:
         specifier: ^12.2.0
         version: 12.11.1
@@ -44,9 +44,6 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
     devDependencies:
-      '@sparrow/client':
-        specifier: workspace:*
-        version: link:../../packages/client
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
@@ -71,12 +68,9 @@ importers:
 
   apps/cli:
     dependencies:
-      '@sparrow/client':
-        specifier: workspace:*
-        version: link:../../packages/client
-      '@sparrow/common-types':
-        specifier: workspace:*
-        version: link:../../packages/common-types
+      '@sparrow-land/sdk':
+        specifier: 0.1.0
+        version: 0.1.0
       '@sparrow/skill':
         specifier: workspace:*
         version: link:../../packages/skill
@@ -108,9 +102,9 @@ importers:
 
   apps/mail-gateway:
     dependencies:
-      '@sparrow/common-types':
-        specifier: workspace:*
-        version: link:../../packages/common-types
+      '@sparrow-land/sdk':
+        specifier: 0.1.0
+        version: 0.1.0
       '@sparrow/mail-parse':
         specifier: workspace:*
         version: link:../../packages/mail-parse
@@ -151,12 +145,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.0
         version: 1.30.0(zod@3.25.76)
-      '@sparrow/client':
-        specifier: workspace:*
-        version: link:../../packages/client
-      '@sparrow/common-types':
-        specifier: workspace:*
-        version: link:../../packages/common-types
+      '@sparrow-land/sdk':
+        specifier: 0.1.0
+        version: 0.1.0
       zod:
         specifier: ^3.24.1
         version: 3.25.76
@@ -179,12 +170,9 @@ importers:
 
   apps/web:
     dependencies:
-      '@sparrow/client':
-        specifier: workspace:*
-        version: link:../../packages/client
-      '@sparrow/common-types':
-        specifier: workspace:*
-        version: link:../../packages/common-types
+      '@sparrow-land/sdk':
+        specifier: 0.1.0
+        version: 0.1.0
       lucide-react:
         specifier: ^1.33.0
         version: 1.33.0(react@18.3.1)
@@ -244,52 +232,11 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)(jsdom@25.0.1)(lightningcss@1.32.0)
 
-  packages/client:
-    dependencies:
-      '@sparrow/common-types':
-        specifier: workspace:*
-        version: link:../common-types
-      zod:
-        specifier: ^3.24.1
-        version: 3.25.76
-    devDependencies:
-      '@sparrow/api':
-        specifier: workspace:*
-        version: link:../../apps/api
-      '@types/node':
-        specifier: ^22.10.5
-        version: 22.20.1
-      typescript:
-        specifier: ^5.7.3
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.8
-        version: 2.1.9(@types/node@22.20.1)(jsdom@25.0.1)(lightningcss@1.32.0)
-
-  packages/common-types:
-    dependencies:
-      nanoid:
-        specifier: ^5.0.9
-        version: 5.1.16
-      zod:
-        specifier: ^3.24.1
-        version: 3.25.76
-    devDependencies:
-      '@types/node':
-        specifier: ^22.10.5
-        version: 22.20.1
-      typescript:
-        specifier: ^5.7.3
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.8
-        version: 2.1.9(@types/node@22.20.1)(jsdom@25.0.1)(lightningcss@1.32.0)
-
   packages/mail-parse:
     dependencies:
-      '@sparrow/common-types':
-        specifier: workspace:*
-        version: link:../common-types
+      '@sparrow-land/sdk':
+        specifier: 0.1.0
+        version: 0.1.0
       mailparser:
         specifier: ^3.9.19
         version: 3.9.19
@@ -309,6 +256,9 @@ importers:
 
   packages/skill:
     devDependencies:
+      '@sparrow-land/sdk':
+        specifier: 0.1.0
+        version: 0.1.0
       '@types/node':
         specifier: ^22.10.5
         version: 22.20.1
@@ -1006,6 +956,10 @@ packages:
     resolution: {integrity: sha512-oELmoyA6ML9jDRMV3kgcMQFKxUfBU0yFVn6yTctVaLT5ygXnxH52I3TZEgV9EhXJC68/uFvE5Daj1/25c0Xa/A==}
     peerDependencies:
       selderee: ~0.12.0
+
+  '@sparrow-land/sdk@0.1.0':
+    resolution: {integrity: sha512-3oSCMWoiyzBCg4rugCrD3YeHFheFlMciU+8NlIsBfIiGOU4UjT3gXrO6CVNCXgoCCnEPevgCAlJDffuLF4DQuQ==}
+    engines: {node: '>=22'}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -3561,6 +3515,11 @@ snapshots:
       domelementtype: 2.3.0
       domhandler: 5.0.3
       selderee: 0.12.0
+
+  '@sparrow-land/sdk@0.1.0':
+    dependencies:
+      nanoid: 5.1.16
+      zod: 3.25.76
 
   '@standard-schema/spec@1.1.0': {}
 
