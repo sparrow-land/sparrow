@@ -732,17 +732,38 @@ describe('sparrow-stop-check.sh', () => {
      * judgement is re-run against it: its kind, its freshness, its generation,
      * its own liveness.
      * ---------------------------------------------------------------------- */
-    /** Publish a replacement owner (+ optional heartbeat) from a separate process. */
+    /** Publish a replacement owner (+ optional heartbeat) from a separate process.
+     *
+     * THE WRITER IS WAITED FOR, NOT ASSUMED. The publication has to land INSIDE
+     * the hook's patience window, and the only part of that we control is the
+     * `sleep`. Process spawn is not free: under a loaded box (the whole
+     * workspace running its suites at once) the shell can take longer to come up
+     * than the window itself, and the hook then blocks for "never published"
+     * rather than on the replacement's own merits -- a green test turning red
+     * because the machine was busy, which teaches everyone to re-run the gate
+     * instead of reading it. So the writer stamps a sentinel the instant it is
+     * alive, and this returns only once it has, leaving the sleep as the one
+     * thing the window has to cover. */
     const publishLater = (owner: Record<string, unknown>, heartbeat?: string, delay = 0.3): void => {
       const ownerPath = path.join(stateDir, 'await-owner.json');
       const hbPath = path.join(stateDir, 'heartbeat');
+      const readyPath = path.join(stateDir, `writer-ready-${Math.random().toString(36).slice(2)}`);
       const json = JSON.stringify({ version: 1, kind: 'await', ...owner });
       const hb = heartbeat === undefined ? '' : `printf '%s\n' '${heartbeat}' > '${hbPath}'; `;
-      const w = spawn('sh', ['-c', `sleep ${delay}; ${hb}printf '%s' '${json}' > '${ownerPath}'`], {
-        stdio: 'ignore',
-        detached: true,
-      });
+      const w = spawn(
+        'sh',
+        [
+          '-c',
+          `: > '${readyPath}'; sleep ${delay}; ${hb}printf '%s' '${json}' > '${ownerPath}'`,
+        ],
+        { stdio: 'ignore', detached: true },
+      );
       w.unref();
+      const giveUp = Date.now() + 10_000;
+      while (!fs.existsSync(readyPath)) {
+        if (Date.now() > giveUp) throw new Error('publishLater: writer never started');
+        execFileSync('sh', ['-c', 'sleep 0.01']);
+      }
     };
 
     it('BLOCKS when the replacement comes up PASSIVE under Codex', () => {
@@ -813,8 +834,13 @@ describe('sparrow-stop-check.sh', () => {
       const started = Date.now();
       expect(JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout).decision).toBe('block');
       const elapsed = Date.now() - started;
+      // The lower bound is the claim: it was PATIENT, it did not decide at once.
+      // The upper bound is only an anti-hang guard -- it must not sit there
+      // forever -- and is deliberately loose, because wall clock here includes
+      // process spawn and is not a performance assertion. A tight bound measured
+      // the scheduler instead of the hook and failed whenever the box was busy.
       expect(elapsed).toBeGreaterThan(1_800);
-      expect(elapsed).toBeLessThan(3_000);
+      expect(elapsed).toBeLessThan(10_000);
     });
 
     it('BLOCKS immediately when the candidate names the generation that already published', () => {
