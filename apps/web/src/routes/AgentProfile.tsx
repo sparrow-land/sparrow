@@ -6,8 +6,8 @@ import type {
   AgentSharingMode,
   CreateAgentResponse,
   HumanContact,
-} from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+} from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { useAuth } from '../lib/auth.js';
 import { useOrg } from '../lib/org.js';
 import { useCapabilities } from '../lib/capabilities.js';

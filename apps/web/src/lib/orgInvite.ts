@@ -16,7 +16,7 @@
  * reusable is dropped on sight, so a revoked or spent invite can never be
  * resurrected from storage. Fewer live doors is the whole point of the exercise.
  */
-import type { Invite } from '@sparrow/common-types';
+import type { Invite } from '@sparrow-land/sdk/types';
 import { api } from './client.js';
 
 /** What this browser has to remember to be able to re-offer an invite: its link. */

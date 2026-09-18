@@ -3,7 +3,7 @@ import type {
   ConfigDescriptor,
   ConfigEntry,
   ConfigSource,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { DB } from './db/index.js';
 import { config as configTable } from './db/schema.js';
 import { badRequest } from './errors.js';

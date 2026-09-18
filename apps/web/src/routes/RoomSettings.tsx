@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import type { Member, Room, RoomInvitationAdmin, RoomRole, RoomUpdatedEvent } from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+import type { Member, Room, RoomInvitationAdmin, RoomRole, RoomUpdatedEvent } from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../lib/client.js';
 import { wire, orgPath, roomPath } from '../lib/ids.js';
 import { useOrg } from '../lib/org.js';

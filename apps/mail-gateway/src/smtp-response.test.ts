@@ -1,4 +1,4 @@
-import type { InboundEmailResponse } from '@sparrow/common-types';
+import type { InboundEmailResponse } from '@sparrow-land/sdk/types';
 import { describe, expect, it } from 'vitest';
 import { smtpReplyFor } from './smtp-response.js';
 

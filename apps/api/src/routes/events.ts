@@ -16,12 +16,12 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { eq } from 'drizzle-orm';
-import { sha256Hex } from '@sparrow/common-types/identity';
+import { sha256Hex } from '@sparrow-land/sdk/node';
 import {
   STREAM_MAX_LIFETIME_SECONDS,
   quietEventNames,
   type EventRoomRef,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext, Principal } from '../context.js';
 import { nowIso, principalIdent, resolvePrincipal } from '../context.js';
 import { humans, userSessions } from '../db/schema.js';

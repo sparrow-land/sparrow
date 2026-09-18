@@ -22,8 +22,8 @@ import {
   type ListEnrollmentsResponse,
   type InviteInfoResponse,
   type OrgRole,
-} from '@sparrow/common-types';
-import { sha256Hex } from '@sparrow/common-types/identity';
+} from '@sparrow-land/sdk/types';
+import { sha256Hex } from '@sparrow-land/sdk/node';
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';
 import { agents, enrollments, humans, invites, orgMemberships, orgs } from '../db/schema.js';

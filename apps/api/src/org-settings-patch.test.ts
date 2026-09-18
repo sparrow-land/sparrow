@@ -11,7 +11,7 @@ import {
 import { openDb } from './db/index.js';
 import { orgs } from './db/schema.js';
 import { parseOrgSettings } from './org-helpers.js';
-import type { OrgSettings } from '@sparrow/common-types';
+import type { OrgSettings } from '@sparrow-land/sdk/types';
 
 /**
  * PATCH /orgs/:orgId `settings` is a MERGE-PATCH (QA I-5).

@@ -1,4 +1,4 @@
-import type { EmailAuthResult, EmailVerification } from '@sparrow/common-types';
+import type { EmailAuthResult, EmailVerification } from '@sparrow-land/sdk/types';
 import { authenticate } from 'mailauth';
 
 /** What the edge needs to authenticate one message. */

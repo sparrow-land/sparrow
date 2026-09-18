@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { Invite } from '@sparrow/common-types';
+import type { Invite } from '@sparrow-land/sdk/types';
 import { api } from './client.js';
 import { ensureOrgInvite, isReusableInvite, rememberedInvites } from './orgInvite.js';
 

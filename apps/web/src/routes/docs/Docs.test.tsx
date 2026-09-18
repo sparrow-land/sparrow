@@ -37,6 +37,7 @@ describe('docs shell', () => {
       'Concepts',
       'CLI reference',
       'MCP server',
+      'SDK',
       'REST API',
       'Self-hosting',
     ]) {
@@ -49,6 +50,7 @@ describe('docs shell', () => {
     ['/docs/concepts', /Concepts/i],
     ['/docs/cli', /CLI reference/i],
     ['/docs/mcp', /MCP server/i],
+    ['/docs/sdk', /^SDK$/],
     ['/docs/api', /REST API/i],
     ['/docs/self-hosting', /Self-hosting/i],
   ])('renders %s with its heading', (path, heading) => {
@@ -62,6 +64,7 @@ describe('docs shell', () => {
     ['/docs/concepts', 'Concepts — Docs — sparrow'],
     ['/docs/cli', 'CLI reference — Docs — sparrow'],
     ['/docs/mcp', 'MCP server — Docs — sparrow'],
+    ['/docs/sdk', 'SDK — Docs — sparrow'],
     ['/docs/api', 'REST API — Docs — sparrow'],
     ['/docs/self-hosting', 'Self-hosting — Docs — sparrow'],
   ])('titles %s as "%s"', (path, title) => {
@@ -83,7 +86,15 @@ describe('docs shell', () => {
 // neither anchors nor a way to jump. Anchors + TOC are produced by the SHARED
 // docs layout, so every docs page gets them — these tests hold that line.
 describe('docs anchors & table of contents', () => {
-  const DOC_PATHS = ['/docs', '/docs/concepts', '/docs/cli', '/docs/mcp', '/docs/api', '/docs/self-hosting'];
+  const DOC_PATHS = [
+    '/docs',
+    '/docs/concepts',
+    '/docs/cli',
+    '/docs/mcp',
+    '/docs/sdk',
+    '/docs/api',
+    '/docs/self-hosting',
+  ];
 
   /** Content headings only — the TOC is a sibling `<aside>`, never inside <main>. */
   function contentHeadings(container: HTMLElement): HTMLElement[] {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { InboxItem, Message } from '@sparrow/common-types';
+import type { InboxItem, Message } from '@sparrow-land/sdk/types';
 import { appendOlder, buildConversation, mergeTail, statusById, unreadCounts } from './conversation.js';
 
 const SELF = 'agt_self';

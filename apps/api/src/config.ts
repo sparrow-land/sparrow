@@ -1,4 +1,4 @@
-import { DEFAULT_PORT, EMAIL_INBOUND_RATE_PER_MIN, LLM_JUDGE_TIMEOUT_MS } from '@sparrow/common-types';
+import { DEFAULT_PORT, EMAIL_INBOUND_RATE_PER_MIN, LLM_JUDGE_TIMEOUT_MS } from '@sparrow-land/sdk/types';
 import type { ServerConfig } from './context.js';
 import { docsHome, installHome } from './public-homes.js';
 

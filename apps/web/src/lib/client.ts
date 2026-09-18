@@ -1,10 +1,10 @@
-import { SparrowClient, ApiError } from '@sparrow/client';
+import { SparrowClient, ApiError } from '@sparrow-land/sdk';
 import {
   MeResponseSchema,
   AvatarMutationResponseSchema,
   type MePrincipal,
   type ThemePreference,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 
 /**
  * The web UI is served BY the API at the same origin, so every request is

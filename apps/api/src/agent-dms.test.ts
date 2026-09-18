@@ -3,7 +3,7 @@ import {
   AGENT_DM_NO_COMMON_VIEWER_MESSAGE,
   AGENT_DM_SEVERED_MESSAGE,
   DM_NOT_ELIGIBLE_MESSAGE,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import {
   makeTestServer,
   listen,

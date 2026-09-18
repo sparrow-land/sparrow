@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ChevronLeft } from 'lucide-react';
-import type { Email, EmailThread } from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+import type { Email, EmailThread } from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../../lib/client.js';
 import { headFromEmail } from '../../lib/email.js';
 import { EmailCard } from '../../components/email/EmailCard.js';

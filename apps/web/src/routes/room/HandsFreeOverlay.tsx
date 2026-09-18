@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2, Mic, Send, X } from 'lucide-react';
-import { ApiError, openTranscriptionStream, type TranscriptionStream } from '@sparrow/client';
+import { ApiError, openTranscriptionStream, type TranscriptionStream } from '@sparrow-land/sdk';
 import { api } from '../../lib/client.js';
 import { useCapabilities } from '../../lib/capabilities.js';
 import { startPcmCapture, type PcmCapture } from '../../lib/pcmCapture.js';

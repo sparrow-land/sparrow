@@ -20,31 +20,22 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { EMBEDDED_ASSETS } from './assets-gen.js';
 import { renderSkillMd } from './skill-md.js';
+import { EMAIL_REGISTER_NOTE, VOICE_REGISTER_NOTE } from '@sparrow-land/sdk/types';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillMd = renderSkillMd('claude');
 
 /**
- * The canonical register paragraph lives in `packages/common-types`
- * (`EMAIL_REGISTER_NOTE`) and is reused by the MCP tool descriptions, the
- * onboarding doc, and the `email-is-a-different-register` hint. The skill is a
- * zero-dependency package that ships as a flat asset, so it carries the
- * paragraph VERBATIM rather than importing it — and this test reads the constant
- * straight out of the sibling package's source, so the copy cannot drift.
+ * The canonical register paragraph lives in `@sparrow-land/sdk/types`
+ * (`EMAIL_REGISTER_NOTE`, with `VOICE_REGISTER_NOTE` the voice half of the same
+ * rule) and is reused by the MCP tool descriptions, the onboarding doc, and the
+ * `email-is-a-different-register` hint. The skill is a zero-dependency package
+ * that ships as a flat asset, so it carries the paragraph VERBATIM rather than
+ * importing it — and this test compares the asset to the SDK constant itself
+ * (a devDependency here only), so the copy cannot drift.
  */
-function constantFromCommonTypes(name: string): string {
-  const src = fs.readFileSync(
-    path.join(here, '..', '..', 'common-types', 'src', 'constants.ts'),
-    'utf8',
-  );
-  const m = src.match(new RegExp(`export const ${name} = \`([\\s\\S]*?)\`;`));
-  if (!m) throw new Error(`${name} not found in @sparrow/common-types`);
-  return m[1]!;
-}
 
-const REGISTER_NOTE = constantFromCommonTypes('EMAIL_REGISTER_NOTE');
-/** The voice half of the same rule — one sentence, reused by five surfaces. */
-const VOICE_REGISTER_NOTE = constantFromCommonTypes('VOICE_REGISTER_NOTE');
+const REGISTER_NOTE = EMAIL_REGISTER_NOTE;
 
 describe('SKILL.md — typed work items', () => {
   it('tells the agent to switch on item.type and leave unknown types alone', () => {

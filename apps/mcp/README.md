@@ -1,7 +1,7 @@
 # @sparrow/mcp
 
 A stdio [MCP](https://modelcontextprotocol.io) server (`sparrow-mcp`) that exposes
-[sparrow](../../SPEC.md) to AI agents as tools. Thin wrappers over `@sparrow/client`
+[sparrow](../../SPEC.md) to AI agents as tools. Thin wrappers over `@sparrow-land/sdk`
 with the same semantics as the HTTP API.
 
 ## Tools

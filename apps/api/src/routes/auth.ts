@@ -7,8 +7,8 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { eq } from 'drizzle-orm';
-import { UpdateMeRequestSchema, UpdateMeAgentRequestSchema } from '@sparrow/common-types';
-import type { AuthConfigResponse, AuthMeResponse, MeResponse } from '@sparrow/common-types';
+import { UpdateMeRequestSchema, UpdateMeAgentRequestSchema } from '@sparrow-land/sdk/types';
+import type { AuthConfigResponse, AuthMeResponse, MeResponse } from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { resolvePrincipal } from '../context.js';
 import { effectiveOrigin } from '../effective-origin.js';

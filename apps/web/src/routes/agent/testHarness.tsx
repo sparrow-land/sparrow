@@ -11,7 +11,7 @@
 import { act, render, type RenderResult } from '@testing-library/react';
 import { vi } from 'vitest';
 import { MemoryRouter, Routes, Route, useParams } from 'react-router-dom';
-import type { CapabilitiesResponse, HumanRef, OrgRole } from '@sparrow/common-types';
+import type { CapabilitiesResponse, HumanRef, OrgRole } from '@sparrow-land/sdk/types';
 import { AuthProvider } from '../../lib/auth.js';
 import { OrgProvider } from '../../lib/org.js';
 import { WorkspaceProvider } from '../../lib/workspace.js';

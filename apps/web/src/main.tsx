@@ -1,7 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
-import type { CapabilitiesResponse } from '@sparrow/common-types';
+import type { CapabilitiesResponse } from '@sparrow-land/sdk/types';
 import { App } from './App.js';
 import { api } from './lib/client.js';
 import { detectPathScope, detectHostScope, type Scope } from './lib/scope.js';

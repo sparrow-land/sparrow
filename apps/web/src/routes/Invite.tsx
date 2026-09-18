@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ApiError } from '@sparrow/client';
-import type { InviteInfoResponse, OrgSummary } from '@sparrow/common-types';
+import { ApiError } from '@sparrow-land/sdk';
+import type { InviteInfoResponse, OrgSummary } from '@sparrow-land/sdk/types';
 import { useAuth } from '../lib/auth.js';
 import { useAutoSso } from '../lib/auto-sso.js';
 import { api } from '../lib/client.js';

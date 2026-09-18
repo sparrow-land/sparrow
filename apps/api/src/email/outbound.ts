@@ -26,7 +26,7 @@ import {
   type CapturedEmail,
   type EmailReason,
   type OutboundEmailHeaders,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';
 import { emailQuarantine, emailWireIds, emails, emailThreads } from '../db/schema.js';

@@ -9,7 +9,7 @@ import type {
   InboundEmailResponse,
   JudgeVerdict,
   OutboundEmailWebhookPayload,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 
 /**
  * Outbound relay result: any 2xx = accepted → `sent`; else `send-failed`.

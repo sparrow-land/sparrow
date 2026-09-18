@@ -1,7 +1,7 @@
 # sparrow-mail-gateway — the OSS mail edge, as a sidecar image.
 #
-# Build from the REPO ROOT (it needs the pnpm workspace, `packages/mail-parse`
-# and `packages/common-types`):
+# Build from the REPO ROOT (it needs the pnpm workspace and `packages/mail-parse`;
+# the wire types come from the published `@sparrow-land/sdk` on npm):
 #
 #     docker build -f apps/mail-gateway/Dockerfile -t sparrow-mail-gateway .
 #
@@ -23,7 +23,6 @@ FROM node:22-slim AS proddeps
 RUN corepack enable
 WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
-COPY packages/common-types/package.json ./packages/common-types/
 COPY packages/mail-parse/package.json ./packages/mail-parse/
 COPY apps/mail-gateway/package.json ./apps/mail-gateway/
 RUN pnpm install --prod --frozen-lockfile --filter "@sparrow/mail-gateway..."
@@ -31,8 +30,7 @@ RUN pnpm install --prod --frozen-lockfile --filter "@sparrow/mail-gateway..."
 FROM node:22-slim
 WORKDIR /app
 COPY --from=proddeps /app ./
-COPY --from=build /app/packages/common-types/dist ./packages/common-types/dist
-COPY --from=build /app/packages/common-types/package.json ./packages/common-types/
+# `@sparrow-land/sdk` arrives from npm in the proddeps node_modules, dist included.
 COPY --from=build /app/packages/mail-parse/dist ./packages/mail-parse/dist
 COPY --from=build /app/packages/mail-parse/package.json ./packages/mail-parse/
 COPY --from=build /app/apps/mail-gateway/dist ./apps/mail-gateway/dist

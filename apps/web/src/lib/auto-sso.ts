@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import type { AuthProviderInfo } from '@sparrow/common-types';
+import type { AuthProviderInfo } from '@sparrow-land/sdk/types';
 import { useAuth } from './auth.js';
 
 /**

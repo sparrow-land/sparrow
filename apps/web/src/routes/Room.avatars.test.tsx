@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import type { CapabilitiesResponse, Message } from '@sparrow/common-types';
+import type { CapabilitiesResponse, Message } from '@sparrow-land/sdk/types';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
 import { Avatar } from '../components/Avatar.js';
 import type { ThreadItem } from '../lib/conversation.js';

@@ -11,7 +11,7 @@ import {
   type ListInvitesResponse,
   type Invite,
   type OrgRole,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';
 import { effectiveOrigin } from '../effective-origin.js';

@@ -10,15 +10,15 @@
 import path from 'node:path';
 import os from 'node:os';
 import pc from 'picocolors';
-import { SparrowClient, ApiError } from '@sparrow/client';
-import { deriveDefaultAgentName } from '@sparrow/common-types/identity';
+import { SparrowClient, ApiError } from '@sparrow-land/sdk';
+import { deriveDefaultAgentName } from '@sparrow-land/sdk/node';
 import type { Command as Cmd } from 'commander';
 import {
   dedupeProfileName,
   loadCredentials,
   savePending,
   type PendingEnrollment,
-} from '../credentials.js';
+} from '@sparrow-land/sdk/node';
 import {
   CliError,
   CLI_CLIENT_IDENT,

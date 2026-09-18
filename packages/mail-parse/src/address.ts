@@ -1,4 +1,4 @@
-import type { InboundParty } from '@sparrow/common-types';
+import type { InboundParty } from '@sparrow-land/sdk/types';
 import type { AddressObject, EmailAddress } from 'mailparser';
 
 /**

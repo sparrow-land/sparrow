@@ -8,7 +8,7 @@ import {
   makeAgent,
   type TestServer,
 } from './test-helpers.js';
-import { VOICE_REGISTER_NOTE } from '@sparrow/common-types';
+import { VOICE_REGISTER_NOTE } from '@sparrow-land/sdk/types';
 import { DOC_PAGES, renderDocPage, renderDocsIndex } from './routes/docs-content.js';
 
 /**

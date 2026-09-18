@@ -7,7 +7,7 @@ import {
   type InboundEmailPayload,
   type InboundEnvelope,
   type InboundParty,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { simpleParser, type ParsedMail } from 'mailparser';
 import { partiesFromHeader, normalizeAddress } from './address.js';
 import { normalizeMessageId, parseMessageIdList } from './message-id.js';

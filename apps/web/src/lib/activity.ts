@@ -13,7 +13,7 @@
  *     that may never collapse. Every collapse is expandable and none of them
  *     hides state the viewer must act on.
  */
-import type { ActivityEntry, AgentDmBox, EmailDisposition } from '@sparrow/common-types';
+import type { ActivityEntry, AgentDmBox, EmailDisposition } from '@sparrow-land/sdk/types';
 import type { ThreadItem } from './conversation.js';
 import { headFromEntry, isEmailEntry, isPending } from './email.js';
 

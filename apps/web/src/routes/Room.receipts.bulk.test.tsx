@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import { MESSAGE_STATUS_IDS_MAX } from '@sparrow/common-types';
-import type { Member, Message, ReadStatus, Room as RoomResource } from '@sparrow/common-types';
+import { MESSAGE_STATUS_IDS_MAX } from '@sparrow-land/sdk/types';
+import type { Member, Message, ReadStatus, Room as RoomResource } from '@sparrow-land/sdk/types';
 
 /**
  * BULK RECEIPTS. Rendering a screen of your own messages used to cost one

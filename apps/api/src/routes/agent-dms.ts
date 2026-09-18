@@ -34,7 +34,7 @@ import {
   type ListAgentDmsResponse,
   type SeverAgentDmResponse,
   type ListRoomMessagesResponse,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { messages, rooms } from '../db/schema.js';
 import { parse } from '../validate.js';

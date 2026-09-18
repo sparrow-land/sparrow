@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { ActivityEntry, AgentDmBox, InboxItem } from '@sparrow/common-types';
+import type { ActivityEntry, AgentDmBox, InboxItem } from '@sparrow-land/sdk/types';
 import { mergeStream, collapseStream, interleaveAgentDms, type StreamRow } from './activity.js';
 import type { ThreadItem } from './conversation.js';
 import { activityEntry, chatEntry, hintEntry } from '../test/fixtures.js';

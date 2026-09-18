@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { HumanContact } from '@sparrow/common-types';
+import type { HumanContact } from '@sparrow-land/sdk/types';
 import { api } from '../lib/client.js';
 
 /**

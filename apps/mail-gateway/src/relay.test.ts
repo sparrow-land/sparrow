@@ -1,4 +1,4 @@
-import type { OutboundEmailWebhookPayload } from '@sparrow/common-types';
+import type { OutboundEmailWebhookPayload } from '@sparrow-land/sdk/types';
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig, type GatewayConfig } from './config.js';
 import {

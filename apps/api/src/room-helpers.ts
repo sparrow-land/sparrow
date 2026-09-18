@@ -14,7 +14,7 @@ import {
   type RoomRole,
   type DmCounterpart,
   type PrincipalKind,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import { nowIso } from './context.js';
 import { avatarUrlForPrincipal } from './avatar-helpers.js';

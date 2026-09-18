@@ -1,4 +1,4 @@
-import { InboundEmailResponseSchema, type InboundEmailPayload } from '@sparrow/common-types';
+import { InboundEmailResponseSchema, type InboundEmailPayload } from '@sparrow-land/sdk/types';
 import type { GatewayConfig } from './config.js';
 import type { DeliveryResult } from './smtp-response.js';
 

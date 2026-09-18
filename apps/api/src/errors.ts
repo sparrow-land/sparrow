@@ -1,4 +1,4 @@
-import type { ErrorCode } from '@sparrow/common-types';
+import type { ErrorCode } from '@sparrow-land/sdk/types';
 
 /** HTTP status for each SPEC error code. */
 const STATUS_BY_CODE: Record<ErrorCode, number> = {

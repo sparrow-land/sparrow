@@ -16,7 +16,7 @@ import {
   EnsureDmRequestSchema,
   type EnsureDmResponse,
   type PrincipalKind,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { resolvePrincipal, principalIdent } from '../context.js';
 import { orgMemberships, rooms } from '../db/schema.js';
@@ -26,7 +26,7 @@ import {
   AGENT_DM_NO_COMMON_VIEWER_MESSAGE,
   AGENT_DM_SEVERED_MESSAGE,
   DM_NOT_ELIGIBLE_MESSAGE,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { canAccessAgent, dmKey, someHumanCanSeeBoth } from '../agent-helpers.js';
 import { agentById, humanById, memberOf, dmCounterpart } from '../room-helpers.js';
 import { ensureDmRoomWithEvents } from '../dm-helpers.js';

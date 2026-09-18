@@ -16,7 +16,7 @@
  * The API itself stays canonical (org-id-in-URL) and never routes by Host; this
  * only affects the absolute URLs rendered back to users.
  */
-import { OrgSlugSchema, isReservedSlug } from '@sparrow/common-types';
+import { OrgSlugSchema, isReservedSlug } from '@sparrow-land/sdk/types';
 import type { ServerConfig } from './context.js';
 
 /** Strip trailing slashes so `${origin}/path` never doubles up. */

@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import type { EmailApprovalItem, EmailResolution, HumanRef } from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+import type { EmailApprovalItem, EmailResolution, HumanRef } from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../../lib/client.js';
 import { headFromPreview, partyLabel, verificationNote } from '../../lib/email.js';
 import { EmailCard } from './EmailCard.js';

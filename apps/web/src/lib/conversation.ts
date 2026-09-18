@@ -1,4 +1,4 @@
-import type { InboxItem, Message, ReadStatus } from '@sparrow/common-types';
+import type { InboxItem, Message, ReadStatus } from '@sparrow-land/sdk/types';
 
 /** A member selector: a specific agent id, or the broadcast pseudo-target. */
 export type ConversationTarget = string | 'all';

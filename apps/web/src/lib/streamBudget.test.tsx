@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { CapabilitiesResponse, Member, Message } from '@sparrow/common-types';
+import type { CapabilitiesResponse, Member, Message } from '@sparrow-land/sdk/types';
 import { useFetch, restoreFetch, json } from '../test/apiStub.js';
 import { AuthProvider } from '../lib/auth.js';
 import { OrgProvider } from '../lib/org.js';

@@ -1,4 +1,4 @@
-import { InboundEmailPayloadSchema, type EmailVerification } from '@sparrow/common-types';
+import { InboundEmailPayloadSchema, type EmailVerification } from '@sparrow-land/sdk/types';
 import { describe, expect, it } from 'vitest';
 import { readFixture } from './fixtures/load.js';
 import { parseInboundEmail } from './parse.js';

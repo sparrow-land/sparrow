@@ -1,7 +1,7 @@
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
-import { HINT_TEXT_MAX, VOICE_REGISTER_NOTE, type Hint } from '@sparrow/common-types';
+import { HINT_TEXT_MAX, VOICE_REGISTER_NOTE, type Hint } from '@sparrow-land/sdk/types';
 import { TRIGGERS } from './hints.js';
 import {
   makeTestServer,

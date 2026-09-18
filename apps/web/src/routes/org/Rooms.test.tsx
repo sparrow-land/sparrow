@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { OrgRoomSummary } from '@sparrow/common-types';
+import type { OrgRoomSummary } from '@sparrow-land/sdk/types';
 import { restoreFetch, useFetch, json } from '../../test/apiStub.js';
 import { RoomsSection } from './Rooms.js';
 

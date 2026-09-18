@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { newHintDeliveryId } from '@sparrow/common-types';
+import { newHintDeliveryId } from '@sparrow-land/sdk/types';
 
 /**
  * Fresh v3 schema creation. **There is no migration path** (SPEC v3): a v3 server

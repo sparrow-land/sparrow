@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
-import type { InboxItem, Member, Message, Room as RoomResource } from '@sparrow/common-types';
+import type { InboxItem, Member, Message, Room as RoomResource } from '@sparrow-land/sdk/types';
 
 /**
  * Regression (issue #34): a clawback used to EJECT you from the room and destroy

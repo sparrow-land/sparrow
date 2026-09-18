@@ -25,7 +25,7 @@ import {
   type ActivityHint,
   type ActivityRefs,
   type Medium,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import { nowIso } from './context.js';
 import { activityEntries, agents, humans, members } from './db/schema.js';

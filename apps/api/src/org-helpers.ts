@@ -15,7 +15,7 @@ import {
   type OrgRole,
   type OrgSettings,
   type OrgSettingsPatch,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import type { DB } from './db/index.js';
 import { agents, humans, members, orgs, orgMemberships, rooms } from './db/schema.js';
@@ -25,7 +25,7 @@ import { conflict, forbidden, notFound } from './errors.js';
 /**
  * Slugs the app reserves so an org slug can never shadow a first-party host or
  * route (`<slug>.<host>`, `/orgs/:slug`, …). The canonical list lives in
- * `@sparrow/common-types` (shared with the web SPA's scope detection); re-exported
+ * `@sparrow-land/sdk/types` (shared with the web SPA's scope detection); re-exported
  * as a Set here for the existing membership-style lookups.
  */
 export const RESERVED_SLUGS = new Set(RESERVED_SLUG_LIST);

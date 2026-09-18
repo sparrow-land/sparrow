@@ -24,12 +24,13 @@ function renderAt(path: string) {
 }
 
 describe('DOCS_PAGES', () => {
-  it('lists the six docs pages, `/docs` first with slug `index`', () => {
+  it('lists the seven docs pages, `/docs` first with slug `index`', () => {
     expect(DOCS_PAGES.map((p) => p.path)).toEqual([
       '/docs',
       '/docs/concepts',
       '/docs/cli',
       '/docs/mcp',
+      '/docs/sdk',
       '/docs/api',
       '/docs/self-hosting',
     ]);
@@ -38,6 +39,7 @@ describe('DOCS_PAGES', () => {
       'concepts',
       'cli',
       'mcp',
+      'sdk',
       'api',
       'self-hosting',
     ]);
@@ -102,7 +104,7 @@ describe('the docs tree routes each DOCS_PAGES path to its component', () => {
 
 /**
  * `paths.ts` is the same table with the components cut out, so the SPA can
- * answer "is this a real docs page?" for a redirect without pulling six pages
+ * answer "is this a real docs page?" for a redirect without pulling every page
  * of prose into its bundle (they are ~107 kB of it). Two lists is exactly the
  * drift this file exists to prevent — so they are bound here, and the moment a
  * page is added to one and not the other this fails.

@@ -14,8 +14,8 @@
  * token), so the two routes mirror each other exactly.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { newInviteId, newInviteToken } from '@sparrow/common-types';
-import { sha256Hex } from '@sparrow/common-types/identity';
+import { newInviteId, newInviteToken } from '@sparrow-land/sdk/types';
+import { sha256Hex } from '@sparrow-land/sdk/node';
 import { makeTestServer, auth, signup, firstOrgId, createInvite, type TestServer } from './test-helpers.js';
 import { openDb } from './db/index.js';
 import { invites } from './db/schema.js';

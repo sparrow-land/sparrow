@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ApiError } from '@sparrow/client';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../lib/client.js';
 import { Modal } from './Modal.js';
 

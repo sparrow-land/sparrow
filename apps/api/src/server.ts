@@ -4,14 +4,14 @@ import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
-import type { ErrorResponse } from '@sparrow/common-types';
+import type { ErrorResponse } from '@sparrow-land/sdk/types';
 import {
   PRESENCE_GRACE_SECONDS,
   EMAIL_INBOUND_RATE_PER_MIN,
   LLM_JUDGE_TIMEOUT_MS,
   parseClientIdent,
   clientVersionBelow,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { openDb } from './db/index.js';
 import { trackOpenStreams } from './open-streams.js';
 import { EventBus } from './events.js';

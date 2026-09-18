@@ -6,6 +6,7 @@ import { GettingStarted } from './GettingStarted.js';
 import { Concepts } from './Concepts.js';
 import { Cli } from './Cli.js';
 import { Mcp } from './Mcp.js';
+import { Sdk } from './Sdk.js';
 import { Api } from './Api.js';
 import { SelfHosting } from './SelfHosting.js';
 import { serverOrigin } from '../../lib/origin.js';
@@ -13,7 +14,7 @@ import { INSTALL_COMMAND } from '../../lib/docsUrl.js';
 import { slugifyHeading } from './toc.js';
 
 /**
- * The six docs pages are read as ONE walk-through: run the server, then every
+ * The docs pages are read as ONE walk-through: run the server, then every
  * example that follows talks to that server. The prerender feeds the pages a
  * placeholder origin, so a hard-coded host in any example silently contradicts
  * the `docker run` line two pages earlier. These are the rules that keep the
@@ -41,12 +42,20 @@ const PAGES: Page[] = [
   { name: 'Concepts', el: <Concepts /> },
   { name: 'CLI reference', el: <Cli /> },
   { name: 'MCP server', el: <Mcp /> },
+  { name: 'SDK', el: <Sdk /> },
   { name: 'REST API', el: <Api /> },
   { name: 'Self-hosting', el: <SelfHosting /> },
 ];
 
 function renderPage(page: Page): HTMLElement {
   return render(<MemoryRouter>{page.el}</MemoryRouter>).container;
+}
+
+/** A page by name — the list is ordered, but no rule here should depend on its indexes. */
+function byName(name: string): Page {
+  const found = PAGES.find((p) => p.name === name);
+  if (!found) throw new Error(`no such docs page: ${name}`);
+  return found;
 }
 
 function flatText(container: HTMLElement): string {
@@ -96,7 +105,7 @@ describe('docs — one origin across the whole walk-through', () => {
   });
 
   /** …and the rule is not vacuous: these three pages do show such URLs. */
-  it.each([PAGES[0]!, PAGES[2]!, PAGES[4]!])(
+  it.each([byName('Getting started'), byName('CLI reference'), byName('REST API')])(
     '$name shows at least one invite or API URL on this instance',
     (page) => {
       const origin = serverOrigin();
@@ -151,8 +160,8 @@ describe('docs — one origin across the whole walk-through', () => {
   it('starts the server with the same docker run line on both pages that show it', () => {
     const line = (container: HTMLElement) =>
       terminals(container).find((t) => t.startsWith('docker run -p'));
-    const started = line(renderPage(PAGES[0]!));
-    const hosted = line(renderPage(PAGES[5]!));
+    const started = line(renderPage(byName('Getting started')));
+    const hosted = line(renderPage(byName('Self-hosting')));
     expect(started).toBeTruthy();
     expect(hosted).toBeTruthy();
     expect(started).toBe(hosted);
@@ -168,24 +177,23 @@ describe('docs — one cast of names', () => {
   });
 
   it('walks the same agent and room on Getting started and the CLI reference', () => {
-    for (const page of [PAGES[0]!, PAGES[2]!]) {
-      const container = renderPage(page);
-      const blocks = terminals(container).join('\n');
-      expect(blocks, `${page.name}: agent name`).toContain(AGENT);
-      expect(blocks, `${page.name}: room name`).toContain(ROOM);
+    for (const p of [byName('Getting started'), byName('CLI reference')]) {
+      const blocks = terminals(renderPage(p)).join('\n');
+      expect(blocks, `${p.name}: agent name`).toContain(AGENT);
+      expect(blocks, `${p.name}: room name`).toContain(ROOM);
     }
   });
 
   /** Two agents are needed where an example shows sharing or a pair; name the second one once. */
   it('names the second agent consistently where the CLI reference needs two', () => {
-    const blocks = terminals(renderPage(PAGES[2]!)).join('\n');
+    const blocks = terminals(renderPage(byName('CLI reference'))).join('\n');
     expect(blocks).toContain(SECOND_AGENT);
   });
 });
 
 describe('docs — the pages link to each other as one walk', () => {
   it('sends the Getting started reader on to every page that owns the depth', () => {
-    const container = renderPage(PAGES[0]!);
+    const container = renderPage(byName('Getting started'));
     const hrefs = [...container.querySelectorAll('a')].map((a) => a.getAttribute('href') ?? '');
     for (const href of ['/docs/concepts', '/docs/cli', '/docs/api', '/docs/self-hosting']) {
       expect(hrefs.some((h) => h.startsWith(href)), `Getting started → ${href}`).toBe(true);
@@ -195,7 +203,7 @@ describe('docs — the pages link to each other as one walk', () => {
   });
 
   it('points that anchor at a heading Self-hosting actually has', () => {
-    const container = renderPage(PAGES[5]!);
+    const container = renderPage(byName('Self-hosting'));
     const headings = [...container.querySelectorAll('h2')].map((h) =>
       slugifyHeading((h.textContent ?? '').trim()),
     );
@@ -203,7 +211,7 @@ describe('docs — the pages link to each other as one walk', () => {
   });
 
   it('closes Self-hosting on the way back to Getting started', () => {
-    const container = renderPage(PAGES[5]!);
+    const container = renderPage(byName('Self-hosting'));
     const hrefs = [...container.querySelectorAll('a')].map((a) => a.getAttribute('href') ?? '');
     expect(hrefs).toContain('/docs');
   });
@@ -233,8 +241,7 @@ describe('docs — one form for tokens, ids and commands', () => {
    * (its one-time TOKEN is `enr_`), a room invitation is `rin_`.
    */
   it('uses the real id prefixes in CLI example output', () => {
-    const container = renderPage(PAGES[2]!);
-    const blocks = terminals(container).join('\n');
+    const blocks = terminals(renderPage(byName('CLI reference'))).join('\n');
     for (const prefix of ['agt_', 'org_', 'room_', 'mem_', 'msg_', 'inv_', 'enl_', 'rin_']) {
       expect(blocks, `CLI example output: ${prefix}`).toContain(prefix);
     }

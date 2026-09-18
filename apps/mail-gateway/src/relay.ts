@@ -1,5 +1,5 @@
 import { resolveMx as dnsResolveMx } from 'node:dns/promises';
-import type { OutboundEmailWebhookPayload } from '@sparrow/common-types';
+import type { OutboundEmailWebhookPayload } from '@sparrow-land/sdk/types';
 import nodemailer from 'nodemailer';
 import type { GatewayConfig } from './config.js';
 

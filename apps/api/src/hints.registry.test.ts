@@ -5,7 +5,7 @@ import {
   DISPLAY_NAME_MAX,
   HINT_TEXT_MAX,
   ORG_SLUG_MAX,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { TRIGGERS } from './hints.js';
 import type { PrincipalIdent } from './context.js';
 import { agents, emails, humans, members, orgs } from './db/schema.js';

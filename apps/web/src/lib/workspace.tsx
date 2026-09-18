@@ -21,8 +21,8 @@ import type {
   RoomUpdatedEvent,
   SidebarHuman,
   VisibilityAgent,
-} from '@sparrow/common-types';
-import type { PrincipalEvent } from '@sparrow/client';
+} from '@sparrow-land/sdk/types';
+import type { PrincipalEvent } from '@sparrow-land/sdk';
 import { api } from './client.js';
 import { roomStreams, type RoomBadges } from './roomStreams.js';
 import { presenceStore } from './presenceStore.js';
@@ -146,7 +146,7 @@ export interface PrincipalEventPatches {
  * to be a decision, not an omission, which is how the reported rename bug hid.
  *
  * `apps/web`'s table test asserts these keys are exactly the event names
- * `@sparrow/common-types` defines, so a new server event cannot ship without the
+ * `@sparrow-land/sdk/types` defines, so a new server event cannot ship without the
  * web deciding what it means.
  */
 export const ME_EVENT_ROUTING: Record<string, string> = {

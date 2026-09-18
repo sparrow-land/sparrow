@@ -16,7 +16,7 @@ import {
   type EnrollmentRequestedEvent,
   type EnrollmentResolvedEvent,
   type PrincipalKind,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import { nowIso } from './context.js';
 import { conflict } from './errors.js';

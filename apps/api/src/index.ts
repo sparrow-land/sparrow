@@ -1,4 +1,4 @@
-import { DEFAULT_PORT } from '@sparrow/common-types';
+import { DEFAULT_PORT } from '@sparrow-land/sdk/types';
 import { buildServer } from './server.js';
 import { envConfig } from './config.js';
 import { installShutdownHandlers } from './shutdown.js';

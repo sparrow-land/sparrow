@@ -10,8 +10,8 @@
  *
  * Nothing here prints. Nothing here reads `process.env`.
  */
-import { ApiError, SparrowClient } from '@sparrow/client';
-import type { Agent, OrgMini, PollEnrollmentResponse } from '@sparrow/common-types';
+import { ApiError, SparrowClient } from '@sparrow-land/sdk';
+import type { Agent, OrgMini, PollEnrollmentResponse } from '@sparrow-land/sdk/types';
 import {
   clearPending,
   loadCredentials,
@@ -19,8 +19,8 @@ import {
   type PendingEnrollment,
   type Profile,
   type SaveProfileResult,
-} from '../credentials.js';
-import { getProfileState, updateProfileState } from '../state.js';
+} from '@sparrow-land/sdk/node';
+import { getProfileState, updateProfileState } from '@sparrow-land/sdk/node';
 import { CliError, type Env } from '../util.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));

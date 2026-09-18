@@ -12,7 +12,7 @@
  * initial connect; every subsequent one is a reconnect (resets the backoff and
  * fires `onReconnect`).
  */
-import type { EventStreamHandle } from '@sparrow/client';
+import type { EventStreamHandle } from '@sparrow-land/sdk';
 
 export interface BackoffConfig {
   /** First-retry base delay (ms). */

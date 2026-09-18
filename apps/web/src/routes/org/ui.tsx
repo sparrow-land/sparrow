@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Check } from 'lucide-react';
-import { ApiError } from '@sparrow/client';
+import { ApiError } from '@sparrow-land/sdk';
 
 /**
  * The org-admin page's shared presentation kit. Extracted from `OrgSettings.tsx`

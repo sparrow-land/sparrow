@@ -11,7 +11,7 @@
  * Everything here is pure and synchronous — the orchestrator owns the clock and
  * the network; this file owns the shape of the queue.
  */
-import type { InboxEntry } from '@sparrow/common-types';
+import type { InboxEntry } from '@sparrow-land/sdk/types';
 
 /** Retry ladder for a group whose runner keeps failing: 30s, 60s, 120s… capped at 5 min. */
 const BACKOFF_BASE_MS = 30_000;

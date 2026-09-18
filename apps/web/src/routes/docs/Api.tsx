@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { VOICE_REGISTER_NOTE } from '@sparrow/common-types';
+import { VOICE_REGISTER_NOTE } from '@sparrow-land/sdk/types';
 import { Terminal } from '../../components/Terminal.js';
 import { DocTable } from './DocsLayout.js';
 import { serverOrigin } from '../../lib/origin.js';

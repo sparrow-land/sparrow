@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Download, FileText, X } from 'lucide-react';
-import type { AttachmentMeta } from '@sparrow/common-types';
+import type { AttachmentMeta } from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import { imageMimeFor, isViewableAttachment, formatBytes } from '../../lib/attachments.js';
 import { AttachmentViewerModal } from './AttachmentViewerModal.js';

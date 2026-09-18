@@ -1,7 +1,7 @@
 /** Small formatting + resolution helpers for the CLI. */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { SparrowClient, ApiError, clientBuildVersion } from '@sparrow/client';
+import { SparrowClient, ApiError, clientBuildVersion } from '@sparrow-land/sdk';
 import {
   MAX_ATTACHMENTS,
   MAX_ATTACHMENT_BYTES,
@@ -10,9 +10,9 @@ import {
   type Member,
   type MePrincipal,
   type VisibilityAgent,
-} from '@sparrow/common-types';
-import { resolveProfile, type Profile } from './credentials.js';
-import { getProfileState } from './state.js';
+} from '@sparrow-land/sdk/types';
+import { resolveProfile, type Profile } from '@sparrow-land/sdk/node';
+import { getProfileState } from '@sparrow-land/sdk/node';
 
 export type Env = Record<string, string | undefined>;
 

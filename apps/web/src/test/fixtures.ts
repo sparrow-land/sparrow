@@ -1,6 +1,6 @@
 /**
  * Typed v4 fixtures for the web suite: every builder returns the REAL wire shape
- * from `@sparrow/common-types`, so a fixture that drifts from the contract fails
+ * from `@sparrow-land/sdk/types`, so a fixture that drifts from the contract fails
  * `typecheck` rather than a test three layers up. Tests stub `fetch` with these
  * (JSON-serialized), exactly as the v3 suites do with hand-rolled literals.
  */
@@ -18,7 +18,7 @@ import type {
   EmailVerification,
   ExternalContact,
   Party,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 
 export const ORG_ID = 'org_1';
 export const AGENT_ID = 'agt_1';

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import type { RoomInvitation } from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+import type { RoomInvitation } from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { useOrg } from '../lib/org.js';
 import { useWorkspace } from '../lib/workspace.js';
 import { api } from '../lib/client.js';

@@ -11,9 +11,15 @@ import {
   savePending,
   loadPending,
   resolveProfile,
+  statePath,
   type Profile,
-} from './credentials.js';
-import { statePath } from './state.js';
+} from '@sparrow-land/sdk/node';
+
+/**
+ * The credential + state store now ships in `@sparrow-land/sdk/node`; this suite
+ * stays here as the CLI's regression contract against it — the behaviour the
+ * `sparrow` commands below depend on, exercised through the SDK's implementation.
+ */
 
 /**
  * WHERE the credential store lives (issue #52). `SPARROW_STATE_DIR` scopes loop

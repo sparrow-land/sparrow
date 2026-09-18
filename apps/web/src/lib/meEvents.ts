@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import type { EventStreamHandle, PrincipalEvent } from '@sparrow/client';
+import type { EventStreamHandle, PrincipalEvent } from '@sparrow-land/sdk';
 import { api } from './client.js';
 
 /**

@@ -17,7 +17,7 @@
  * both: whoever could watch the pair can still read every message it exchanged.
  */
 import { and, eq } from 'drizzle-orm';
-import type { AgentDmSever, AgentDmSeverAuthority, DmSeveredEvent } from '@sparrow/common-types';
+import type { AgentDmSever, AgentDmSeverAuthority, DmSeveredEvent } from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import { nowIso } from './context.js';
 import { agentDmSevers, members, rooms } from './db/schema.js';

@@ -32,7 +32,7 @@ import {
   type ListRoomInvitationsResponse,
   type RoomRole,
   type OrgRole,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { nowIso, resolvePrincipal, principalIdent } from '../context.js';
 import { members, orgs, rooms, roomInvitations } from '../db/schema.js';

@@ -14,7 +14,7 @@ import type {
   PresenceState,
   PrincipalKind,
   StatusState,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import type { Audience } from './event-hub.js';
 import type { RoomRow } from './db/schema.js';

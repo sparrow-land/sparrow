@@ -16,7 +16,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, afterAll } from 'vitest';
 import { buildServer } from '@sparrow/api';
-import { SparrowClient } from '@sparrow/client';
+import { SparrowClient } from '@sparrow-land/sdk';
 import { runCli, type CliIO } from './index.js';
 
 /**

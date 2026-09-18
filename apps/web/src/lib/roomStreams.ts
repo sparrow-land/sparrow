@@ -4,8 +4,8 @@ import type {
   MessageNewEvent,
   PresenceChangedEvent,
   StatusChangedEvent,
-} from '@sparrow/common-types';
-import type { PrincipalEvent, SparrowEvent } from '@sparrow/client';
+} from '@sparrow-land/sdk/types';
+import type { PrincipalEvent, SparrowEvent } from '@sparrow-land/sdk';
 import { api } from './client.js';
 import { unreadCounts } from './conversation.js';
 import { applyStatusEvent, hydrateStatuses, pruneExpired, type StatusMap } from './status.js';

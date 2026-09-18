@@ -21,7 +21,7 @@ import {
   type ListOrgAgentsResponse,
   type ResolveOrgResponse,
   type OrgRole,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { agents, humans, orgs, orgMemberships } from '../db/schema.js';
 import { agentEmailAddress } from '../agent-helpers.js';

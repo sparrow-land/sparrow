@@ -22,10 +22,10 @@ import {
   type EventStreamHandle,
   type MeEventsLogResult,
   type UnknownWorkItem,
-} from '@sparrow/client';
+} from '@sparrow-land/sdk';
 import {
   deriveDefaultAgentName,
-} from '@sparrow/common-types/identity';
+} from '@sparrow-land/sdk/node';
 import {
   CLAWBACK_WINDOW,
   compareClientVersions,
@@ -33,7 +33,7 @@ import {
   parseClientVersion,
   PRESENCE_TTL_MAX,
   VOICE_REGISTER_NOTE,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type {
   Hint,
   QuietableEvent,
@@ -74,7 +74,7 @@ import type {
   AdminRoom,
   PollEnrollmentResponse,
   MessageOrigin,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import {
   awaitCommand,
   detectTurnBasedRuntime,
@@ -95,7 +95,7 @@ import {
   saveProfile,
   type SaveProfileResult,
   type PendingEnrollment,
-} from './credentials.js';
+} from '@sparrow-land/sdk/node';
 import {
   CliError,
   CLI_CLIENT_IDENT,
@@ -123,7 +123,7 @@ import {
   updateProfileState,
   writeEventCursor,
   type LastInbound,
-} from './state.js';
+} from '@sparrow-land/sdk/node';
 import {
   touchHeartbeat,
   markHeartbeatBlocked,
@@ -992,7 +992,7 @@ function formatMembers(items: Member[]): string {
  * ABOUT the item rather than part of its body. The `[voice]` tag alone taught
  * nothing: a spoken message came out of hands-free mode, so the sender is
  * sitting there LISTENING and the reply is read back to them by a speech voice.
- * The sentence is `VOICE_REGISTER_NOTE`, verbatim from `@sparrow/common-types`,
+ * The sentence is `VOICE_REGISTER_NOTE`, verbatim from `@sparrow-land/sdk/types`,
  * so the CLI, the MCP tool descriptions, the served docs, SKILL.md and the
  * `voice-is-a-different-register` hint cannot drift.
  *

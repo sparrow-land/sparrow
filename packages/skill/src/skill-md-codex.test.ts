@@ -15,25 +15,12 @@
  *     `.claude/settings.local.json` or the background-shell reaper would be
  *     teaching it to look for files that do not exist.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { renderSkillMd } from './skill-md.js';
+import { EMAIL_REGISTER_NOTE, VOICE_REGISTER_NOTE } from '@sparrow-land/sdk/types';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
 const codex = renderSkillMd('codex');
 const claude = renderSkillMd('claude');
-
-function constantFromCommonTypes(name: string): string {
-  const src = fs.readFileSync(
-    path.join(here, '..', '..', 'common-types', 'src', 'constants.ts'),
-    'utf8',
-  );
-  const m = src.match(new RegExp(`export const ${name} = \`([\\s\\S]*?)\`;`));
-  if (!m) throw new Error(`${name} not found in @sparrow/common-types`);
-  return m[1]!;
-}
 
 describe('Codex SKILL.md — the shipped shape', () => {
   it('carries the YAML frontmatter Codex\'s skills system reads', () => {
@@ -84,12 +71,12 @@ describe('Codex SKILL.md — the provider-neutral core survives', () => {
   it('keeps the email medium, gated on capabilities, with the register note', () => {
     expect(codex).toContain('/api/v1/capabilities');
     expect(codex).toContain('/api/v1/me/email/send');
-    expect(codex).toContain(constantFromCommonTypes('EMAIL_REGISTER_NOTE'));
+    expect(codex).toContain(EMAIL_REGISTER_NOTE);
   });
 
   /**
    * The voice section is the one the coordinator called out by name: it is
-   * shared, it pins a constant from `@sparrow/common-types`, and it must keep
+   * shared, it pins a constant from `@sparrow-land/sdk/types`, and it must keep
    * passing for BOTH rendered playbooks.
    */
   it('keeps the whole voice / hands-free section, with VOICE_REGISTER_NOTE verbatim', () => {
@@ -98,7 +85,7 @@ describe('Codex SKILL.md — the provider-neutral core survives', () => {
     const section = codex.slice(idx, codex.indexOf('\n## ', idx + 5));
     expect(section).toContain('/api/v1/capabilities');
     expect(section).toMatch(/hands-free/i);
-    expect(section).toContain(constantFromCommonTypes('VOICE_REGISTER_NOTE'));
+    expect(section).toContain(VOICE_REGISTER_NOTE);
     expect(section).toContain('inReplyTo');
     expect(section).toContain('sparrow send --origin voice');
     // …and it still sits after email — both are register lessons, email first.

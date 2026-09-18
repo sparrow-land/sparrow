@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
-import type { CapabilitiesResponse, Message, MessageStatus } from '@sparrow/common-types';
+import type { CapabilitiesResponse, Message, MessageStatus } from '@sparrow-land/sdk/types';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
 import { MessageBubble } from './Room.js';
 

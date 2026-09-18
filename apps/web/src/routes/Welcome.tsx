@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
-import { ApiError } from '@sparrow/client';
+import { ApiError } from '@sparrow-land/sdk';
 import { useAuth } from '../lib/auth.js';
 import { api } from '../lib/client.js';
 import { setLastOrg } from '../lib/prefs.js';

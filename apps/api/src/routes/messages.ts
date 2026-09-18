@@ -37,7 +37,7 @@ import {
   type WhoamiResponse,
   type MessageKind,
   type Message,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { nowIso, resolvePrincipal, principalIdent } from '../context.js';
 import { activityEntries, attachments, members, messageRecipients, messages } from '../db/schema.js';
@@ -53,7 +53,7 @@ import {
   dmCounterpart,
   agentById,
 } from '../room-helpers.js';
-import { AGENT_DM_NO_COMMON_VIEWER_MESSAGE } from '@sparrow/common-types';
+import { AGENT_DM_NO_COMMON_VIEWER_MESSAGE } from '@sparrow-land/sdk/types';
 import { canAccessAgent, someHumanCanSeeBoth } from '../agent-helpers.js';
 import { appendChatMessageActivity } from '../activity.js';
 import {

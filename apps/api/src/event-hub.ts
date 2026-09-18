@@ -20,7 +20,7 @@ import type {
   MePresence,
   PrincipalKind,
   SetPresenceResponse,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import { members, rooms } from './db/schema.js';
 import { PRINCIPAL_ROOM, PresenceTracker } from './presence.js';

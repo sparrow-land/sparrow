@@ -20,8 +20,8 @@ import {
   ThemePreferenceSchema,
   type ThemePreference,
   type User,
-} from '@sparrow/common-types';
-import { sha256Hex } from '@sparrow/common-types/identity';
+} from '@sparrow-land/sdk/types';
+import { sha256Hex } from '@sparrow-land/sdk/node';
 import type { DB } from './db/index.js';
 import { humans, userSessions } from './db/schema.js';
 import type { HumanRow, UserSessionRow } from './db/schema.js';

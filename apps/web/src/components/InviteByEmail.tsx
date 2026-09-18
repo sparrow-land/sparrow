@@ -1,7 +1,7 @@
 import { useRef, useState, type FormEvent } from 'react';
 import { Check } from 'lucide-react';
-import type { AddOrgMemberResponse, OrgRole } from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+import type { AddOrgMemberResponse, OrgRole } from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../lib/client.js';
 import { Terminal } from './Terminal.js';
 

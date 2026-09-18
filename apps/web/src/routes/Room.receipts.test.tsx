@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { SparrowEvent } from '@sparrow/client';
-import type { Member, Message, ReadStatus, Room as RoomResource } from '@sparrow/common-types';
+import type { SparrowEvent } from '@sparrow-land/sdk';
+import type { Member, Message, ReadStatus, Room as RoomResource } from '@sparrow-land/sdk/types';
 
 vi.mock('../lib/workspace.js', () => ({
   useWorkspace: () => ({ rooms: [], agents: [], reloadRooms: vi.fn() }),

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { Member, Message, Room as RoomResource } from '@sparrow/common-types';
+import type { Member, Message, Room as RoomResource } from '@sparrow-land/sdk/types';
 
 // Same peripheral stubs as Room.test.tsx — this file is only about the
 // composer's unsent text surviving navigation.

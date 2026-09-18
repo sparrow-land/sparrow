@@ -15,7 +15,7 @@
  * (gate render, never discovery).
  */
 import { useEffect, useState } from 'react';
-import type { ContactTrust, ExternalContact, Party } from '@sparrow/common-types';
+import type { ContactTrust, ExternalContact, Party } from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 
 export interface ContactBook {

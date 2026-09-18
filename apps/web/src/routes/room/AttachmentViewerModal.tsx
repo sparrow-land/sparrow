@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Download } from 'lucide-react';
-import type { AttachmentMeta } from '@sparrow/common-types';
+import type { AttachmentMeta } from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import { isMarkdownAttachment, formatBytes } from '../../lib/attachments.js';
 import { MessageBody } from '../../components/MessageBody.js';

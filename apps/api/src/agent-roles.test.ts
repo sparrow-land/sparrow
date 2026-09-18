@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Hint } from '@sparrow/common-types';
+import type { Hint } from '@sparrow-land/sdk/types';
 import type { FastifyInstance } from 'fastify';
 import {
   makeTestServer,

@@ -15,7 +15,7 @@
  * object (`messageId` / `inReplyTo` / `references`) rides along — the core owns
  * threading identity and a relay passes those through verbatim. This is the ONLY
  * outbound mail shape in the system; the shape is
- * {@link OutboundEmailWebhookPayload} in `@sparrow/common-types`.
+ * {@link OutboundEmailWebhookPayload} in `@sparrow-land/sdk/types`.
  *
  * Any 2xx = accepted for delivery → `{ sent: true }`. A non-2xx, a network
  * error, or an unconfigured webhook all yield `{ sent: false, reason }` — the
@@ -25,7 +25,7 @@
  * 2xx body (`{ sent: true, messageId, rfcMessageId }`); it rides back on the
  * result and the email medium records it.
  */
-import type { OutboundEmailWebhookPayload } from '@sparrow/common-types';
+import type { OutboundEmailWebhookPayload } from '@sparrow-land/sdk/types';
 
 /** Resolved webhook target for {@link sendEmail}. */
 export interface EmailWebhookConfig {

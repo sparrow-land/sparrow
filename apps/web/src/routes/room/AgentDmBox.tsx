@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import type { AgentDmBox, Message } from '@sparrow/common-types';
-import type { PrincipalEvent } from '@sparrow/client';
+import type { AgentDmBox, Message } from '@sparrow-land/sdk/types';
+import type { PrincipalEvent } from '@sparrow-land/sdk';
 import { api } from '../../lib/client.js';
 import { useMeEventStream } from '../../lib/meEvents.js';
 import { formatRelativeTime } from '../../lib/time.js';

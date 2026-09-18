@@ -1,4 +1,4 @@
-import type { InboundEmailResponse } from '@sparrow/common-types';
+import type { InboundEmailResponse } from '@sparrow-land/sdk/types';
 
 /** What came back from `POST /email/inbound`, including the ways it did not. */
 export type DeliveryResult =

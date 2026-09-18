@@ -19,7 +19,7 @@ import {
   AgentActivityQuerySchema,
   type ListActivityResponse,
   type OrgRole,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { principalIdent, resolvePrincipal } from '../context.js';
 import { activityEntries, agents, emails } from '../db/schema.js';

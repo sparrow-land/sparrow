@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act, fireEvent, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { InboxItem, Member, Message, Room as RoomResource } from '@sparrow/common-types';
+import type { InboxItem, Member, Message, Room as RoomResource } from '@sparrow-land/sdk/types';
 
 /**
  * REVERSE PAGING. A room used to open by listing 100 messages and, on every

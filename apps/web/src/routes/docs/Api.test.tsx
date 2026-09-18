@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { VOICE_REGISTER_NOTE } from '@sparrow/common-types';
+import { VOICE_REGISTER_NOTE } from '@sparrow-land/sdk/types';
 import { Api } from './Api.js';
 import { serverOrigin } from '../../lib/origin.js';
 

@@ -15,7 +15,7 @@ import type {
   EmailResolution,
   EmailReason,
   Party,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { appendActivity } from '../activity.js';
 import { agents, humans, orgMemberships } from '../db/schema.js';

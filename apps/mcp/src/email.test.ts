@@ -16,8 +16,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { buildServer } from '@sparrow/api';
-import { SparrowClient } from '@sparrow/client';
-import { EMAIL_REGISTER_NOTE } from '@sparrow/common-types';
+import { SparrowClient } from '@sparrow-land/sdk';
+import { EMAIL_REGISTER_NOTE } from '@sparrow-land/sdk/types';
 import { createMcpServer, EMAIL_TOOL_NAMES, type McpServerDeps } from './server.js';
 
 /* ---------------------------- test harness -------------------------------- */

@@ -17,8 +17,8 @@
  * independent by construction) — it is held back only because two agents
  * writing the same working tree at once is a worse failure than a queued reply.
  */
-import type { SparrowClient } from '@sparrow/client';
-import type { Email, InboxEntry, Message } from '@sparrow/common-types';
+import type { SparrowClient } from '@sparrow-land/sdk';
+import type { Email, InboxEntry, Message } from '@sparrow-land/sdk/types';
 import type { Env } from '../util.js';
 import {
   backoffMs,

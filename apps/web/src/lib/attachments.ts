@@ -5,12 +5,12 @@
  * picked/pasted/dropped `File`s into pending attachments (mirroring the server's
  * size/count limits) and encoding them to the wire's base64 upload shape.
  */
-import type { AttachmentInput } from '@sparrow/common-types';
+import type { AttachmentInput } from '@sparrow-land/sdk/types';
 import {
   MAX_ATTACHMENTS,
   MAX_ATTACHMENT_BYTES,
   MAX_TOTAL_ATTACHMENT_BYTES,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 
 /** Image mime types we render inline. SVG is rendered ONLY via `<img>`. */
 const IMAGE_MIME = new Set<string>([

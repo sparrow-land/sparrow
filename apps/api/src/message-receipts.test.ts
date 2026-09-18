@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MESSAGE_STATUS_IDS_MAX } from '@sparrow/common-types';
+import { MESSAGE_STATUS_IDS_MAX } from '@sparrow-land/sdk/types';
 import {
   makeTestServer,
   auth,

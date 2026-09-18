@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { InboxItem, Member, Message, Room as RoomResource } from '@sparrow/common-types';
+import type { InboxItem, Member, Message, Room as RoomResource } from '@sparrow-land/sdk/types';
 
 // Room leans on several peripheral contexts + the SSE manager; stub them so the
 // test can focus on the voice wiring (mic → composer → origin, and the bubble

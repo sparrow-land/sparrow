@@ -27,7 +27,7 @@ import {
   type EmailVerification,
   type ExternalContact,
   type Party,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';
 import {

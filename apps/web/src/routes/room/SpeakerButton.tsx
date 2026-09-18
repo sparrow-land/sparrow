@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Square, Volume2 } from 'lucide-react';
-import { ApiError } from '@sparrow/client';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../../lib/client.js';
 import { useCapabilities } from '../../lib/capabilities.js';
 

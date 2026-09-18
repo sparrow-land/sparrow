@@ -6,7 +6,7 @@ import { AuthProvider } from '../lib/auth.js';
 import { OrgProvider } from '../lib/org.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
 import { WorkspaceProvider } from '../lib/workspace.js';
-import type { CapabilitiesResponse } from '@sparrow/common-types';
+import type { CapabilitiesResponse } from '@sparrow-land/sdk/types';
 import { api } from '../lib/client.js';
 import { approvalItem, preview } from '../test/fixtures.js';
 import { AppShell } from './AppShell.js';

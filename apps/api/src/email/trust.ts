@@ -12,7 +12,7 @@ import type {
   EmailReason,
   EmailUnrecognizedPolicy,
   EmailVerification,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 
 /** The resolved trust inputs for ONE org (+ the thread, when there is one). */
 export interface TrustSet {

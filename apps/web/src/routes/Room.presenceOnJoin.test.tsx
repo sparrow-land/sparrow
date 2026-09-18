@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { Member, Room as RoomResource } from '@sparrow/common-types';
+import type { Member, Room as RoomResource } from '@sparrow-land/sdk/types';
 
 /**
  * Issue #4 — the header member strip showed a just-added agent OFFLINE while the

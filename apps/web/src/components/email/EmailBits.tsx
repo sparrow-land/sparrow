@@ -1,11 +1,11 @@
 import { useState, type ReactNode } from 'react';
 import { ArrowDownLeft, ArrowUpRight, Download, ShieldAlert, ShieldCheck } from 'lucide-react';
-import type { AttachmentMeta, ContactTrust, EmailDirection } from '@sparrow/common-types';
+import type { AttachmentMeta, ContactTrust, EmailDirection } from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import { formatBytes } from '../../lib/attachments.js';
 import { directionLabel, partyChip, sanitizeEmailHtml, type VerificationNote } from '../../lib/email.js';
 import { CopyMessageButton } from '../CopyMessageButton.js';
-import type { Party } from '@sparrow/common-types';
+import type { Party } from '@sparrow-land/sdk/types';
 
 /**
  * The small, shared pieces every email surface renders: the direction glyph

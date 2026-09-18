@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
-import { EmailTrustedPatternSchema, type OrgEmailSettings } from '@sparrow/common-types';
+import { EmailTrustedPatternSchema, type OrgEmailSettings } from '@sparrow-land/sdk/types';
 import { useCapabilities } from '../../lib/capabilities.js';
 import { ErrorText, Panel, PolicyGroup, PolicyRadio, inputClass } from './ui.js';
 

@@ -7,7 +7,7 @@ import { useFetch, restoreFetch, json, errorJson } from '../../test/apiStub.js';
 import { email, party, preview, threadRef, verification, ORG_ID } from '../../test/fixtures.js';
 import { headFromEmail, headFromPreview, type EmailCardHead } from '../../lib/email.js';
 import { EmailCard } from './EmailCard.js';
-import type { Email } from '@sparrow/common-types';
+import type { Email } from '@sparrow-land/sdk/types';
 
 /** The card with local expansion state, as every surface drives it. */
 function Harness({

@@ -2,7 +2,7 @@
  * Built-in `password` auth provider (open core): email/password accounts.
  * v5: always registered — accounts are always on.
  */
-import { LoginRequestSchema, SignupRequestSchema } from '@sparrow/common-types';
+import { LoginRequestSchema, SignupRequestSchema } from '@sparrow-land/sdk/types';
 import type { AuthCtx, AuthProvider } from './auth.js';
 import { hashPassword, verifyPassword } from './auth.js';
 import { parse } from './validate.js';

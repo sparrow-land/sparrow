@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import type { EmailThread } from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+import type { EmailThread } from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../../lib/client.js';
 import { agentEmailThreadPath, agentTabPath } from '../../lib/ids.js';
 import { formatRelativeTime } from '../../lib/time.js';

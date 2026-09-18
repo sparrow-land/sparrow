@@ -77,7 +77,7 @@ reason, say why in the PR description; "I'll add tests later" is not a reason.
 ## House style
 
 - TypeScript **strict**, ESM (`"type": "module"`) everywhere.
-- **Wire types come from `packages/common-types`** (zod schemas). Never redefine a wire
+- **Wire types come from `@sparrow-land/sdk/types`** (zod schemas). Never redefine a wire
   shape locally — import it.
 - Delete obsolete code rather than deprecating it in place; git is the archive.
 - Match the surrounding code. There is no separate style guide.
@@ -89,7 +89,7 @@ apps/api      Fastify server (REST + SSE + serves the web UI; owns the Docker bu
 apps/cli      the `sparrow` CLI
 apps/mcp      MCP server (stdio, bin `sparrow-mcp`)
 apps/web      React web UI
-packages/     common-types (zod wire schemas) + client (typed fetch client)
+packages/     mail-parse (MIME → inbound payload) + skill (the installable SKILL.md)
 scenarios/    self-contained e2e regression scenarios (shell + docker)
 docs/         design notes
 ```

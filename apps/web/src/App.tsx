@@ -1,6 +1,6 @@
 import { Routes, Route, Outlet, useParams, Navigate, useLocation, matchPath } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import type { OrgRole, OrgSummary } from '@sparrow/common-types';
+import type { OrgRole, OrgSummary } from '@sparrow-land/sdk/types';
 import { AppShell } from './components/AppShell.js';
 import { BareShell } from './components/BareShell.js';
 import { Home } from './routes/Home.js';
@@ -23,7 +23,7 @@ import { DOCS_ROOT } from './routes/docs/paths.js';
 import { AuthProvider, useAuth } from './lib/auth.js';
 import { ThemeProvider } from './lib/theme-provider.js';
 import { CapabilitiesProvider } from './lib/capabilities.js';
-import type { CapabilitiesResponse } from '@sparrow/common-types';
+import type { CapabilitiesResponse } from '@sparrow-land/sdk/types';
 import { OrgProvider } from './lib/org.js';
 import { WorkspaceProvider } from './lib/workspace.js';
 import { getLastOrg, setLastOrg } from './lib/prefs.js';

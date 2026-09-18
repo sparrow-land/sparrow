@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { CapabilitiesResponse, Message } from '@sparrow/common-types';
+import type { CapabilitiesResponse, Message } from '@sparrow-land/sdk/types';
 import { CapabilitiesProvider } from '../lib/capabilities.js';
 import { MessageBubble } from './Room.js';
 

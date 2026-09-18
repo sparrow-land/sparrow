@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route, useParams } from 'react-router-dom';
-import type { CapabilitiesResponse, OrgRole } from '@sparrow/common-types';
+import type { CapabilitiesResponse, OrgRole } from '@sparrow-land/sdk/types';
 import { AuthProvider } from '../lib/auth.js';
 import { OrgProvider } from '../lib/org.js';
 import { WorkspaceProvider } from '../lib/workspace.js';

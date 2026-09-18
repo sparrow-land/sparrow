@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from 'react';
-import type { OrgRole } from '@sparrow/common-types';
+import type { OrgRole } from '@sparrow-land/sdk/types';
 import { useAuth, roleInOrg } from './auth.js';
 
 /**

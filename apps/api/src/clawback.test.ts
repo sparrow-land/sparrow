@@ -10,7 +10,7 @@
  * message is not the caller's own in that room.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CLAWBACK_WINDOW } from '@sparrow/common-types';
+import { CLAWBACK_WINDOW } from '@sparrow-land/sdk/types';
 import {
   makeTestServer,
   auth,

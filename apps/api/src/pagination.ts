@@ -1,6 +1,6 @@
 import { and, eq, gt, lt, or, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from '@sparrow/common-types';
-import type { PagedResponse, TranscriptResponse } from '@sparrow/common-types';
+import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from '@sparrow-land/sdk/types';
+import type { PagedResponse, TranscriptResponse } from '@sparrow-land/sdk/types';
 import { decodeCursor, encodeCursor, type Cursor } from './cursor.js';
 
 /** Clamp a requested limit to [1, MAX_PAGE_LIMIT], defaulting when unset. */

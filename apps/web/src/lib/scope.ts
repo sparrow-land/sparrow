@@ -15,7 +15,7 @@
  * mounts the org UI WITHOUT the `/org/:orgId` prefix. When neither matches the
  * app is UNSCOPED — the classic `/org/:orgId/…` multi-org experience, unchanged.
  */
-import { ORG_SLUG_MAX, isReservedSlug, type MeOrg } from '@sparrow/common-types';
+import { ORG_SLUG_MAX, isReservedSlug, type MeOrg } from '@sparrow-land/sdk/types';
 
 const SLUG_RE = /^[a-z0-9-]+$/;
 

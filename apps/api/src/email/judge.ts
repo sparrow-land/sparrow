@@ -13,7 +13,7 @@ import {
   EMAIL_JUDGE_DEFAULT_PROMPT,
   JUDGE_REASON_MAX,
   type JudgeVerdict,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { LlmVendorError, type JudgeEmail, type LlmJudge } from './types.js';
 
 /** The `fake` judge's deny sentinel — CONTRACT, not an implementation detail. */

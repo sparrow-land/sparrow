@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ApiError, type SparrowClient } from '@sparrow/client';
-import type { PollEnrollmentResponse } from '@sparrow/common-types';
-import { saveProfile } from '../credentials.js';
+import { ApiError, type SparrowClient } from '@sparrow-land/sdk';
+import type { PollEnrollmentResponse } from '@sparrow-land/sdk/types';
+import { saveProfile } from '@sparrow-land/sdk/node';
 import {
   findAgentProfileForServer,
   pollEnrollmentUntilResolved,

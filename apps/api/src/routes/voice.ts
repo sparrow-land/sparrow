@@ -21,7 +21,7 @@ import {
   MAX_TRANSCRIPTION_AUDIO_BYTES,
   type CapabilitiesResponse,
   type TranscriptionResponse,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { resolvePrincipal, principalIdent } from '../context.js';
 import { resolveStreamPrincipal } from './events.js';

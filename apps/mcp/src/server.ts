@@ -1,5 +1,5 @@
 /**
- * The sparrow MCP server: thin, agent-friendly wrappers over `@sparrow/client`,
+ * The sparrow MCP server: thin, agent-friendly wrappers over `@sparrow-land/sdk`,
  * exposed as MCP tools over stdio.
  *
  * `createMcpServer` builds an `McpServer` bound to a mutable client + a default
@@ -15,14 +15,14 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { SparrowClient, ApiError, clientBuildVersion } from '@sparrow/client';
-import { deriveDefaultAgentName } from '@sparrow/common-types/identity';
+import { SparrowClient, ApiError, clientBuildVersion } from '@sparrow-land/sdk';
+import { deriveDefaultAgentName } from '@sparrow-land/sdk/node';
 import {
   EMAIL_REGISTER_NOTE,
   VOICE_REGISTER_NOTE,
   type AttachmentInput,
   type Email,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { upsertDefaultProfile, defaultProfileNote, type Profile } from './credentials.js';
 
 export type Env = Record<string, string | undefined>;
@@ -91,7 +91,7 @@ export const EMAIL_OFF_MESSAGE = 'email is not enabled on this server';
 
 /**
  * Compose an email tool's description: the canonical register paragraph
- * (imported from `@sparrow/common-types`, never retyped, so the MCP
+ * (imported from `@sparrow-land/sdk/types`, never retyped, so the MCP
  * descriptions, the onboarding doc and the hint cannot drift) followed by the
  * tool's own paragraph.
  */
@@ -101,7 +101,7 @@ function emailDescription(own: string): string {
 
 /**
  * The voice-register sentence every tool that can HAND BACK A MESSAGE carries,
- * verbatim from `@sparrow/common-types` — the same words the CLI prints under a
+ * verbatim from `@sparrow-land/sdk/types` — the same words the CLI prints under a
  * `[voice]` item, the `/docs/api/voice` page serves, SKILL.md states, and the
  * `voice-is-a-different-register` hint delivers. A message with
  * `origin: 'voice'` came out of hands-free mode: the sender dictated it and is

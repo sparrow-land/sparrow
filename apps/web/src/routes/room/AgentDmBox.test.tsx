@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
-import type { AgentDmBox, Message } from '@sparrow/common-types';
+import type { AgentDmBox, Message } from '@sparrow-land/sdk/types';
 import { restoreFetch, useFetch, json } from '../../test/apiStub.js';
 import { AgentDmCard, useAgentDmBoxes } from './AgentDmBox.js';
 

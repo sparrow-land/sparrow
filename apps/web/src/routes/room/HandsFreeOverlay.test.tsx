@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, within, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { CapabilitiesResponse } from '@sparrow/common-types';
+import type { CapabilitiesResponse } from '@sparrow-land/sdk/types';
 import { useFetch, restoreFetch, json, errorJson, binary } from '../../test/apiStub.js';
 import { CapabilitiesProvider } from '../../lib/capabilities.js';
 import { HandsFreeOverlay, type HandsFreeIncoming } from './HandsFreeOverlay.js';

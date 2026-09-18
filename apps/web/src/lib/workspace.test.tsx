@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import * as commonTypes from '@sparrow/common-types';
-import type { MeRoom, SidebarHuman, VisibilityAgent } from '@sparrow/common-types';
-import type { PrincipalEvent } from '@sparrow/client';
+import * as commonTypes from '@sparrow-land/sdk/types';
+import type { MeRoom, SidebarHuman, VisibilityAgent } from '@sparrow-land/sdk/types';
+import type { PrincipalEvent } from '@sparrow-land/sdk';
 import {
   ME_EVENT_ROUTING,
   applyPrincipalEvent,
@@ -421,7 +421,7 @@ function eventNameOf(schemaExport: string): string {
 }
 
 /**
- * Every event name `@sparrow/common-types` defines, derived from its exported
+ * Every event name `@sparrow-land/sdk/types` defines, derived from its exported
  * `*EventSchema`s at RUNTIME — so adding a schema there fails this test until
  * the web decides what the new event means.
  */

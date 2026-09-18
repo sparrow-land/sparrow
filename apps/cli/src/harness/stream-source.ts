@@ -13,7 +13,7 @@
  * starting live, and a shared high-water mark between two listeners on one
  * profile is a way to lose events, not to save them.
  */
-import type { EventStreamHandle, PrincipalEvent, SparrowClient } from '@sparrow/client';
+import type { EventStreamHandle, PrincipalEvent, SparrowClient } from '@sparrow-land/sdk';
 import { runReconnectingStream } from '../stream.js';
 import type { WorkSource } from './orchestrator.js';
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
-import { ApiError } from '@sparrow/client';
+import { ApiError } from '@sparrow-land/sdk';
 import { useAuth } from '../lib/auth.js';
 import { useAutoSso } from '../lib/auto-sso.js';
 import { api } from '../lib/client.js';

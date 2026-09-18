@@ -8,7 +8,7 @@
  * on it verbatim.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { EMAIL_JUDGE_DEFAULT_PROMPT } from '@sparrow/common-types';
+import { EMAIL_JUDGE_DEFAULT_PROMPT } from '@sparrow-land/sdk/types';
 import {
   makeEmailServer,
   auth,

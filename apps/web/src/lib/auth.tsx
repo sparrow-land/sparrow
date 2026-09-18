@@ -7,8 +7,8 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { ApiError } from '@sparrow/client';
-import type { AuthProviderInfo, MeOrg, OrgRole, User } from '@sparrow/common-types';
+import { ApiError } from '@sparrow-land/sdk';
+import type { AuthProviderInfo, MeOrg, OrgRole, User } from '@sparrow-land/sdk/types';
 import { api } from './client.js';
 
 /**

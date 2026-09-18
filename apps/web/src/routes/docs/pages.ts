@@ -19,6 +19,7 @@ import { GettingStarted } from './GettingStarted.js';
 import { Concepts } from './Concepts.js';
 import { Cli } from './Cli.js';
 import { Mcp } from './Mcp.js';
+import { Sdk } from './Sdk.js';
 import { Api } from './Api.js';
 import { SelfHosting } from './SelfHosting.js';
 
@@ -42,6 +43,7 @@ export const DOCS_PAGES: DocsPage[] = [
   { path: '/docs/concepts', slug: 'concepts', label: 'Concepts', Component: Concepts },
   { path: '/docs/cli', slug: 'cli', label: 'CLI reference', Component: Cli },
   { path: '/docs/mcp', slug: 'mcp', label: 'MCP server', Component: Mcp },
+  { path: '/docs/sdk', slug: 'sdk', label: 'SDK', Component: Sdk },
   { path: '/docs/api', slug: 'api', label: 'REST API', Component: Api },
   {
     path: '/docs/self-hosting',

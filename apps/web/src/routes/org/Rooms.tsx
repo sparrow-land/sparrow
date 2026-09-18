@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { OrgRoomSummary } from '@sparrow/common-types';
+import type { OrgRoomSummary } from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import { ErrorText, Loading, Notice, Panel, Section, errMsg, fmtDate, ghostBtn } from './ui.js';
 

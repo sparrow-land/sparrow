@@ -27,7 +27,7 @@ import {
   type RoomKind,
   type RoomRole,
   type Message,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { nowIso, resolvePrincipal, principalIdent, type PrincipalIdent } from '../context.js';
 import { emails, members, messageRecipients, messages, rooms, roomInvitations } from '../db/schema.js';

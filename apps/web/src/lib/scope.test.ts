@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { MeOrg } from '@sparrow/common-types';
+import type { MeOrg } from '@sparrow-land/sdk/types';
 import {
   detectPathScope,
   detectHostScope,

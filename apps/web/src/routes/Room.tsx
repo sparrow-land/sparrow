@@ -14,9 +14,9 @@ import type {
   RoomUpdatedEvent,
   StatusChangedEvent,
   Room as RoomResource,
-} from '@sparrow/common-types';
-import { MAX_PAGE_LIMIT, MESSAGE_STATUS_IDS_MAX } from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+} from '@sparrow-land/sdk/types';
+import { MAX_PAGE_LIMIT, MESSAGE_STATUS_IDS_MAX } from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../lib/client.js';
 import { wire, orgPath, roomSettingsPath } from '../lib/ids.js';
 import { useAuth } from '../lib/auth.js';

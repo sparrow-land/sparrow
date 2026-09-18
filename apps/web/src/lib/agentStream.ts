@@ -9,8 +9,8 @@ import type {
   EmailRejectedEvent,
   EmailResolvedEvent,
   EmailSentEvent,
-} from '@sparrow/common-types';
-import type { PrincipalEvent } from '@sparrow/client';
+} from '@sparrow-land/sdk/types';
+import type { PrincipalEvent } from '@sparrow-land/sdk';
 import { useMeEventStream } from './meEvents.js';
 
 /**

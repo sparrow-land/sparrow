@@ -4,7 +4,7 @@ import type {
   EmailHeldEvent,
   EmailQuarantinedEvent,
   EmailResolvedEvent,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import { useMeEventStream } from '../../lib/meEvents.js';
 import {

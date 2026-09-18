@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MAX_TRANSCRIPTION_AUDIO_BYTES } from '@sparrow/common-types';
+import { MAX_TRANSCRIPTION_AUDIO_BYTES } from '@sparrow-land/sdk/types';
 import {
   makeTestServer,
   auth,

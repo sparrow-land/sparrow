@@ -16,7 +16,7 @@
  * a link between two pages must name the docs site.
  */
 
-import { CLAWBACK_WINDOW, MESSAGE_STATUS_IDS_MAX, VOICE_REGISTER_NOTE } from '@sparrow/common-types';
+import { CLAWBACK_WINDOW, MESSAGE_STATUS_IDS_MAX, VOICE_REGISTER_NOTE } from '@sparrow-land/sdk/types';
 import {
   DEFAULT_DOCS_URL,
   DEFAULT_INSTALL_URL,

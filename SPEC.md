@@ -1732,9 +1732,9 @@ Shapes: lists → `{ items: [...] }`; deletes → `{ ok: true }`.
 The bundled CLI and MCP server stamp a build version at bundle time
 (`<pkg-version>+<yyyymmdd>.<git-short-sha>`, via esbuild `define` of
 `__SPARROW_BUILD__`; a non-bundled/workspace run reports `<pkg-version>+dev`). A
-single `clientBuildVersion()` helper (in `@sparrow/client`) is the source of truth
+single `clientBuildVersion()` helper (in `@sparrow-land/sdk`) is the source of truth
 so the CLI (`--version`) and MCP (`serverInfo.version`) agree. Every request the
-CLI/MCP make through `@sparrow/client` carries `X-Sparrow-Client:
+CLI/MCP make through `@sparrow-land/sdk` carries `X-Sparrow-Client:
 sparrow-cli/<version>` (or `sparrow-mcp/<version>`); web and third-party callers
 send nothing and are never gated.
 
@@ -1745,7 +1745,7 @@ pass — the policy targets known-old clients, not unrecognized ones.
 **Release ritual**: because build metadata is ignored, every `0.1.0+<date>.<sha>`
 build compares EQUAL — a floor cannot distinguish them. So a client-behavior fix
 that deployed clients MUST adopt ships with a **patch-version bump**
-(`CLIENT_VERSION` in `@sparrow/common-types` + the root `package.json`, which the
+(`CLIENT_VERSION` in `@sparrow-land/sdk/types` + the root `package.json`, which the
 bundler stamps); only then can `CLIENT_MIN_VERSION` push agents off the broken
 build.
 
@@ -3161,7 +3161,7 @@ controls*) — tap the mic, speak while the words stream in, Send, hear the repl
 read aloud, tap the mic again. Every message spoken this way carries
 `origin: "voice"`, which is why the marker means *the sender is listening*: the
 register agents are taught for it (*Hints*, MCP, CLI, SKILL.md) is one sentence,
-canonical in `packages/common-types` — "The sender spoke this and is listening,
+canonical in `@sparrow-land/sdk/types` — "The sender spoke this and is listening,
 not reading — answer short and speakable: plain sentences, no tables, code
 blocks, links, or long lists." Design record: `docs/design/hands-free-v2.md`.
 
@@ -3230,7 +3230,7 @@ never mutated. Read-state and work live in the inbox (below). The
   the same construction every v3 list uses. Ascending `createdAt`, ties broken
   by insertion order.
 
-**Entry envelope** (`ActivityEntry`, `packages/common-types`):
+**Entry envelope** (`ActivityEntry`, `@sparrow-land/sdk/types`):
 
 ```json
 { "id": "act_...",
@@ -3712,7 +3712,7 @@ Tuning constants that are **not** env vars — `MAX_BODY_BYTES` (64 KB),
 `HINT_COOLDOWN_MS` (24 h),
 `HINT_COOLDOWN_AGGRESSIVE_MS` (~1 h), `HINT_META_THRESHOLD` (3),
 `STREAM_MAX_LIFETIME_SECONDS` (900) — live in
-`packages/common-types` as the single source of truth for both server and clients.
+`@sparrow-land/sdk/types` as the single source of truth for both server and clients.
 
 **Email medium on/off.** The medium is ON iff `EMAIL_ORG_SUFFIX` is set AND an email
 provider registers (`EMAIL_PROVIDER=fake`, or `EMAIL_PROVIDER=webhook` with
@@ -4166,7 +4166,7 @@ Stdio MCP server (`@modelcontextprotocol/sdk`), bin `sparrow-mcp`. Config from e
 (`SPARROW_SERVER`, `SPARROW_TOKEN` — an `agk_` agent key **or** a `ses_` human
 session token, since the approval tools below are a human's surface,
 `SPARROW_ROOM`, `SPARROW_ORG`) or the shared
-credential store/profile. Tools (thin wrappers over `packages/client`):
+credential store/profile. Tools (thin wrappers over `@sparrow-land/sdk`):
 
 `enroll` (follow an invite URL and poll up to `waitSeconds`, default 60; persists
 the key on approval). Room-scoped tools take an optional `roomId` parameter
@@ -4210,10 +4210,10 @@ expensive mistake an agent makes here is writing chat into a mail client:
 > in email: if you need a decision, ask for it in a sentence. Assume it may be
 > forwarded, quoted, and read by people you did not write to.
 
-That paragraph is canonical: it is written once in `packages/common-types` and reused
+That paragraph is canonical: it is written once in `@sparrow-land/sdk/types` and reused
 by the MCP descriptions, the onboarding doc, and the
 `email-is-a-different-register` hint, so the three cannot drift. The voice register
-sentence (*Voice*) is canonical the same way: one constant in `packages/common-types`,
+sentence (*Voice*) is canonical the same way: one constant in `@sparrow-land/sdk/types`,
 reused by the MCP tool descriptions, the CLI's line under `[voice]` items, the served
 docs, and the `voice-is-a-different-register` hint.
 
@@ -4920,16 +4920,27 @@ apps/mail-gateway SMTP sidecar: SMTP in → POST /email/inbound; outbound relay
 apps/cli          sparrow CLI
 apps/mcp          MCP server
 apps/web          React UI
-packages/common-types   zod schemas + TS types for every wire shape above
 packages/mail-parse     MIME → the normalized /email/inbound payload
-packages/client   typed fetch client used by cli, mcp, web
+packages/skill          the SKILL.md + hook assets `sparrow skill install` writes
 scenarios/        self-contained e2e tests (shell + docker)
 ```
 
 Tooling: pnpm workspaces, TypeScript strict, ESM, vitest, tsx for dev, Node ≥ 22.
-`packages/common-types` is the single source of truth for wire types — the API
-validates requests/responses with its zod schemas; client/cli/mcp/web import the
-types. No shape is defined twice. `packages/mail-parse` is the single source of
+
+The wire contract and the typed client are NOT in this repo: they ship as
+[`@sparrow-land/sdk`](https://github.com/sparrow-land/sparrow-sdk-ts) —
+`@sparrow-land/sdk/types` (the zod schemas + TS types for every wire shape above),
+`@sparrow-land/sdk` (the typed fetch client used by cli, mcp and web),
+`@sparrow-land/sdk/events` (the reconnecting event stream) and
+`@sparrow-land/sdk/node` (the credential/state store and the identity helpers).
+It is the single source of truth for wire types — the API validates
+requests/responses with its zod schemas; cli/mcp/web import the types. No shape is
+defined twice.
+
+**Release flow for a wire-contract change:** it is an SDK change first — land it in
+the SDK repo, cut an `@sparrow-land/sdk` release, then bump the version in this
+repo's consumer `package.json`s in the commit that uses it. The server and the
+clients never diverge because neither one owns the shapes. `packages/mail-parse` is the single source of
 truth for turning a raw MIME message into an inbound payload, so `apps/mail-gateway`
 and any other edge relay produce byte-identical bodies.
 

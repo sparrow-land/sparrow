@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ActivityEntry } from '@sparrow/common-types';
+import type { ActivityEntry } from '@sparrow-land/sdk/types';
 import { activityEntry, hintEntry } from '../../test/fixtures.js';
 import { ActivityRow, HintEntryCard } from './ActivityRows.js';
 

@@ -7,7 +7,7 @@
  * on set and (via a sweep) on expiry. `ttlSeconds: 0` clears the mark.
  */
 import type { FastifyInstance } from 'fastify';
-import { SetPresenceRequestSchema, type SetPresenceResponse } from '@sparrow/common-types';
+import { SetPresenceRequestSchema, type SetPresenceResponse } from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { resolvePrincipal, principalIdent } from '../context.js';
 import { parse } from '../validate.js';

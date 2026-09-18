@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { EventStreamHandle } from '@sparrow/client';
+import type { EventStreamHandle } from '@sparrow-land/sdk';
 import { runReconnectingStream, type ReconnectResult } from './stream.js';
 
 /**

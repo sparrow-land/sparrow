@@ -10,7 +10,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '@sparrow/api';
-import { SparrowClient } from '@sparrow/client';
+import { SparrowClient } from '@sparrow-land/sdk';
 import { runCli, type CliIO } from '../index.js';
 
 const ADMIN_TOKEN = 'test-admin-token';

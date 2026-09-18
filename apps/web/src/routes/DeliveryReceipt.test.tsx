@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import type { MessageStatus, RecipientStatus, ReadStatus } from '@sparrow/common-types';
+import type { MessageStatus, RecipientStatus, ReadStatus } from '@sparrow-land/sdk/types';
 import { DeliveryReceipt } from './Room.js';
 
 const NOW = Date.parse('2026-08-20T17:10:00Z');

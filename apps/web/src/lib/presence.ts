@@ -1,4 +1,4 @@
-import type { PresenceChangedEvent } from '@sparrow/common-types';
+import type { PresenceChangedEvent } from '@sparrow-land/sdk/types';
 
 /**
  * Client-side model of the presence axis (server-derived; see **Presence** in

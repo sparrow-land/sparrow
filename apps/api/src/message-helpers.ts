@@ -15,7 +15,7 @@ import {
   type ReadStatus,
   type SuggestedReply,
   type AttachmentMeta,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import { attachments, members, messageRecipients, messages } from './db/schema.js';
 import type { MemberRow, MessageRecipientRow, MessageRow } from './db/schema.js';

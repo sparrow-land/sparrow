@@ -26,7 +26,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, afterAll } from 'vitest';
 import { runCli, type CliIO } from './index.js';
-import { eventCursorIdentity } from './state.js';
+import { eventCursorIdentity } from '@sparrow-land/sdk/node';
 
 /**
  * Isolated loop-state dir for every CLI run in this file. `watch`/`await`/`loop`

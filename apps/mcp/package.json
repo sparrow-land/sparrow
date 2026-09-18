@@ -16,8 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sparrow/client": "workspace:*",
-    "@sparrow/common-types": "workspace:*",
+    "@sparrow-land/sdk": "0.1.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.24.1"
   },

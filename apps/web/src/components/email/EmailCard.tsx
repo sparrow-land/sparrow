@@ -6,7 +6,7 @@ import type {
   EmailDisposition,
   EmailJudge,
   EmailVerification,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import { formatRelativeTime } from '../../lib/time.js';
 import {

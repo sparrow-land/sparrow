@@ -1,4 +1,4 @@
-import type { MeRoom, SidebarHuman, VisibilityAgent } from '@sparrow/common-types';
+import type { MeRoom, SidebarHuman, VisibilityAgent } from '@sparrow-land/sdk/types';
 import type { RoomBadges } from './roomStreams.js';
 import { readAvatarUrl } from './avatar.js';
 

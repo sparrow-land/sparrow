@@ -6,7 +6,7 @@
  * in the counterpart's UI without a reload. Wraps the `ensureDmRoom` seam.
  */
 import { eq } from 'drizzle-orm';
-import type { PrincipalKind } from '@sparrow/common-types';
+import type { PrincipalKind } from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import { rooms } from './db/schema.js';
 import { dmKey, ensureDmRoom } from './agent-helpers.js';

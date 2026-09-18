@@ -26,7 +26,7 @@ import type {
   EmailReason,
   EmailVerification,
   Party,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 
 /* -------------------------------------------------------------------------- */
 /* Dispositions                                                               */

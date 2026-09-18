@@ -15,7 +15,7 @@ import type {
   EmailResolvedEvent,
   PrincipalKind,
   RoomInvitationEvent,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 
 /**
  * Principal-level SSE event names + payloads (SPEC "Events"). These are the

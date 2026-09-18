@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { InboxEntry } from '@sparrow/common-types';
+import type { InboxEntry } from '@sparrow-land/sdk/types';
 import { backoffMs, groupInbox, groupKeyOf, groupLabelOf, mergeIntoGroups, dropItem } from './group.js';
 
 function chat(id: string, roomId: string, opts?: { name?: string; kind?: string; at?: string; from?: string }): InboxEntry {

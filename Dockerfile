@@ -35,15 +35,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 RUN corepack enable
 WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
-COPY packages/common-types/package.json ./packages/common-types/
 COPY apps/api/package.json ./apps/api/
 RUN pnpm install --prod --frozen-lockfile --filter "@sparrow/api..."
 
 FROM node:22-slim
 WORKDIR /app
 COPY --from=proddeps /app ./
-COPY --from=build /app/packages/common-types/dist ./packages/common-types/dist
-COPY --from=build /app/packages/common-types/package.json ./packages/common-types/
+# The wire types + client now come from the published `@sparrow-land/sdk` on npm,
+# installed (with its dist) into node_modules by the proddeps stage above — there
+# is no in-repo package to copy a build output from any more.
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/apps/api/public ./apps/api/public
 COPY --from=build /app/apps/api/install-assets ./apps/api/install-assets

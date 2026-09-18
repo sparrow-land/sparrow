@@ -49,7 +49,9 @@ describe('served sparrow.js bundle executes the CLI (not the skill bin)', () => 
     // Build the workspace packages the CLI bundle resolves (their `exports` point
     // at dist/), then bundle exactly as prod does. If the skill main-guard ever
     // returns, the freshly rebuilt bundle reproduces the hijack and this fails.
-    for (const pkg of ['packages/common-types', 'packages/client', 'packages/skill']) {
+    // `@sparrow-land/sdk` is a published dependency, not a workspace package —
+    // it arrives from node_modules with its dist already built.
+    for (const pkg of ['packages/skill']) {
       execFileSync('npm', ['run', 'build'], {
         cwd: path.join(repoRoot, pkg),
         timeout: 120_000,

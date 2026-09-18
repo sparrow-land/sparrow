@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { useFetch, restoreFetch, json } from '../../test/apiStub.js';
 import { approvalItem, email, party, preview, ORG_ID } from '../../test/fixtures.js';
 import { EmailApprovalRow } from './EmailApprovalRow.js';
-import type { EmailApprovalItem } from '@sparrow/common-types';
+import type { EmailApprovalItem } from '@sparrow-land/sdk/types';
 
 interface Recorder {
   calls: { method: string; url: string; body: unknown }[];

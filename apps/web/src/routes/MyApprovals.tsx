@@ -15,8 +15,8 @@ import type {
   Invite,
   EnrollmentRequestedEvent,
   VisibilityAgent,
-} from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+} from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { useAuth } from '../lib/auth.js';
 import { useCapabilities } from '../lib/capabilities.js';
 import { api } from '../lib/client.js';

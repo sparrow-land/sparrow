@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ContactTrust, ExternalContact } from '@sparrow/common-types';
+import type { ContactTrust, ExternalContact } from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import { TrustPill } from '../../components/email/EmailBits.js';
 import { ErrorText, Loading, Notice, Panel, Section, errMsg, fmtDate, inputClass } from './ui.js';

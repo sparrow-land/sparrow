@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { OutboundEmailWebhookPayloadSchema } from '@sparrow/common-types';
+import { OutboundEmailWebhookPayloadSchema } from '@sparrow-land/sdk/types';
 import type { GatewayConfig } from './config.js';
 import { createLogger, type Logger } from './log.js';
 import { createRelay, type Relay } from './relay.js';

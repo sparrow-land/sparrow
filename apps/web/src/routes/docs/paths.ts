@@ -3,8 +3,8 @@
  * this module must never import a component. The SPA no longer renders the docs
  * (SPEC: *Canonical public homes*), it only needs to know which `/docs/…` paths
  * ever existed so `DocsRedirect` can send a known page to its own page and
- * everything else to the docs root. Importing `pages.ts` for that would drag all
- * six documents — ~107 kB of prose — into a bundle that never renders them.
+ * everything else to the docs root. Importing `pages.ts` for that would drag every
+ * document — ~107 kB of prose — into a bundle that never renders them.
  *
  * `pages.ts` is still the source of the docs THEMSELVES; `pages.test.tsx` binds
  * the two lists together so a new page cannot land in one and not the other.
@@ -14,7 +14,15 @@
 export const DOCS_ROOT = '/docs';
 
 /** Every published page slug, in reading order. `index` is the docs root. */
-export const DOCS_SLUGS = ['index', 'concepts', 'cli', 'mcp', 'api', 'self-hosting'] as const;
+export const DOCS_SLUGS = [
+  'index',
+  'concepts',
+  'cli',
+  'mcp',
+  'sdk',
+  'api',
+  'self-hosting',
+] as const;
 
 export type DocsSlug = (typeof DOCS_SLUGS)[number];
 

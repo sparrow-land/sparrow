@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { MemberStatus, StatusChangedEvent } from '@sparrow/common-types';
+import type { MemberStatus, StatusChangedEvent } from '@sparrow-land/sdk/types';
 import {
   hydrateStatuses,
   applyStatusEvent,

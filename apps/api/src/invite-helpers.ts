@@ -15,8 +15,8 @@ import {
   newInviteId,
   newInviteToken,
   INVITE_EXPIRY_DAYS_DEFAULT,
-} from '@sparrow/common-types';
-import { sha256Hex } from '@sparrow/common-types/identity';
+} from '@sparrow-land/sdk/types';
+import { sha256Hex } from '@sparrow-land/sdk/node';
 import type { AppContext } from './context.js';
 import { nowIso } from './context.js';
 import { invites } from './db/schema.js';

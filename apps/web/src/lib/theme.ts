@@ -16,7 +16,7 @@
  * apply it before first paint (no flash), then reconciled with the server value
  * once `/me` loads (see ThemeProvider).
  */
-import { ThemePreferenceSchema, type ThemePreference } from '@sparrow/common-types';
+import { ThemePreferenceSchema, type ThemePreference } from '@sparrow-land/sdk/types';
 
 export type { ThemePreference };
 

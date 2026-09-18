@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ActivityEntry } from '@sparrow/common-types';
+import type { ActivityEntry } from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import { useAgentStream, type AgentStream } from '../../lib/agentStream.js';
 

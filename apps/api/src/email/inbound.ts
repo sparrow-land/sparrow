@@ -27,7 +27,7 @@ import {
   type InboundEmailResponse,
   type InboundStatus,
   type OrgEmailSettings,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { and, eq, gte } from 'drizzle-orm';
 import type { AppContext } from '../context.js';
 import { nowIso } from '../context.js';

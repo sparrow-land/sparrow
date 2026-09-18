@@ -5,15 +5,15 @@ import http from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildServer } from '@sparrow/api';
-import { SparrowClient } from '@sparrow/client';
-import { deriveDefaultAgentName } from '@sparrow/common-types/identity';
+import { SparrowClient } from '@sparrow-land/sdk';
+import { deriveDefaultAgentName } from '@sparrow-land/sdk/node';
 import {
   AGENT_DM_NO_COMMON_VIEWER_MESSAGE,
   DM_NOT_ELIGIBLE_MESSAGE,
   PRESENCE_TTL_MAX,
   VOICE_REGISTER_NOTE,
-} from '@sparrow/common-types';
-import { clientBuildVersion } from '@sparrow/client';
+} from '@sparrow-land/sdk/types';
+import { clientBuildVersion } from '@sparrow-land/sdk';
 import { PassThrough, Writable } from 'node:stream';
 import {
   __resetArmLockProbeForTests,

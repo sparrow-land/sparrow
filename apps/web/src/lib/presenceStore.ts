@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type { PresenceState } from '@sparrow/common-types';
+import type { PresenceState } from '@sparrow-land/sdk/types';
 
 /**
  * PresenceStore — the ONE client-side truth for principal-level presence

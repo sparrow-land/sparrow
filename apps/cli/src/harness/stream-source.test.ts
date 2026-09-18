@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { SparrowClient } from '@sparrow/client';
+import type { SparrowClient } from '@sparrow-land/sdk';
 import { streamWorkSource } from './stream-source.js';
 import type { WorkHandlers } from './orchestrator.js';
 

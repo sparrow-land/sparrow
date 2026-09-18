@@ -5,8 +5,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { sha256Hex } from '@sparrow/common-types/identity';
-import { AVATAR_MAX_BYTES } from '@sparrow/common-types';
+import { sha256Hex } from '@sparrow-land/sdk/node';
+import { AVATAR_MAX_BYTES } from '@sparrow-land/sdk/types';
 import {
   makeTestServer,
   signup,

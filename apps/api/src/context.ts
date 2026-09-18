@@ -1,7 +1,7 @@
 import type { FastifyRequest } from 'fastify';
 import { eq } from 'drizzle-orm';
-import { parseClientIdent } from '@sparrow/common-types';
-import { sha256Hex } from '@sparrow/common-types/identity';
+import { parseClientIdent } from '@sparrow-land/sdk/types';
+import { sha256Hex } from '@sparrow-land/sdk/node';
 import type { DbHandle, DB } from './db/index.js';
 import { agents } from './db/schema.js';
 import type { AgentRow, HumanRow } from './db/schema.js';

@@ -9,7 +9,7 @@ import {
   type MemberRef,
   type MemberStatus,
   type Message,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import type { StatusRecord } from './status-store.js';
 import { memberById, toMemberRef } from './room-helpers.js';

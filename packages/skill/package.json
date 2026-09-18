@@ -26,6 +26,7 @@
     "gen-assets": "node scripts/gen-assets.mjs"
   },
   "devDependencies": {
+    "@sparrow-land/sdk": "0.1.0",
     "@types/node": "^22.10.5",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"

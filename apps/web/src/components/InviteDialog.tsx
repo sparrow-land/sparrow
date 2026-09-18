@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Bot, ChevronLeft, ChevronRight, User } from 'lucide-react';
-import type { EnrollmentSummary } from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+import type { EnrollmentSummary } from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../lib/client.js';
 import { useWorkspace } from '../lib/workspace.js';
 import { buildInviteBlob } from '../lib/inviteBlob.js';

@@ -18,7 +18,7 @@
  * across a same-note re-up/refresh, reset when the note changes — so UIs can show
  * honest staleness.
  */
-import { STICKY_OFFLINE_HORIZON_SECONDS } from '@sparrow/common-types';
+import { STICKY_OFFLINE_HORIZON_SECONDS } from '@sparrow-land/sdk/types';
 
 /** One live `working` status (ids only — the route projects display names). */
 export interface StatusRecord {

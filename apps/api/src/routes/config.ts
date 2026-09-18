@@ -6,7 +6,7 @@
  * these paths `404`; a wrong token → `401`.
  */
 import type { FastifyInstance } from 'fastify';
-import { PutConfigRequestSchema, type GetConfigResponse } from '@sparrow/common-types';
+import { PutConfigRequestSchema, type GetConfigResponse } from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { parse } from '../validate.js';
 import { adminGuard } from './admin.js';

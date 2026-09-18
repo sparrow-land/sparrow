@@ -15,8 +15,8 @@ import type {
   OrgMembership,
   OrgRole,
   OrgSettings as OrgSettingsShape,
-} from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+} from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../lib/client.js';
 import { useAuth } from '../lib/auth.js';
 import { useOrg } from '../lib/org.js';

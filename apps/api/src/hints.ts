@@ -48,7 +48,7 @@ import {
   type HintAction,
   type HintLevel,
   type HintPreferenceChoice,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext, PrincipalIdent } from './context.js';
 import { nowIso } from './context.js';
 import { apiDocMarkdownUrl, docsHome, installArtifactUrl, installHome } from './public-homes.js';

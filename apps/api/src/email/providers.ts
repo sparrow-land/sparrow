@@ -9,7 +9,7 @@ import type {
   CapturedEmail,
   InboundEmailResponse,
   OutboundEmailWebhookPayload,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import { sendEmail, type EmailWebhookConfig } from '../email.js';
 import { wireMessageId } from './inbound.js';
 import type { EmailFakeHandle, EmailProvider, RelayResult } from './types.js';

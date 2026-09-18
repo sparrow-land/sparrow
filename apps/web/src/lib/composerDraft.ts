@@ -5,7 +5,7 @@
  * or another tab) to check something, and come back — the half-drafted text is
  * still there. That is all this does.
  *
- * Deliberately NOT the server-backed draft queue (`@sparrow/common-types`'
+ * Deliberately NOT the server-backed draft queue (`@sparrow-land/sdk/types`'
  * `Draft`, Cmd/Ctrl+Enter, `lib/drafts.ts`): a queued draft is a thing you chose
  * to keep and the server knows about. This is scratch text that never leaves the
  * browser — nothing here is ever put on the wire.

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import type { InboxItem, ListStatusesResponse } from '@sparrow/common-types';
-import type { PrincipalEvent } from '@sparrow/client';
+import type { InboxItem, ListStatusesResponse } from '@sparrow-land/sdk/types';
+import type { PrincipalEvent } from '@sparrow-land/sdk';
 import {
   RoomStreams,
   type MultiplexedStream,

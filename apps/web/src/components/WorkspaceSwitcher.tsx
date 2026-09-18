@@ -4,7 +4,7 @@ import {
   WorkspaceDirectoryResponseSchema,
   type WorkspaceDirectoryEntry,
   type WorkspaceSwitcher as WorkspaceSwitcherConfig,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 
 /**
  * The cloud-injectable workspace switcher (leftnav org header, button variant).

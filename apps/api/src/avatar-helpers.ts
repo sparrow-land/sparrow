@@ -12,8 +12,8 @@
  * Agents never have an avatar — their refs always resolve to `null`.
  */
 import { eq } from 'drizzle-orm';
-import { sha256Hex } from '@sparrow/common-types/identity';
-import type { HumanContact, PrincipalKind } from '@sparrow/common-types';
+import { sha256Hex } from '@sparrow-land/sdk/node';
+import type { HumanContact, PrincipalKind } from '@sparrow-land/sdk/types';
 import type { AppContext } from './context.js';
 import { humans } from './db/schema.js';
 import type { HumanRow } from './db/schema.js';

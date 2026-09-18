@@ -10,7 +10,7 @@ import type {
   Member,
   Message,
   Room as RoomResource,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 
 /**
  * The conversation view as an ACTIVITY STREAM (SPEC v4 → *Web UI → the

@@ -12,7 +12,7 @@ import {
   recognized,
   type TrustSet,
 } from './trust.js';
-import type { EmailVerification } from '@sparrow/common-types';
+import type { EmailVerification } from '@sparrow-land/sdk/types';
 
 const pass: EmailVerification = { spf: 'pass', dkim: 'pass', dmarc: 'pass', domain: 'partner.example.com' };
 

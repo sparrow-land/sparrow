@@ -240,7 +240,7 @@ NEEDS_INPUT_FILE="$STATE_DIR/needs-input"
 # leftover, not a subagent. The trade is deliberate -- 12h of a phantom in the
 # note is better than dropping a real long-running subagent from it.
 SUBAGENT_STALE="${SPARROW_SUBAGENT_STALE:-43200}"
-# `STATUS_NOTE_MAX` in @sparrow/common-types. The API REJECTS a longer note with
+# `STATUS_NOTE_MAX` in @sparrow-land/sdk/types. The API REJECTS a longer note with
 # 400 -- it does not truncate -- so the composer trims before it posts.
 NOTE_MAX=140
 POST_THROTTLE="${SPARROW_STATUS_POST_THROTTLE:-20}"

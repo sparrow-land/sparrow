@@ -1,6 +1,6 @@
 import { Lightbulb, Mail, MessagesSquare, Phone, Waypoints, type LucideIcon } from 'lucide-react';
 import type { CSSProperties } from 'react';
-import type { Medium } from '@sparrow/common-types';
+import type { Medium } from '@sparrow-land/sdk/types';
 
 /**
  * The INFO BOX TYPE REGISTRY — one glyph + type label + color identity per kind

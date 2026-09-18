@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Check, ChevronDown, ChevronRight } from 'lucide-react';
-import type { ActivityEntry, EmailDisposition } from '@sparrow/common-types';
+import type { ActivityEntry, EmailDisposition } from '@sparrow-land/sdk/types';
 import { EmailCard } from '../../components/email/EmailCard.js';
 import { DispositionBadge } from '../../components/email/EmailBits.js';
 import { MediumGlyph, MediumMark, infoBoxToneStyle } from '../../components/MediumGlyph.js';

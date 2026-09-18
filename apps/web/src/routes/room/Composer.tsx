@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { File as FileIcon, Paperclip, X } from 'lucide-react';
-import type { SuggestedReply } from '@sparrow/common-types';
+import type { SuggestedReply } from '@sparrow-land/sdk/types';
 import { MicButton, type HandsFreeWiring } from './MicButton.js';
 import { formatBytes, isImageAttachment, type PendingAttachment } from '../../lib/attachments.js';
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { EventStreamHandle, PrincipalEvent } from '@sparrow/client';
+import type { EventStreamHandle, PrincipalEvent } from '@sparrow-land/sdk';
 import { MeEventStream } from './meEvents.js';
 
 /**

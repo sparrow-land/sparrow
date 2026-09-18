@@ -39,7 +39,7 @@ import {
   type ListEmailThreadsResponse,
   type OrgRole,
   type SendEmailResponse,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { nowIso, resolvePrincipal } from '../context.js';
 import {

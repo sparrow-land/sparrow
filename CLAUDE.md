@@ -8,7 +8,9 @@ flag it instead of silently diverging.
 
 - **TDD, always**: write the failing test first (vitest, `*.test.ts` next to the code),
   then implement, then confirm green. Never mark work done with failing tests.
-- **Types come from `packages/common-types`** — never redefine a wire shape locally.
+- **Types come from `@sparrow-land/sdk/types`** (the published SDK, not this repo) —
+  never redefine a wire shape locally. Changing a wire shape means releasing the SDK
+  first, then bumping its version here.
 - pnpm monorepo; run package-scoped commands with `pnpm --filter <pkg> <cmd>`.
 - Node ≥ 22, TypeScript strict, ESM (`"type": "module"`) everywhere.
 - Sub-agents: do NOT run `git commit`/`push` and do not edit files outside your assigned

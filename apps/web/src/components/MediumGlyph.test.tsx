@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { Lightbulb, Mail, MessagesSquare } from 'lucide-react';
-import { MediumSchema } from '@sparrow/common-types';
+import { MediumSchema } from '@sparrow-land/sdk/types';
 import {
   INFO_BOX_MARKS,
   MEDIUM_GLYPHS,

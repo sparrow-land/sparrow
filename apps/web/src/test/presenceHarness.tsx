@@ -1,6 +1,6 @@
 import { render } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { CapabilitiesResponse, Member } from '@sparrow/common-types';
+import type { CapabilitiesResponse, Member } from '@sparrow-land/sdk/types';
 import { AuthProvider } from '../lib/auth.js';
 import { OrgProvider } from '../lib/org.js';
 import { CapabilitiesProvider } from '../lib/capabilities.js';

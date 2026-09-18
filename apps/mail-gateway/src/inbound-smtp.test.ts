@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { InboundEmailPayload, InboundEmailResponse } from '@sparrow/common-types';
+import type { InboundEmailPayload, InboundEmailResponse } from '@sparrow-land/sdk/types';
 import nodemailer from 'nodemailer';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig } from './config.js';

@@ -6,8 +6,8 @@ import {
   AVATAR_CONTENT_TYPES,
   type MeOrg,
   type ThemePreference,
-} from '@sparrow/common-types';
-import { ApiError } from '@sparrow/client';
+} from '@sparrow-land/sdk/types';
+import { ApiError } from '@sparrow-land/sdk';
 import { api, updateMe, uploadAvatar, deleteAvatar } from '../lib/client.js';
 import { useAuth } from '../lib/auth.js';
 import { useTheme } from '../lib/theme-provider.js';

@@ -20,7 +20,7 @@ import {
   UpdateHintPreferencesRequestSchema,
   type HintPreferencesResponse,
   type MeHintsResponse,
-} from '@sparrow/common-types';
+} from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
 import { resolvePrincipal, principalIdent } from '../context.js';
 import { parse } from '../validate.js';

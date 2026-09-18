@@ -1,4 +1,4 @@
-import type { MemberStatus, StatusChangedEvent } from '@sparrow/common-types';
+import type { MemberStatus, StatusChangedEvent } from '@sparrow-land/sdk/types';
 
 /**
  * Client-side model of active member statuses (the "working indicator"). Kept

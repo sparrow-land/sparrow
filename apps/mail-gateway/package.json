@@ -26,7 +26,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@sparrow/common-types": "workspace:*",
+    "@sparrow-land/sdk": "0.1.0",
     "@sparrow/mail-parse": "workspace:*",
     "mailauth": "^5.0.2",
     "nodemailer": "^9.1.0",
