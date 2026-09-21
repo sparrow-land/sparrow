@@ -732,29 +732,63 @@ describe('sparrow-stop-check.sh', () => {
      * judgement is re-run against it: its kind, its freshness, its generation,
      * its own liveness.
      * ---------------------------------------------------------------------- */
-    /** Publish a replacement owner (+ optional heartbeat) from a separate process.
+    /** Publish a replacement owner (+ optional heartbeat) from a separate
+     * process, ORDERED AGAINST THE HOOK'S OWN PROGRESS.
      *
-     * THE WRITER IS WAITED FOR, NOT ASSUMED. The publication has to land INSIDE
-     * the hook's patience window, and the only part of that we control is the
-     * `sleep`. Process spawn is not free: under a loaded box (the whole
-     * workspace running its suites at once) the shell can take longer to come up
-     * than the window itself, and the hook then blocks for "never published"
-     * rather than on the replacement's own merits -- a green test turning red
-     * because the machine was busy, which teaches everyone to re-run the gate
-     * instead of reading it. So the writer stamps a sentinel the instant it is
-     * alive, and this returns only once it has, leaving the sleep as the one
-     * thing the window has to cover. */
-    const publishLater = (owner: Record<string, unknown>, heartbeat?: string, delay = 0.3): void => {
+     * What these cases are about is a replacement that publishes while the hook
+     * is deciding -- so the publication has to happen after the hook has read
+     * the dead owner pid, not merely "soon". A timer could only approximate
+     * that: on an idle box a 0.3s sleep landed inside the hook's patience
+     * window, and on a busy one it landed anywhere at all -- before the hook
+     * started, or in the middle of a single judgement pass -- so the suite
+     * failed 19 runs in 20 under a loaded box, and once on CI (2026-09-21),
+     * each time on whichever half-published state the scheduler chose.
+     *
+     * So the hook itself says when it has got there. `mtime` on the candidate
+     * marker is read at exactly the right point -- inside the arming check, the
+     * dead pid already established -- and a stub `stat` on PATH stamps a
+     * sentinel when it sees that path. The writer waits for the sentinel, and
+     * `holdAtCandidate` can additionally freeze the hook there, which is how the
+     * mid-judgement case below gets its publication INSIDE one pass.
+     *
+     * A gate that fails when the machine is busy teaches everyone to re-run it
+     * instead of reading it. */
+    const candidateSignal = (): string => path.join(stateDir, 'hook-read-candidate');
+
+    /** Install the stub `stat`: stamp the sentinel on the candidate marker,
+     * optionally hold the hook there, then defer to the real `stat` (stubBin is
+     * the first PATH entry, so dropping it finds the real one). */
+    const stubStat = (holdSeconds: number): void => {
+      const hold = holdSeconds > 0 ? `sleep ${holdSeconds}; ` : '';
+      const p = path.join(stubBin, 'stat');
+      fs.writeFileSync(
+        p,
+        `#!/bin/sh\nfor a in "$@"; do case "$a" in *await-candidate.json) : > '${candidateSignal()}'; ${hold}: ;; esac; done\nPATH="\${PATH#*:}"\nexec stat "$@"\n`,
+      );
+      fs.chmodSync(p, 0o755);
+    };
+
+    const publishLater = (
+      owner: Record<string, unknown>,
+      heartbeat?: string,
+      opts: { holdAtCandidate?: number } = {},
+    ): void => {
       const ownerPath = path.join(stateDir, 'await-owner.json');
       const hbPath = path.join(stateDir, 'heartbeat');
       const readyPath = path.join(stateDir, `writer-ready-${Math.random().toString(36).slice(2)}`);
       const json = JSON.stringify({ version: 1, kind: 'await', ...owner });
       const hb = heartbeat === undefined ? '' : `printf '%s\n' '${heartbeat}' > '${hbPath}'; `;
+      stubStat(opts.holdAtCandidate ?? 0);
+      // THE WRITER IS WAITED FOR, NOT ASSUMED: process spawn is not free, and a
+      // writer still coming up cannot see the sentinel. It stamps `readyPath`
+      // the instant it is alive and this returns only once it has. The bounded
+      // wait for the sentinel is an anti-leak guard, never the timing: a hook
+      // that never looks at the candidate must not leave a shell spinning.
       const w = spawn(
         'sh',
         [
           '-c',
-          `: > '${readyPath}'; sleep ${delay}; ${hb}printf '%s' '${json}' > '${ownerPath}'`,
+          `: > '${readyPath}'; i=0; while [ ! -e '${candidateSignal()}' ] && [ "$i" -lt 2000 ]; do sleep 0.01; i=$((i + 1)); done; ${hb}printf '%s' '${json}' > '${ownerPath}'`,
         ],
         { stdio: 'ignore', detached: true },
       );
@@ -772,6 +806,26 @@ describe('sparrow-stop-check.sh', () => {
       writeOwner({ nonce: 'aaaa', pid: deadPid() });
       writeCandidate({ pid: process.pid, nonce: 'bbbb' });
       publishLater({ nonce: 'bbbb', pid: process.pid }, 'await bbbb');
+      const json = JSON.parse(runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' }).stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain('passive');
+    });
+
+    it('JUDGES a replacement that publishes MID-JUDGEMENT, not the pid it superseded', () => {
+      // The CI-only failure of the PASSIVE case above (2026-09-21), made
+      // deterministic. One pass used to read the owner record more than once --
+      // the pid first, the generation later, inside the candidate gate -- so a
+      // listener publishing in between left a TORN view: the OLD dead pid paired
+      // with the NEW generation, which that gate reads as "this candidate is the
+      // generation that already published", i.e. not arming, i.e. `gone`. That
+      // blocks a turn that re-armed correctly, naming a pid the replacement has
+      // superseded. The verdict must be about the REPLACEMENT -- here a passive
+      // plain `await` under Codex.
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'await:codex aaaa');
+      writeOwner({ nonce: 'aaaa', pid: deadPid() });
+      writeCandidate({ pid: process.pid, nonce: 'bbbb' });
+      publishLater({ nonce: 'bbbb', pid: process.pid }, 'await bbbb', { holdAtCandidate: 1.5 });
       const json = JSON.parse(runHook('{}', { SPARROW_HOOK_RUNTIME: 'codex' }).stdout);
       expect(json.decision).toBe('block');
       expect(json.reason).toContain('passive');
@@ -843,6 +897,14 @@ describe('sparrow-stop-check.sh', () => {
       expect(elapsed).toBeLessThan(10_000);
     });
 
+    /** "It decided AT ONCE" -- the claim every bound below carries -- means it
+     * never entered the 2s patience window, and that window's floor is 2000ms of
+     * sleep however busy the box is. So the bound only has to sit between that
+     * floor and the cost of spawning `sh` plus one `node` per hook run, which is
+     * scheduler time and not the hook's: 500ms measured the scheduler, and lost
+     * by 4ms on a loaded box. */
+    const DECIDED_AT_ONCE_MS = 1_500;
+
     it('BLOCKS immediately when the candidate names the generation that already published', () => {
       writeLoopState('engaged');
       writeHeartbeat(2, 'await:codex');
@@ -850,7 +912,7 @@ describe('sparrow-stop-check.sh', () => {
       writeCandidate({ pid: process.pid, nonce: 'f00d' }); // == the owner nonce
       const started = Date.now();
       expect(JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout).decision).toBe('block');
-      expect(Date.now() - started).toBeLessThan(500);
+      expect(Date.now() - started).toBeLessThan(DECIDED_AT_ONCE_MS);
     });
 
     it('BLOCKS immediately when the candidate names the heartbeat generation', () => {
@@ -860,7 +922,7 @@ describe('sparrow-stop-check.sh', () => {
       writeCandidate({ pid: process.pid, nonce: '4f2c9a01bb33cd10' });
       const started = Date.now();
       expect(JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout).decision).toBe('block');
-      expect(Date.now() - started).toBeLessThan(500);
+      expect(Date.now() - started).toBeLessThan(DECIDED_AT_ONCE_MS);
     });
 
     it('BLOCKS when the candidate names a dead pid too', () => {
@@ -873,7 +935,7 @@ describe('sparrow-stop-check.sh', () => {
       const json = JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout);
       expect(json.decision).toBe('block');
       expect(json.reason).toContain(`pid ${pid}`);
-      expect(Date.now() - started).toBeLessThan(500); // a corpse is not worth waiting for
+      expect(Date.now() - started).toBeLessThan(DECIDED_AT_ONCE_MS); // a corpse is not worth waiting for
     });
 
     it('BLOCKS when the candidate is STALE, live pid or not', () => {
@@ -892,7 +954,7 @@ describe('sparrow-stop-check.sh', () => {
       writeOwner({ nonce: 'f00d', pid: deadPid() });
       const started = Date.now();
       expect(JSON.parse(runHook('{}', { CODEX_THREAD_ID: 'thr_1' }).stdout).decision).toBe('block');
-      expect(Date.now() - started).toBeLessThan(500);
+      expect(Date.now() - started).toBeLessThan(DECIDED_AT_ONCE_MS);
     });
 
     it('ignores a non-numeric pid rather than guessing', () => {

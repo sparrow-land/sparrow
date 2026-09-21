@@ -181,18 +181,25 @@ fi
 # while it names the LIVE generation in <state dir>/await-owner.json; otherwise
 # the heartbeat is treated as unjudgeable. An untagged stamp (watch/loop, or any
 # older CLI) is judged exactly as before, as is a missing owner record.
+#
+# SETS `sparrow_hb_word` (the stamp/kind, empty when unjudgeable) and
+# `sparrow_hb_gen` (the generation it names); it does not print them, because a
+# command substitution is a subshell and the generation would not survive it --
+# and anything that re-reads the heartbeat later in the same judgement is the
+# torn view this whole mechanism exists to avoid.
+sparrow_hb_word=""
+sparrow_hb_gen=""
 sparrow_heartbeat_read() {
   sparrow_hb_raw=$(head -c 96 "$HEARTBEAT_FILE" 2>/dev/null | tr '\t\r\n' '   ' || echo "")
   sparrow_hb_word=$(printf '%s' "$sparrow_hb_raw" | sed -n 's/^ *\([^ ][^ ]*\).*$/\1/p')
   sparrow_hb_gen=$(printf '%s' "$sparrow_hb_raw" | sed -n 's/^ *[^ ][^ ]*  *\([A-Za-z0-9][A-Za-z0-9]*\).*$/\1/p')
   if [ -n "$sparrow_hb_gen" ]; then
-    sparrow_live_gen=$(sed -n 's/.*"nonce"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9][A-Za-z0-9]*\)".*/\1/p' \
-      "$STATE_DIR/await-owner.json" 2>/dev/null | head -n 1)
-    if [ -n "$sparrow_live_gen" ] && [ "$sparrow_hb_gen" != "$sparrow_live_gen" ]; then
+    # The LIVE generation is the one this pass snapshotted (read_owner), never a
+    # fresh read: one judgement, one view of the owner record.
+    if [ -n "$owner_nonce_snap" ] && [ "$sparrow_hb_gen" != "$owner_nonce_snap" ]; then
       sparrow_hb_word=""   # a superseded generation's stamp: no judgement
     fi
   fi
-  printf '%s' "$sparrow_hb_word"
 }
 
 # IS THE PROCESS THAT WROTE THIS HEARTBEAT STILL THERE?
@@ -257,13 +264,32 @@ pid_absent() {
   return 1
 }
 
-# The numeric `pid` / string `nonce` out of one of our JSON state records.
-json_pid() { sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null | head -n 1; }
-json_nonce() {
-  sed -n 's/.*"nonce"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9][A-Za-z0-9]*\)".*/\1/p' "$1" 2>/dev/null | head -n 1
+# The numeric `pid` / string `nonce` out of one of our JSON state records --
+# from a file, or from a record already read into a string.
+str_pid() { printf '%s' "${1:-}" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1; }
+str_nonce() {
+  printf '%s' "${1:-}" | sed -n 's/.*"nonce"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9][A-Za-z0-9]*\)".*/\1/p' | head -n 1
 }
+json_pid() { str_pid "$(cat "$1" 2>/dev/null || true)"; }
+json_nonce() { str_nonce "$(cat "$1" 2>/dev/null || true)"; }
 
 owner_pid() { [ -r "$STATE_DIR/await-owner.json" ] && json_pid "$STATE_DIR/await-owner.json"; }
+
+# ONE READ, ONE VIEW OF THE OWNER RECORD (CI flake, 2026-09-21). A judgement
+# pass needs two things out of that record -- the pid it names and the
+# generation it names -- and reading them separately let a listener PUBLISH in
+# between: the pass then paired the OLD dead pid with the NEW generation, and
+# the candidate gate below read the replacement's own marker as "the generation
+# that already published", so a listener arming correctly was called `gone` and
+# a turn that did exactly the right thing was blocked on a superseded pid. One
+# `cat`, one snapshot, and everything in the pass judges that.
+owner_nonce_snap=""
+owner_pid_snap=""
+read_owner() {
+  _ojson=$(cat "$STATE_DIR/await-owner.json" 2>/dev/null || true)
+  owner_nonce_snap=$(str_nonce "$_ojson")
+  owner_pid_snap=$(str_pid "$_ojson")
+}
 
 # Does a usage-limit marker still stand? (One file per block, written by the
 # auto-status StopFailure hook; cleared on evidence, by Claude Code's resume
@@ -296,13 +322,12 @@ listener_arming() {
 
   # The nonce gate: a candidate that names the generation already in the
   # heartbeat or the owner record is that generation, not a new one arming.
+  # Both generations come from THIS pass's reads (read_owner,
+  # sparrow_heartbeat_read) -- re-reading either file here is what paired a dead
+  # pid with a live replacement's generation and called it `gone`.
   _cnonce=$(json_nonce "$_cand")
-  _ononce=""
-  [ -r "$STATE_DIR/await-owner.json" ] && _ononce=$(json_nonce "$STATE_DIR/await-owner.json")
-  _hbnonce=$(head -c 96 "$HEARTBEAT_FILE" 2>/dev/null | tr '\t\r\n' '   ' \
-    | sed -n 's/^ *[^ ][^ ]*  *\([A-Za-z0-9][A-Za-z0-9]*\).*/\1/p')
-  [ "$_cnonce" = "$_ononce" ] && return 1
-  [ "$_cnonce" = "$_hbnonce" ] && return 1
+  [ "$_cnonce" = "$owner_nonce_snap" ] && return 1
+  [ "$_cnonce" = "$sparrow_hb_gen" ] && return 1
   return 0
 }
 
@@ -353,7 +378,9 @@ classify() {
   now=$(date +%s 2>/dev/null || echo 0)
 
   [ -f "$HEARTBEAT_FILE" ] || { cls="drift"; return 0; }
-  content=$(sparrow_heartbeat_read)
+  read_owner
+  sparrow_heartbeat_read
+  content="$sparrow_hb_word"
 
   # STANDING BY ON A USAGE LIMIT. The CLI closes the stream and stamps `blocked`
   # / `blocked:<reason>` when this session cannot run at all. Blocking the stop
@@ -377,7 +404,7 @@ classify() {
   case "$content" in
     blocked | blocked:*)
       blocked_marker_exists || { cls="drift"; return 0; }
-      _bpid=$(owner_pid)
+      _bpid="$owner_pid_snap"
       if [ -z "${_bpid:-}" ] || ! [ "$_bpid" -gt 0 ] 2>/dev/null; then
         cls="standby-gone"; standby_pid=""; return 0
       fi
@@ -421,7 +448,7 @@ classify() {
   esac
 
   # A wake path -- IF the process behind it still exists.
-  _opid=$(owner_pid)
+  _opid="$owner_pid_snap"
   cls="alive"
   [ -n "${_opid:-}" ] || return 0
   [ "$_opid" -gt 0 ] 2>/dev/null || return 0
@@ -440,7 +467,11 @@ if [ "$cls" = arming ]; then
   # once. No second poll: if the replacement is itself already gone, that is the
   # answer.
   _dead_owner="$arming_pid"
-  if wait_for_new_owner "$(json_nonce "$STATE_DIR/await-owner.json")"; then
+  # The bar is the generation this pass JUDGED, not whatever is in the file now:
+  # a replacement that published while we were deciding would otherwise set the
+  # bar at itself, and we would wait out the whole window for a third listener
+  # that is never coming and then block on the corpse.
+  if wait_for_new_owner "$owner_nonce_snap"; then
     classify
     case "$cls" in
       # Another candidate queued behind the first is not a third chance.
