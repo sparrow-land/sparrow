@@ -1,5 +1,6 @@
 import { DEFAULT_PORT } from '@sparrow-land/sdk/types';
 import { BANNER_IMAGE_PNG_BASE64 } from './banner-image.js';
+import { type ProbeOptions, type ProbeStdin, probeKittyGraphics } from './banner-probe.js';
 import { stripTrailingSlash } from './public-homes.js';
 
 /**
@@ -16,8 +17,17 @@ import { stripTrailingSlash } from './public-homes.js';
  * There are two renderings, both pure so they can be asserted on without a
  * server: `renderBanner` (ASCII bird, the universal one) and
  * `renderImageBanner` (the real illustration, via the kitty graphics
- * protocol). `imageBannerMode` decides between them from an ALLOWLIST of
- * terminals, and `printBanner` is the only part that touches a stream.
+ * protocol).
+ *
+ * Choosing between them happens in two steps. `imageBannerMode` is the
+ * synchronous, env-only decision: an ALLOWLIST of terminals that identify
+ * themselves in the environment. `resolveBannerMode` is the full one — it
+ * reuses the allowlist and, only where the env is silent, ASKS the terminal
+ * itself via `probeKittyGraphics` (see `banner-probe.ts`). The probe is what
+ * makes `docker run -it` work: inside a container the host terminal's env is
+ * invisible, but the terminal is still on the other end of the pty and will
+ * still answer a feature query. `printBanner` is the only part that touches a
+ * stream.
  */
 
 /** Env var that silences the banner (tests, scenarios, log scrapers). */
@@ -28,6 +38,15 @@ export const BANNER_OPT_OUT_ENV = 'SPARROW_NO_BANNER';
  * (`0`/`false`/`off`), overriding {@link imageBannerMode}'s allowlist.
  */
 export const BANNER_IMAGE_ENV = 'SPARROW_BANNER_IMAGE';
+
+/**
+ * Env var that forbids the runtime feature query alone (`0`/`false`/`off`):
+ * never write a question to the terminal, but keep every env-based rule. For
+ * the operator who does not want an unexpected escape sequence on their tty
+ * (a serial console, a recording, a terminal with an exotic input handler)
+ * yet still wants the illustration where the allowlist can see it.
+ */
+export const BANNER_PROBE_ENV = 'SPARROW_BANNER_PROBE';
 
 /**
  * A sparrow, in flight. Plain ASCII on purpose: it has to survive `docker
@@ -271,16 +290,60 @@ function envTristate(value: string | undefined): boolean | undefined {
   return undefined;
 }
 
+/** `TERM`, normalised: lower-cased and trimmed. */
+function termName(env: NodeJS.ProcessEnv): string {
+  return (env.TERM ?? '').trim().toLowerCase();
+}
+
+/** `TERM_PROGRAM`, normalised. */
+function termProgram(env: NodeJS.ProcessEnv): string {
+  return (env.TERM_PROGRAM ?? '').trim().toLowerCase();
+}
+
+/**
+ * Inside tmux or screen. Both need `allow-passthrough` configured to carry a
+ * graphics escape at all, and both mangle the image on redraw when it is not —
+ * and a feature query sent into an unconfigured multiplexer may never be
+ * answered, which is why this also means "do not probe".
+ */
+function inMultiplexer(env: NodeJS.ProcessEnv): boolean {
+  const term = termName(env);
+  return envPresent(env.TMUX) || term.startsWith('screen') || term.startsWith('tmux');
+}
+
+/**
+ * iTerm2, which can render kitty graphics in recent versions but may show a
+ * permission prompt for inline images. A startup banner that asks the operator
+ * a question is worse than a startup banner made of ASCII, so: never.
+ */
+function isIterm2(env: NodeJS.ProcessEnv): boolean {
+  return (
+    termProgram(env) === 'iterm.app' || (env.LC_TERMINAL ?? '').trim().toLowerCase() === 'iterm2'
+  );
+}
+
+/** A terminal that names itself in the environment as one we trust. */
+function onImageAllowlist(env: NodeJS.ProcessEnv): boolean {
+  const term = termName(env);
+  const program = termProgram(env);
+  const kitty = term === 'xterm-kitty' || envPresent(env.KITTY_WINDOW_ID);
+  const ghostty =
+    program === 'ghostty' || term === 'xterm-ghostty' || envPresent(env.GHOSTTY_RESOURCES_DIR);
+  const wezterm = program === 'wezterm';
+  return kitty || ghostty || wezterm;
+}
+
 /**
  * Whether to draw the real illustration, and the rule is deliberately timid:
  * show it only where we KNOW the kitty graphics protocol works AND know it
  * will not interrogate the user. Everything else gets the ASCII bird, which
  * is never wrong anywhere.
  *
- * So this is an ALLOWLIST of terminals identified by their own env vars, never
- * a probe and never a heuristic — a feature query would mean writing an escape
- * sequence and reading stdin back at startup, which on a terminal that does
- * not answer means either a hang or garbage on the screen.
+ * This is the ENV-ONLY half of the decision, and it is an ALLOWLIST of
+ * terminals identified by their own env vars — never a heuristic. It stays
+ * synchronous and side-effect free, which is what lets it be the fast path
+ * inside {@link resolveBannerMode}; the runtime feature query that covers the
+ * terminals the env cannot name lives there, not here.
  *
  * The rules, in order:
  *  - `SPARROW_BANNER_IMAGE=0|false|off` forces text, always.
@@ -307,21 +370,9 @@ export function imageBannerMode(
   if (stream.isTTY !== true) return 'text';
   if (forced === true) return 'image';
 
-  const term = (env.TERM ?? '').trim().toLowerCase();
-  const program = (env.TERM_PROGRAM ?? '').trim().toLowerCase();
-
-  // Multiplexers: passthrough is unreliable, so never.
-  if (envPresent(env.TMUX) || term.startsWith('screen') || term.startsWith('tmux')) return 'text';
-  // iTerm2: capable, but may prompt. Text.
-  if (program === 'iterm.app' || (env.LC_TERMINAL ?? '').trim().toLowerCase() === 'iterm2') {
-    return 'text';
-  }
-
-  const kitty = term === 'xterm-kitty' || envPresent(env.KITTY_WINDOW_ID);
-  const ghostty =
-    program === 'ghostty' || term === 'xterm-ghostty' || envPresent(env.GHOSTTY_RESOURCES_DIR);
-  const wezterm = program === 'wezterm';
-  return kitty || ghostty || wezterm ? 'image' : 'text';
+  if (inMultiplexer(env)) return 'text';
+  if (isIterm2(env)) return 'text';
+  return onImageAllowlist(env) ? 'image' : 'text';
 }
 
 /** A stdout-shaped sink: all `printBanner` needs, and all a test has to fake. */
@@ -330,9 +381,84 @@ export interface BannerStream {
   isTTY?: boolean;
 }
 
+/** The probe, as an injectable dependency — so tests need no real TTY. */
+export type KittyProbe = (opts: ProbeOptions) => Promise<boolean>;
+
+export interface ResolveBannerModeOptions {
+  /** Where the answer comes back. Defaults to `process.stdin`. */
+  stdin?: ProbeStdin;
+  /** Where the banner (and the query) goes. Defaults to `process.stdout`. */
+  stdout?: BannerStream;
+  /** Injectable for tests; defaults to the real {@link probeKittyGraphics}. */
+  probe?: KittyProbe;
+  /** Passed through to the probe; defaults to its own 500 ms. */
+  probeTimeoutMs?: number;
+}
+
+/**
+ * The full decision: illustration or ASCII bird, asking the terminal when —
+ * and only when — the environment has nothing to say.
+ *
+ * In order, and the order is the point:
+ *  1. `SPARROW_BANNER_IMAGE=0|false|off` — text, always. An operator's "no" is
+ *     never worth a question to the terminal.
+ *  2. stdout is not a TTY — text. Bytes in a log file are not a picture, and
+ *     there is nobody there to answer a query.
+ *  3. `SPARROW_BANNER_IMAGE=1|true|on` — image, and no probe: the operator has
+ *     already said this terminal can take it.
+ *  4. tmux/screen — text, and NO probe: passthrough is unreliable, and a query
+ *     sent into an unconfigured multiplexer may never come back at all.
+ *  5. iTerm2 — text, and no probe: it can render, but it may prompt.
+ *  6. The env allowlist (kitty, Ghostty, WezTerm) — image, no probe needed.
+ *  7. Otherwise, ask: {@link probeKittyGraphics} decides.
+ *
+ * Why step 7 is safe without an allowlist entry. The query is `a=q`, a pure
+ * feature question: a terminal that implements the kitty graphics protocol
+ * answers `OK` and draws nothing, and none of the terminals that answer `OK`
+ * prompt before drawing — the prompting one, iTerm2, is already excluded above
+ * by env and is exactly the kind of terminal the allowlist exists to keep out.
+ * A terminal that does NOT implement the protocol ignores the APC frame
+ * entirely and only answers DA1, which we read as "no". So a positive probe
+ * satisfies the original rule — supported AND will not prompt — for terminals
+ * the environment cannot name. That is precisely the `docker run -it` case: a
+ * Ghostty user whose container sees `TERM=xterm` now gets the illustration.
+ *
+ * `SPARROW_BANNER_PROBE=0` opts out of step 7 alone, leaving 1-6 intact.
+ */
+export async function resolveBannerMode(
+  env: NodeJS.ProcessEnv,
+  opts: ResolveBannerModeOptions = {},
+): Promise<BannerImageMode> {
+  const stdout = opts.stdout ?? process.stdout;
+  const forced = envTristate(env[BANNER_IMAGE_ENV]);
+  if (forced === false) return 'text';
+  if (stdout.isTTY !== true) return 'text';
+  if (forced === true) return 'image';
+
+  if (inMultiplexer(env)) return 'text';
+  if (isIterm2(env)) return 'text';
+  // The env-only decision is the fast path, and stays the single home of the
+  // allowlist: reuse it rather than restating which terminals are on it.
+  if (imageBannerMode(env, stdout) === 'image') return 'image';
+
+  if (envTristate(env[BANNER_PROBE_ENV]) === false) return 'text';
+  const probe = opts.probe ?? probeKittyGraphics;
+  return (await probe({
+    stdin: opts.stdin ?? process.stdin,
+    stdout,
+    timeoutMs: opts.probeTimeoutMs,
+  }))
+    ? 'image'
+    : 'text';
+}
+
 export interface PrintBannerOptions extends Omit<BannerInfo, 'color'> {
   env?: NodeJS.ProcessEnv;
   stream?: BannerStream;
+  /** Where a feature query is answered. Defaults to `process.stdin`. */
+  stdin?: ProbeStdin;
+  /** Injectable probe, for tests. */
+  probe?: KittyProbe;
   /** `false` when the server's logger is off — see {@link bannerEnabled}. */
   logging: boolean;
 }
@@ -341,12 +467,22 @@ export interface PrintBannerOptions extends Omit<BannerInfo, 'color'> {
  * Write the banner to `stream` (default stdout) exactly once, or write nothing
  * at all. Called from the entrypoint the moment `listen()` resolves, so it
  * lands above the ordinary log lines rather than buried in them.
+ *
+ * Async only because of the feature query in {@link resolveBannerMode}: on
+ * every path that does not probe it still resolves within a microtask, and
+ * when it does probe it costs at most the probe's 500 ms. The suppression
+ * check comes FIRST, so a silenced banner never writes a query either.
  */
-export function printBanner(opts: PrintBannerOptions): void {
+export async function printBanner(opts: PrintBannerOptions): Promise<void> {
   const env = opts.env ?? process.env;
   const stream = opts.stream ?? process.stdout;
   if (!bannerEnabled(env, { logging: opts.logging })) return;
   const color = useColor(env, stream);
-  const render = imageBannerMode(env, stream) === 'image' ? renderImageBanner : renderBanner;
+  const mode = await resolveBannerMode(env, {
+    stdin: opts.stdin,
+    stdout: stream,
+    probe: opts.probe,
+  });
+  const render = mode === 'image' ? renderImageBanner : renderBanner;
   stream.write(`${render({ ...opts, color })}\n`);
 }

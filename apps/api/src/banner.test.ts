@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BANNER_IMAGE_ENV,
   BANNER_OPT_OUT_ENV,
+  BANNER_PROBE_ENV,
   IMAGE_CELL_COLS,
   IMAGE_CELL_ROWS,
   KITTY_CHUNK_LIMIT,
@@ -11,6 +12,7 @@ import {
   imageBannerMode,
   printBanner,
   renderBanner,
+  resolveBannerMode,
   renderImageBanner,
   renderKittyImage,
   useColor,
@@ -219,24 +221,24 @@ describe('printBanner', () => {
     return s;
   };
 
-  it('writes the banner exactly once, plain, to the given stream', () => {
+  it('writes the banner exactly once, plain, to the given stream', async () => {
     const s = sink();
-    printBanner({ ...INFO, env: {}, stream: s, logging: true });
+    await printBanner({ ...INFO, env: {}, stream: s, logging: true });
     expect(s.out).toContain('http://localhost:8722');
     expect(s.out).not.toContain(ESC);
     expect(s.out.match(/v0\.1\.43/g)).toHaveLength(1);
     expect(s.out.endsWith('\n')).toBe(true);
   });
 
-  it('writes nothing at all when opted out', () => {
+  it('writes nothing at all when opted out', async () => {
     const s = sink();
-    printBanner({ ...INFO, env: { SPARROW_NO_BANNER: '1' }, stream: s, logging: true });
+    await printBanner({ ...INFO, env: { SPARROW_NO_BANNER: '1' }, stream: s, logging: true });
     expect(s.out).toBe('');
   });
 
-  it('writes nothing when the logger is off', () => {
+  it('writes nothing when the logger is off', async () => {
     const s = sink();
-    printBanner({ ...INFO, env: {}, stream: s, logging: false });
+    await printBanner({ ...INFO, env: {}, stream: s, logging: false });
     expect(s.out).toBe('');
   });
 });
@@ -449,9 +451,9 @@ describe('printBanner (image mode)', () => {
     return s;
   };
 
-  it('writes the image banner ONCE on an allowlisted TTY', () => {
+  it('writes the image banner ONCE on an allowlisted TTY', async () => {
     const s = sink(true);
-    printBanner({ ...INFO, env: { TERM: 'xterm-kitty' }, stream: s, logging: true });
+    await printBanner({ ...INFO, env: { TERM: 'xterm-kitty' }, stream: s, logging: true });
     expect(parseKitty(s.out).length).toBeGreaterThan(1);
     expect(s.out.match(/v0\.1\.43/g)).toHaveLength(1);
     expect(s.out).toContain('http://localhost:8722');
@@ -460,27 +462,225 @@ describe('printBanner (image mode)', () => {
     expect(s.out).toContain(`${ESC}[1m`);
   });
 
-  it('writes the ASCII banner on a TTY that is not allowlisted', () => {
+  it('writes the ASCII banner on a TTY that is not allowlisted', async () => {
     const s = sink(true);
-    printBanner({ ...INFO, env: { TERM: 'xterm-256color' }, stream: s, logging: true });
+    await printBanner({
+      ...INFO,
+      env: { TERM: 'xterm-256color' },
+      stream: s,
+      logging: true,
+      probe: async () => false,
+    });
     expect(parseKitty(s.out)).toHaveLength(0);
     expect(s.out).toContain('(o  )>');
   });
 
-  it('never writes an image when the banner is suppressed', () => {
+  it('never writes an image when the banner is suppressed', async () => {
     for (const env of [{ TERM: 'xterm-kitty', SPARROW_NO_BANNER: '1' }]) {
       const s = sink(true);
-      printBanner({ ...INFO, env, stream: s, logging: true });
+      await printBanner({ ...INFO, env, stream: s, logging: true });
       expect(s.out).toBe('');
     }
     const off = sink(true);
-    printBanner({ ...INFO, env: { TERM: 'xterm-kitty' }, stream: off, logging: false });
+    await printBanner({ ...INFO, env: { TERM: 'xterm-kitty' }, stream: off, logging: false });
     expect(off.out).toBe('');
   });
 
-  it('is plain text when stdout is a file, on any terminal', () => {
+  it('is plain text when stdout is a file, on any terminal', async () => {
     const s = sink(false);
-    printBanner({ ...INFO, env: { TERM: 'xterm-kitty' }, stream: s, logging: true });
+    await printBanner({ ...INFO, env: { TERM: 'xterm-kitty' }, stream: s, logging: true });
     expect(s.out).not.toContain(ESC);
+  });
+});
+
+describe('resolveBannerMode', () => {
+  const tty = { isTTY: true, write: () => true };
+  const pipe = { isTTY: false, write: () => true };
+  /** A probe stub that records whether it ran, so "no probe" is assertable. */
+  const stub = (answer: boolean): (() => Promise<boolean>) & { calls: number } => {
+    const fn = Object.assign(
+      async () => {
+        fn.calls += 1;
+        return answer;
+      },
+      { calls: 0 },
+    );
+    return fn;
+  };
+  const resolve = async (
+    env: NodeJS.ProcessEnv,
+    stdout: typeof tty,
+    probe: ReturnType<typeof stub>,
+  ): Promise<string> => resolveBannerMode(env, { stdout, stdin: undefined, probe });
+
+  it('honours the force-off first, without ever writing to the terminal', async () => {
+    const probe = stub(true);
+    expect(await resolve({ SPARROW_BANNER_IMAGE: '0', TERM: 'xterm-kitty' }, tty, probe)).toBe(
+      'text',
+    );
+    expect(probe.calls).toBe(0);
+  });
+
+  it('never probes a pipe: no TTY, no question', async () => {
+    const probe = stub(true);
+    expect(await resolve({ TERM: 'xterm' }, pipe, probe)).toBe('text');
+    expect(await resolve({ SPARROW_BANNER_IMAGE: '1' }, pipe, probe)).toBe('text');
+    expect(probe.calls).toBe(0);
+  });
+
+  it('honours the force-on without probing (docker run -it, operator said so)', async () => {
+    const probe = stub(false);
+    expect(await resolve({ SPARROW_BANNER_IMAGE: '1', TERM: 'xterm' }, tty, probe)).toBe('image');
+    expect(probe.calls).toBe(0);
+  });
+
+  it('never probes inside tmux or screen: the query may never be answered', async () => {
+    const probe = stub(true);
+    expect(await resolve({ TMUX: '/tmp/x,1,0', TERM: 'xterm' }, tty, probe)).toBe('text');
+    expect(await resolve({ TERM: 'screen.xterm-kitty' }, tty, probe)).toBe('text');
+    expect(await resolve({ TERM: 'tmux-256color' }, tty, probe)).toBe('text');
+    expect(probe.calls).toBe(0);
+  });
+
+  it('never probes iTerm2: it can render, but it may prompt', async () => {
+    const probe = stub(true);
+    expect(await resolve({ TERM_PROGRAM: 'iTerm.app' }, tty, probe)).toBe('text');
+    expect(await resolve({ LC_TERMINAL: 'iTerm2' }, tty, probe)).toBe('text');
+    expect(probe.calls).toBe(0);
+  });
+
+  it('takes the env allowlist as an answer and skips the probe', async () => {
+    const probe = stub(false);
+    for (const env of [
+      { TERM: 'xterm-kitty' },
+      { KITTY_WINDOW_ID: '1' },
+      { TERM_PROGRAM: 'ghostty' },
+      { TERM_PROGRAM: 'WezTerm' },
+    ]) {
+      expect(await resolve(env, tty, probe)).toBe('image');
+    }
+    expect(probe.calls).toBe(0);
+  });
+
+  it('asks the TERMINAL when the env says nothing — this is the docker -it case', async () => {
+    // Inside `docker run -it` from Ghostty, TERM is a plain `xterm`.
+    const yes = stub(true);
+    expect(await resolve({ TERM: 'xterm' }, tty, yes)).toBe('image');
+    expect(yes.calls).toBe(1);
+    const no = stub(false);
+    expect(await resolve({ TERM: 'xterm' }, tty, no)).toBe('text');
+    expect(no.calls).toBe(1);
+    const bare = stub(false);
+    expect(await resolve({}, tty, bare)).toBe('text');
+    expect(bare.calls).toBe(1);
+  });
+
+  it('lets an operator forbid the query itself, without forbidding the image', async () => {
+    expect(BANNER_PROBE_ENV).toBe('SPARROW_BANNER_PROBE');
+    const probe = stub(true);
+    for (const v of ['0', 'false', 'off']) {
+      expect(await resolve({ TERM: 'xterm', SPARROW_BANNER_PROBE: v }, tty, probe)).toBe('text');
+    }
+    expect(probe.calls).toBe(0);
+    // ...and the allowlist still fires with the probe switched off.
+    expect(
+      await resolve({ TERM: 'xterm-kitty', SPARROW_BANNER_PROBE: '0' }, tty, probe),
+    ).toBe('image');
+    expect(probe.calls).toBe(0);
+    // Empty/unknown reads as unset (compose always defines the var).
+    for (const v of ['', '  ', 'maybe', '1']) {
+      expect(await resolve({ TERM: 'xterm', SPARROW_BANNER_PROBE: v }, tty, probe)).toBe('image');
+    }
+  });
+
+  it('hands the probe the very streams it was given', async () => {
+    const seen: Array<{ stdin: unknown; stdout: unknown }> = [];
+    const stdin = { isTTY: true } as unknown as NodeJS.ReadStream;
+    const out = { isTTY: true, write: () => true };
+    const mode = await resolveBannerMode(
+      { TERM: 'xterm' },
+      {
+        stdin,
+        stdout: out,
+        probe: async (o) => {
+          seen.push({ stdin: o.stdin, stdout: o.stdout });
+          return true;
+        },
+      },
+    );
+    expect(mode).toBe('image');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.stdin).toBe(stdin);
+    expect(seen[0]!.stdout).toBe(out);
+  });
+
+  it('agrees with the sync env-only decision wherever that one is sure', async () => {
+    const probe = stub(false);
+    for (const env of [
+      { TERM: 'xterm-kitty' },
+      { TERM: 'xterm-ghostty' },
+      { GHOSTTY_RESOURCES_DIR: '/x' },
+      { TERM: 'xterm-kitty', SPARROW_BANNER_IMAGE: '0' },
+      { TERM_PROGRAM: 'iTerm.app' },
+      { TMUX: 'x' },
+    ]) {
+      expect(await resolve(env, tty, probe)).toBe(imageBannerMode(env, tty));
+    }
+  });
+});
+
+describe('printBanner (probe path)', () => {
+  const sink = (isTTY: boolean): { out: string; isTTY: boolean; write: (s: string) => void } => {
+    const s = {
+      out: '',
+      isTTY,
+      write: (chunk: string) => {
+        s.out += chunk;
+      },
+    };
+    return s;
+  };
+
+  it('draws the illustration on a terminal only the probe could vouch for', async () => {
+    const s = sink(true);
+    await printBanner({
+      ...INFO,
+      env: { TERM: 'xterm' },
+      stream: s,
+      logging: true,
+      probe: async () => true,
+    });
+    expect(parseKitty(s.out).length).toBeGreaterThan(1);
+    expect(s.out).toContain('http://localhost:8722');
+  });
+
+  it('draws the ASCII bird when the probe comes back empty-handed', async () => {
+    const s = sink(true);
+    await printBanner({
+      ...INFO,
+      env: { TERM: 'xterm' },
+      stream: s,
+      logging: true,
+      probe: async () => false,
+    });
+    expect(parseKitty(s.out)).toHaveLength(0);
+    expect(s.out).toContain('(o  )>');
+  });
+
+  it('never probes when the banner is silenced at all', async () => {
+    let calls = 0;
+    const s = sink(true);
+    await printBanner({
+      ...INFO,
+      env: { TERM: 'xterm', SPARROW_NO_BANNER: '1' },
+      stream: s,
+      logging: true,
+      probe: async () => {
+        calls += 1;
+        return true;
+      },
+    });
+    expect(s.out).toBe('');
+    expect(calls).toBe(0);
   });
 });

@@ -18,12 +18,18 @@ async function main(): Promise<void> {
     await app.listen({ port, host: '0.0.0.0' });
     // The human-facing banner: printed ONCE, the moment we are actually
     // serving, and set off by blank lines so it reads as a header rather than
-    // as another log record. On an allowlisted graphics terminal it is the
-    // real illustration; everywhere else the ASCII bird (see `banner.ts`,
-    // `imageBannerMode`). It obeys the same silence `LOG_LEVEL=off` buys
+    // as another log record. On a graphics terminal it is the real
+    // illustration; everywhere else the ASCII bird (see `banner.ts`,
+    // `resolveBannerMode`). It obeys the same silence `LOG_LEVEL=off` buys
     // (see `bannerEnabled`), so the raw write below is not the lie the old
     // duplicate `console.log` was; `SPARROW_NO_BANNER` turns it off on its own.
-    printBanner({
+    //
+    // Awaited, and awaited HERE: when the environment cannot name the terminal
+    // it asks the terminal itself, which costs one round trip (bounded at
+    // 500 ms, and only on a TTY). Holding the startup line behind it keeps the
+    // banner above the logs, where it belongs; nothing is serving any later,
+    // because `listen` has already resolved.
+    await printBanner({
       version: API_VERSION,
       build: BUILD_STAMP,
       url: bannerUrl(config.baseUrl),
