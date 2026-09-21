@@ -14,6 +14,21 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.47] — 2026-09-21
+
+### Changed
+
+- The quick-start command is `docker run -it …`. With a terminal attached the
+  banner is in colour, Ctrl-C stops the container, and on kitty, Ghostty or
+  WezTerm the sparrow is a picture. The README, Getting started and
+  Self-hosting all say the same line.
+- The banner is the first thing the server prints. Fastify's own per-address
+  "Server listening at" records no longer straddle it; our single
+  "listening on" line follows the banner instead.
+
+Client floor: MIN 0.1.22, RECOMMENDED 0.1.47. Nothing on the wire changed.
+
+
 ## [0.1.46] — 2026-09-21
 
 ### Added
