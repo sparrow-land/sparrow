@@ -48,6 +48,14 @@ export interface ServerConfig {
    */
   orgHostSuffix?: string;
   /**
+   * Skip the first-run onboarding wizard (env `SPARROW_SKIP_ONBOARDING`, only
+   * an explicit `1|true|on`). `GET /onboarding` then answers
+   * `{ active: false, reason: 'disabled' }` on every instance, however empty.
+   * Undefined/false = the wizard is offered while the instance has no human
+   * account and nobody has dismissed it — see `routes/onboarding-mode.ts`.
+   */
+  skipOnboarding?: boolean;
+  /**
    * Extra injected auth providers (interface seam for cloud/SAML). Core always
    * registers `password`, and `google` when its `GOOGLE_*` env credentials are
    * set; anything here is merged on top.

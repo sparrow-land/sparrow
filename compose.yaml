@@ -48,6 +48,11 @@ services:
       # `*@yourcompany.com,*@sub.yourcompany.com` (only `*` is special;
       # case-insensitive). Empty = anyone may sign up.
       AUTH_ALLOWED_EMAIL_PATTERNS: ${AUTH_ALLOWED_EMAIL_PATTERNS:-}
+      # Set to 1|true|on to skip the web UI's first-run wizard on a fresh
+      # instance (it offers to create the first account and workspace). Empty
+      # (the default below) means "unset" → the wizard is offered until someone
+      # signs up or cancels it.
+      SPARROW_SKIP_ONBOARDING: ${SPARROW_SKIP_ONBOARDING:-}
       # Server log level: fatal | error | warn | info | debug | trace, or one of
       # off/silent/none/false/0 to disable logging entirely. Empty (the default
       # below) means "unset" → `info`.

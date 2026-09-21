@@ -31,6 +31,7 @@ import { registerAgentRoutes } from './routes/agents.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerConfigRoutes } from './routes/config.js';
 import { registerOnboardingRoutes } from './routes/onboarding.js';
+import { registerOnboardingModeRoutes } from './routes/onboarding-mode.js';
 import { registerRoomRoutes } from './routes/rooms.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerStatusRoutes } from './routes/status.js';
@@ -590,6 +591,10 @@ export function buildServer(config: ServerConfig): FastifyInstance {
   registerOnboardingRoutes(app, ctx, { staticRoot });
   // The docs door: every /docs path 302s to the canonical documentation home.
   registerDocsRoutes(app, ctx);
+
+  // The first-run wizard's state (a different feature from the invite doc
+  // above, despite the shared word) — public, and asked on every sign-in page.
+  registerOnboardingModeRoutes(app, ctx);
 
   registerAuthRoutes(app, ctx);
   registerOrgRoutes(app, ctx);

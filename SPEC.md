@@ -874,6 +874,57 @@ advertises itself as open.
 | `PUT /me/avatar` | session | `{ dataBase64, contentType }` (PNG/JPEG/WebP, ≤ 2 MB decoded, else `413`; any other type → `400`) → `200 { user }` with the new `avatarUrl`. Stores the file as `humans.avatar_path` under `$DATA_DIR/avatars/`, replacing any previous upload. Humans only — an agent key → `403` (agent avatars are generated client-side) |
 | `DELETE /me/avatar` | session | clears the uploaded avatar → `200 { user }`; the effective `avatarUrl` falls back to the provider photo, then gravatar when enabled, then `null` |
 
+### Onboarding mode
+
+A brand-new self-hosted instance has nobody on it, and the sign-in page is the
+first thing an operator sees. **Onboarding mode** is the state in which the web UI
+runs its first-run wizard there — create the first account, name the first
+workspace — instead of showing a bare sign-in form. The SERVER owns that state;
+the web only asks.
+
+```
+GET /api/v1/onboarding  →  200 { active: boolean, reason: 'empty' | 'populated' | 'dismissed' | 'disabled' | 'hosted' }
+```
+
+The reasons are tested **in this order**, and the first one that matches is the
+answer:
+
+| `reason` | `active` | When |
+|---|---|---|
+| `hosted` | `false` | `ORG_HOST_SUFFIX` is set — the instance is host-scoped, i.e. provisioned by a platform, which founds its tenants itself. Onboarding mode is OSS-only by construction |
+| `disabled` | `false` | `SPARROW_SKIP_ONBOARDING` is `1`\|`true`\|`on` (empty, `0` and `false` read as unset, as everywhere else) — the operator's declarative off-switch |
+| `dismissed` | `false` | someone pressed Cancel; the latch is persisted, so this is the answer forever after on this instance |
+| `populated` | `false` | at least one human account exists — the instance is past its first run |
+| `empty` | **`true`** | none of the above, and no human account yet. The ONE active state |
+
+```
+POST /api/v1/onboarding/dismiss  →  204
+```
+
+Cancel. Public, no body, **idempotent**, and it records the latch whatever the
+current reason is (on an instance that was never active that is harmless, and it
+keeps the answer stable if the instance later stops being host-scoped). The latch
+is a row in the `config` table under the key `onboarding.dismissed` — instance
+state, deliberately NOT a `ConfigDescriptor`, so it never appears in
+`GET /config`'s entries: it is a latch the product sets, not a setting an operator
+tunes.
+
+Both routes are **public** — the caller by definition has no account yet — and
+both answer `Cache-Control: no-store`: the sign-in page asks on every load, and a
+cached "yes" would offer the wizard to a stranger on an instance that already has
+an owner. The human count is the LAST test, so the one query this costs is paid
+only when it is the question that remains.
+
+Onboarding mode **grants nothing**. The wizard signs up through `POST /auth/signup`
+like any other form, so `auth.allowSignup`, `auth.allowedEmailPatterns` and
+`auth.bootstrapFirstOrg` decide exactly what they always decide — an instance with
+signup closed still reports `empty`, and still refuses the signup with `403`.
+
+| Route | Auth | Behavior |
+|---|---|---|
+| `GET /onboarding` | none | `{ active, reason }` per the table above; `Cache-Control: no-store` |
+| `POST /onboarding/dismiss` | none | no body → `204`, idempotent; latches `onboarding.dismissed` in the `config` table so `reason` is `dismissed` from then on |
+
 ### Orgs
 
 Org settings (JSON, zod-validated, returned merged with defaults):
@@ -3668,6 +3719,11 @@ Routes: `GET /config` → `{ entries: [{ descriptor, value, source: 'db'|'env'|'
 (secrets masked); `PUT /config` `{ values }` → validate, upsert, return entries.
 Auth: the admin token (`X-Admin-Token`) only.
 
+The `config` table also carries a few **latches the product sets itself** —
+`onboarding.dismissed` (see *Onboarding mode*) — which have no descriptor on
+purpose: they are instance state, not operator settings, so they never appear in
+`GET /config`'s entries and `PUT /config` rejects them like any unknown key.
+
 ## Server configuration (env)
 
 | Var | Default | Meaning |
@@ -3689,6 +3745,7 @@ Auth: the admin token (`X-Admin-Token`) only.
 | `BOOTSTRAP_FIRST_ORG` | `true` | env fallback for `auth.bootstrapFirstOrg` |
 | `WORKSPACE_DIRECTORY_URL` / `WORKSPACE_CREATE_URL` | *(unset)* | env forms of `workspace.directoryUrl` / `workspace.createUrl` |
 | `GRAVATAR_AVATARS` | `false` | env fallback for `avatars.gravatar` |
+| `SPARROW_SKIP_ONBOARDING` | *(unset = the first-run wizard is offered)* | set to `1`\|`true`\|`on` to keep the web UI's first-run wizard off on every instance, however empty; `GET /api/v1/onboarding` then answers `disabled` (see *Onboarding mode*). Empty — which compose's `${SPARROW_SKIP_ONBOARDING:-}` always defines — `0` and `false` all read as unset |
 | `ORG_HOST_SUFFIX` | *(unset = no host scoping)* | host suffix a fronting edge maps to org scope (e.g. `.example.com`, `.localhost:8722`): a request whose Host is `<slug><suffix>` is host-scoped to that org. Advertised to the SPA via `GET /api/v1/capabilities`; the API stays canonical org-id-in-URL. Path scoping (`/orgs/:slug/…`) is always available regardless |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | *(unset = Google login off)* | operator OAuth credentials; never instance-configurable |
 | `PRESENCE_GRACE_SECONDS` | `30` | offline-emit delay after last disconnect |

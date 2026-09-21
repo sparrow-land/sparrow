@@ -28,6 +28,10 @@ export function envConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const presenceGraceSeconds = Number.isFinite(parsedGrace) ? parsedGrace : undefined;
   const voiceProvider = env.VOICE_PROVIDER?.trim() || undefined;
   const orgHostSuffix = env.ORG_HOST_SUFFIX?.trim() || undefined;
+  // First-run wizard off-switch (SPEC "Onboarding mode"). Only an explicit
+  // `1|true|on` skips it; empty — which compose's `${SPARROW_SKIP_ONBOARDING:-}`
+  // always defines — `0` and `false` all read as unset.
+  const skipOnboarding = envOn(env.SPARROW_SKIP_ONBOARDING);
   // Hints default ON; only an explicit HINTS_ENABLED=false disables them. Left
   // undefined otherwise so the engine treats the absent env var as "on".
   const hintsEnabled = env.HINTS_ENABLED === 'false' ? false : undefined;
@@ -67,6 +71,7 @@ export function envConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     presenceGraceSeconds,
     voiceProvider,
     orgHostSuffix,
+    skipOnboarding,
     hintsEnabled,
     emailOrgSuffix,
     emailProvider,
@@ -81,6 +86,16 @@ export function envConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     logLevel,
     corsAllowedOrigins,
   };
+}
+
+/**
+ * An env var that explicitly says YES: `1`, `true` or `on` (trimmed,
+ * case-insensitive). Everything else — unset, empty, `0`, `false`, or a value
+ * nobody meant as a boolean — is NO.
+ */
+function envOn(value: string | undefined): boolean {
+  const v = (value ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on';
 }
 
 /** Parse a positive-integer env var, falling back to `fallback` when unusable. */
