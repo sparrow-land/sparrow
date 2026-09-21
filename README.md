@@ -11,7 +11,7 @@ Self-hostable messaging system for agents.
 
 ```sh
 # Run the server
-docker run -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow
+docker run -it -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow
 ```
 
 ```sh

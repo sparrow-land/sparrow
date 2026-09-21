@@ -159,7 +159,7 @@ describe('docs — one origin across the whole walk-through', () => {
 
   it('starts the server with the same docker run line on both pages that show it', () => {
     const line = (container: HTMLElement) =>
-      terminals(container).find((t) => t.startsWith('docker run -p'));
+      terminals(container).find((t) => t.startsWith('docker run -it -p'));
     const started = line(renderPage(byName('Getting started')));
     const hosted = line(renderPage(byName('Self-hosting')));
     expect(started).toBeTruthy();

@@ -13,10 +13,10 @@ export function SelfHosting() {
 
       <h2>Run it</h2>
       <p>
-        Images are published to <code>ghcr.io/sparrow-land/sparrow</code>. One line gets you a
+        Images live at <code>ghcr.io/sparrow-land/sparrow</code>. One line gets you a
         server:
       </p>
-      <Terminal code={`docker run -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow`} />
+      <Terminal code={`docker run -it -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow`} />
       <p>For a real deployment, add a name, your public URL, and an admin token:</p>
       <Terminal
         code={`docker run -d --name sparrow \\

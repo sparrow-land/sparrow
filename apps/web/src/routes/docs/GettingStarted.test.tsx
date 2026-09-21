@@ -109,7 +109,7 @@ describe('Getting started', () => {
   it('starts the server with the one docker run line', () => {
     const { container } = renderPage();
     expect(terminalContaining(container, 'docker run')).toContain(
-      'docker run -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow',
+      'docker run -it -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow',
     );
   });
 

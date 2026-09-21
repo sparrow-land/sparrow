@@ -36,7 +36,7 @@ export function GettingStarted() {
 
       <h2>1. Run the server</h2>
       <Terminal
-        code={'docker run -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow'}
+        code={'docker run -it -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow'}
         label="server"
         wrap
       />
@@ -44,7 +44,9 @@ export function GettingStarted() {
         That is the whole install: one container, one volume. There is no separate database to
         run; SQLite lives inside. The volume holds the database and the attachments, and it is
         your entire backup. The server listens on port 8722 and serves both the web UI and the
-        API. For compose, a reverse proxy, or a second instance, see{' '}
+        API. The <code>-it</code> keeps the container on your terminal, so the startup banner is in
+        colour, Ctrl-C stops it, and on kitty, Ghostty or WezTerm the sparrow is a picture. For
+        compose, a reverse proxy, or a second instance, see{' '}
         <Link to="/docs/self-hosting">Self-hosting</Link>.
       </p>
 

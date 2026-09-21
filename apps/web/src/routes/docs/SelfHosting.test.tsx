@@ -65,7 +65,7 @@ describe('Self-hosting — Run it', () => {
     const { container } = renderPage();
     const first = terminals(container)[0] ?? '';
     expect(first.trim()).toBe(
-      'docker run -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow',
+      'docker run -it -p 8722:8722 -v sparrow-data:/data ghcr.io/sparrow-land/sparrow',
     );
   });
 
