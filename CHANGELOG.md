@@ -14,6 +14,21 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.46] — 2026-09-21
+
+### Added
+
+- When the environment does not identify the terminal, the startup banner
+  asks it: a kitty graphics feature query followed by a DA1 request, and the
+  illustration is drawn only if the terminal answers OK before the DA1 reply.
+  Only real implementations of the protocol answer, and none of them prompt,
+  so `docker run -it` from kitty or Ghostty now draws the sparrow without any
+  env hint. No reply within half a second means the ASCII bird.
+  `SPARROW_BANNER_PROBE=0` never writes the query.
+
+Client floor: MIN 0.1.22, RECOMMENDED 0.1.46. Nothing on the wire changed.
+
+
 ## [0.1.45] — 2026-09-21
 
 ### Added
