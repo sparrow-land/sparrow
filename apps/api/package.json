@@ -25,6 +25,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "bundle-clients": "node scripts/bundle-clients.mjs",
+    "embed-banner-image": "node scripts/embed-banner-image.mjs",
     "dump-docs": "tsx src/scripts/dump-docs.ts",
     "render-install-script": "tsx src/scripts/render-install-script.ts"
   },

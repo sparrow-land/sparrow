@@ -1,4 +1,5 @@
 import { DEFAULT_PORT } from '@sparrow-land/sdk/types';
+import { BANNER_IMAGE_PNG_BASE64 } from './banner-image.js';
 import { stripTrailingSlash } from './public-homes.js';
 
 /**
@@ -12,28 +13,33 @@ import { stripTrailingSlash } from './public-homes.js';
  * `/docs` `302`s use), and the version/build from `version.ts` — the same pair
  * `GET /healthz` reports.
  *
- * Rendering is pure (`renderBanner`) so it can be asserted on without a server;
- * `printBanner` is the only part that touches a stream.
+ * There are two renderings, both pure so they can be asserted on without a
+ * server: `renderBanner` (ASCII bird, the universal one) and
+ * `renderImageBanner` (the real illustration, via the kitty graphics
+ * protocol). `imageBannerMode` decides between them from an ALLOWLIST of
+ * terminals, and `printBanner` is the only part that touches a stream.
  */
 
 /** Env var that silences the banner (tests, scenarios, log scrapers). */
 export const BANNER_OPT_OUT_ENV = 'SPARROW_NO_BANNER';
 
 /**
- * A sparrow, perched. Plain ASCII on purpose: it has to survive `docker logs`,
- * a CI capture, an SSH session on a dumb terminal and a copy-paste into an
- * issue. Nine rows, thirty columns — small enough that it never wraps.
+ * Env var that forces the illustration on (`1`/`true`/`on`) or off
+ * (`0`/`false`/`off`), overriding {@link imageBannerMode}'s allowlist.
+ */
+export const BANNER_IMAGE_ENV = 'SPARROW_BANNER_IMAGE';
+
+/**
+ * A sparrow, in flight. Plain ASCII on purpose: it has to survive `docker
+ * logs`, a CI capture, an SSH session on a dumb terminal and a copy-paste into
+ * an issue. Four rows — small enough that it never wraps, and short enough
+ * that it never pushes the URL off a cramped screen.
  */
 export const SPARROW_ART: readonly string[] = [
-  "         .-''-.",
-  "       .'      `.",
-  ' __   /    o     \\',
-  '<__\\ |             `--.._',
-  '      \\                  `--._',
-  "       `.        __..--''''",
-  "         `-.__.-'",
-  '          |  |',
-  '    ~~~~~~^~~^~~~~~~~~~~',
+  '        ___',
+  '  \\\\\\__(o  )>',
+  '      \\____/',
+  '    ~~~^~~^~~~',
 ];
 
 /** Two spaces of air on the left so the art never hugs the terminal edge. */
@@ -51,8 +57,12 @@ const RESET = '[0m';
 const DIM = '[2m';
 /** Sparrow-brown for the art; basic ANSI only — 256-color is not universal. */
 const FEATHER = '[33m';
+/** The water under the bird — cool, so the warm bird sits on top of it. */
+const WATER = '[36m';
 /** The wordmark: the product's name carries the weight, nothing else. */
 const WORDMARK = '[1m';
+/** The version: the one fact an operator is usually squinting for. */
+const VERSION = '[32m';
 /** The one thing to act on, in the second accent: bold + underlined cyan. */
 const LINK = '[1;4;36m';
 /** Field labels ("Open", "Docs") and the docs URL: present, never competing. */
@@ -78,6 +88,41 @@ function paint(text: string, code: string, color: boolean): string {
 }
 
 /**
+ * A row of art is "water" when it is made of nothing but ripples. Deciding it
+ * from the glyphs rather than from a row index means the bird can be redrawn
+ * without a second edit here to keep the colours in step.
+ */
+function isWaterRow(row: string): boolean {
+  return /^[~^ ]+$/.test(row) && row.includes('~');
+}
+
+/** The ASCII bird, painted: warm feathers above, a cool ripple below. */
+function artLines(color: boolean): string[] {
+  return SPARROW_ART.map((row) => paint(PAD + row, isWaterRow(row) ? WATER : FEATHER, color));
+}
+
+/**
+ * The words: wordmark + version, then the two links. Shared verbatim between
+ * the ASCII banner and the image one, so the illustration never drifts into
+ * having its own, subtly different, typography.
+ */
+function textLines(info: BannerInfo): string[] {
+  const { version, build, url, docsUrl, color } = info;
+  // The version carries its own colour; the build stamp stays dim behind it.
+  const stamp =
+    paint(`v${version}`, VERSION, color) +
+    (build ? paint(` ${DOT} build ${build}`, DIM, color) : '');
+  return [
+    '',
+    `${PAD}${paint('Sparrow', WORDMARK, color)}   ${stamp}`,
+    '',
+    `${PAD}${paint('Open', LABEL, color)}   ${paint(url, LINK, color)}`,
+    `${PAD}${paint('Docs', LABEL, color)}   ${paint(docsUrl, DIM, color)}`,
+    '',
+  ];
+}
+
+/**
  * The banner as a string, without a trailing newline.
  *
  * Colour is strictly decorative: `renderBanner({...})` with `color: true` and
@@ -86,19 +131,67 @@ function paint(text: string, code: string, color: boolean): string {
  * terminal painted.
  */
 export function renderBanner(info: BannerInfo): string {
-  const { version, build, url, docsUrl, color } = info;
-  const stamp = build ? `v${version} ${DOT} build ${build}` : `v${version}`;
-  const lines = [
-    '',
-    ...SPARROW_ART.map((row) => paint(PAD + row, FEATHER, color)),
-    '',
-    `${PAD}${paint('Sparrow', WORDMARK, color)}   ${paint(stamp, DIM, color)}`,
-    '',
-    `${PAD}${paint('Open', LABEL, color)}   ${paint(url, LINK, color)}`,
-    `${PAD}${paint('Docs', LABEL, color)}   ${paint(docsUrl, DIM, color)}`,
-    '',
-  ];
-  return lines.join('\n');
+  return ['', ...artLines(info.color), ...textLines(info)].join('\n');
+}
+
+/** Payload bytes per kitty transmission chunk — the protocol's own ceiling. */
+export const KITTY_CHUNK_LIMIT = 4096;
+/**
+ * The placement box, in terminal cells. A cell is about twice as tall as it is
+ * wide, so a square illustration needs twice as many columns as rows to come
+ * out square: ten rows of bird, twenty columns.
+ */
+export const IMAGE_CELL_ROWS = 10;
+export const IMAGE_CELL_COLS = IMAGE_CELL_ROWS * 2;
+
+/** APC opener/closer that wraps every kitty graphics command. */
+const APC = '\x1b_G';
+const ST = '\x1b\\';
+
+/**
+ * One kitty-graphics "direct transmission" of a PNG, as a string.
+ *
+ * `f=100` says the payload is a PNG file (not raw pixels), `a=T` transmits and
+ * displays it in one go, `c`/`r` scale the placement to that many cells, and
+ * `C=1` tells the terminal NOT to move the cursor — we step past the image
+ * ourselves with plain newlines, which is the one cursor behaviour every
+ * terminal agrees on. The base64 payload is split into `KITTY_CHUNK_LIMIT`
+ * pieces carrying `m=1` ("more coming") until the last, which carries `m=0`;
+ * control keys ride the first chunk only, as the protocol requires.
+ */
+export function renderKittyImage(
+  base64: string,
+  opts: { cols?: number; rows?: number } = {},
+): string {
+  const cols = opts.cols ?? IMAGE_CELL_COLS;
+  const rows = opts.rows ?? IMAGE_CELL_ROWS;
+  const chunks: string[] = [];
+  for (let i = 0; i < base64.length; i += KITTY_CHUNK_LIMIT) {
+    chunks.push(base64.slice(i, i + KITTY_CHUNK_LIMIT));
+  }
+  return chunks
+    .map((payload, i) => {
+      const more = i === chunks.length - 1 ? 0 : 1;
+      const keys = i === 0 ? `f=100,a=T,C=1,c=${cols},r=${rows},m=${more}` : `m=${more}`;
+      return `${APC}${keys};${payload}${ST}`;
+    })
+    .join('');
+}
+
+/**
+ * The banner with the real illustration instead of the ASCII bird.
+ *
+ * Only ever reached through {@link imageBannerMode}, i.e. on a terminal we
+ * KNOW speaks this protocol without prompting. The text block is printed
+ * below the image rather than beside it: putting it to the right would mean
+ * cursor-positioning escapes whose interaction with wrapping and scrollback
+ * differs per terminal, and a banner is not the place to be clever.
+ */
+export function renderImageBanner(info: BannerInfo): string {
+  const image = `${PAD}${renderKittyImage(BANNER_IMAGE_PNG_BASE64)}`;
+  // C=1 left the cursor where it started, so walk it past the image's rows.
+  const clear = '\n'.repeat(IMAGE_CELL_ROWS);
+  return `\n${image}${clear}${textLines(info).join('\n')}`;
 }
 
 /**
@@ -162,6 +255,75 @@ export function useColor(env: NodeJS.ProcessEnv, stream: { isTTY?: boolean }): b
   return stream.isTTY === true;
 }
 
+/** Which rendering to use: the illustration, or the ASCII bird. */
+export type BannerImageMode = 'image' | 'text';
+
+/** An env var that is present at all (empty reads as absent, as in compose). */
+function envPresent(value: string | undefined): boolean {
+  return (value ?? '').trim() !== '';
+}
+
+/** `1|true|on` → true, `0|false|off` → false, anything else → undefined. */
+function envTristate(value: string | undefined): boolean | undefined {
+  const v = (value ?? '').trim().toLowerCase();
+  if (v === '1' || v === 'true' || v === 'on') return true;
+  if (v === '0' || v === 'false' || v === 'off') return false;
+  return undefined;
+}
+
+/**
+ * Whether to draw the real illustration, and the rule is deliberately timid:
+ * show it only where we KNOW the kitty graphics protocol works AND know it
+ * will not interrogate the user. Everything else gets the ASCII bird, which
+ * is never wrong anywhere.
+ *
+ * So this is an ALLOWLIST of terminals identified by their own env vars, never
+ * a probe and never a heuristic — a feature query would mean writing an escape
+ * sequence and reading stdin back at startup, which on a terminal that does
+ * not answer means either a hang or garbage on the screen.
+ *
+ * The rules, in order:
+ *  - `SPARROW_BANNER_IMAGE=0|false|off` forces text, always.
+ *  - stdout must be a real TTY (the same check colour makes — though unlike
+ *    colour, `FORCE_COLOR` does NOT opt a pipe in: bytes in a log file are not
+ *    a picture). `NO_COLOR` is about colour and says nothing about images.
+ *  - `SPARROW_BANNER_IMAGE=1|true|on` forces the image on that TTY. This is
+ *    for `docker run -it`: inside the container the host terminal's `TERM`/
+ *    `TERM_PROGRAM` are invisible, so the allowlist cannot fire and the
+ *    operator has to say so themselves.
+ *  - tmux and screen are out. Both need passthrough to be configured
+ *    (`allow-passthrough`) and both mangle the image on redraw when it is not.
+ *  - iTerm2 is EXPLICITLY out, even though recent versions can render kitty
+ *    graphics: it may show a permission/confirmation prompt for inline images,
+ *    and a startup banner that asks the operator a question is worse than a
+ *    startup banner made of ASCII.
+ */
+export function imageBannerMode(
+  env: NodeJS.ProcessEnv,
+  stream: { isTTY?: boolean },
+): BannerImageMode {
+  const forced = envTristate(env[BANNER_IMAGE_ENV]);
+  if (forced === false) return 'text';
+  if (stream.isTTY !== true) return 'text';
+  if (forced === true) return 'image';
+
+  const term = (env.TERM ?? '').trim().toLowerCase();
+  const program = (env.TERM_PROGRAM ?? '').trim().toLowerCase();
+
+  // Multiplexers: passthrough is unreliable, so never.
+  if (envPresent(env.TMUX) || term.startsWith('screen') || term.startsWith('tmux')) return 'text';
+  // iTerm2: capable, but may prompt. Text.
+  if (program === 'iterm.app' || (env.LC_TERMINAL ?? '').trim().toLowerCase() === 'iterm2') {
+    return 'text';
+  }
+
+  const kitty = term === 'xterm-kitty' || envPresent(env.KITTY_WINDOW_ID);
+  const ghostty =
+    program === 'ghostty' || term === 'xterm-ghostty' || envPresent(env.GHOSTTY_RESOURCES_DIR);
+  const wezterm = program === 'wezterm';
+  return kitty || ghostty || wezterm ? 'image' : 'text';
+}
+
 /** A stdout-shaped sink: all `printBanner` needs, and all a test has to fake. */
 export interface BannerStream {
   write(chunk: string): unknown;
@@ -185,5 +347,6 @@ export function printBanner(opts: PrintBannerOptions): void {
   const stream = opts.stream ?? process.stdout;
   if (!bannerEnabled(env, { logging: opts.logging })) return;
   const color = useColor(env, stream);
-  stream.write(`${renderBanner({ ...opts, color })}\n`);
+  const render = imageBannerMode(env, stream) === 'image' ? renderImageBanner : renderBanner;
+  stream.write(`${render({ ...opts, color })}\n`);
 }

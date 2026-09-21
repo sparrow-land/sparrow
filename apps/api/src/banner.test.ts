@@ -1,13 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BANNER_IMAGE_ENV,
   BANNER_OPT_OUT_ENV,
+  IMAGE_CELL_COLS,
+  IMAGE_CELL_ROWS,
+  KITTY_CHUNK_LIMIT,
   SPARROW_ART,
   bannerEnabled,
   bannerUrl,
+  imageBannerMode,
   printBanner,
   renderBanner,
+  renderImageBanner,
+  renderKittyImage,
   useColor,
 } from './banner.js';
+import { BANNER_IMAGE_PNG_BASE64 } from './banner-image.js';
 import { envConfig } from './config.js';
 import { DEFAULT_DOCS_URL } from './public-homes.js';
 
@@ -101,10 +109,32 @@ describe('renderBanner', () => {
     }
   });
 
-  it('keeps the art itself under 40 columns', () => {
+  it('keeps the art itself under 40 columns and 6 rows', () => {
     for (const line of SPARROW_ART) expect(line.length).toBeLessThanOrEqual(40);
-    expect(SPARROW_ART.length).toBeGreaterThanOrEqual(6);
-    expect(SPARROW_ART.length).toBeLessThanOrEqual(9);
+    expect(SPARROW_ART.length).toBeGreaterThanOrEqual(3);
+    expect(SPARROW_ART.length).toBeLessThanOrEqual(6);
+  });
+
+  it('is the compact bird, exactly', () => {
+    expect(SPARROW_ART.join('\n')).toBe(
+      ['        ___', '  \\\\\\__(o  )>', '      \\____/', '    ~~~^~~^~~~'].join('\n'),
+    );
+  });
+
+  it('gives the version its own colour and the water line a cool one', () => {
+    const out = renderBanner({ ...INFO, color: true });
+    const line = (needle: string): string =>
+      out.split('\n').find((l) => strip(l).includes(needle))!;
+    // Version green, the build stamp behind it merely dim.
+    const mark = line('v0.1.43');
+    expect(mark).toContain(`${ESC}[32m`);
+    expect(mark.indexOf(`${ESC}[32m`)).toBeLessThan(mark.indexOf('v0.1.43'));
+    expect(mark).toContain(`${ESC}[2m`);
+    // Water is blue or cyan, never the feather yellow.
+    const water = line('~~~^~~^~~~');
+    expect(water).toMatch(new RegExp(`${ESC}\\[3[46]m`));
+    // The bird's body stays yellow.
+    expect(line('(o  )>')).toContain(`${ESC}[33m`);
   });
 
   it('is pure ASCII except for the one separator dot', () => {
@@ -208,5 +238,249 @@ describe('printBanner', () => {
     const s = sink();
     printBanner({ ...INFO, env: {}, stream: s, logging: false });
     expect(s.out).toBe('');
+  });
+});
+
+/**
+ * Parse a rendered kitty-graphics stream into its APC chunks. Deliberately
+ * strict: anything that is not `ESC _ G <keys> ; <payload> ESC \` fails to
+ * parse, so a malformed frame shows up as a missing chunk rather than as a
+ * loose assertion that happened to pass.
+ */
+const parseKitty = (s: string): Array<{ keys: string; payload: string }> => {
+  const out: Array<{ keys: string; payload: string }> = [];
+  const re = new RegExp(`${ESC}_G([^;${ESC}]*);([^${ESC}]*)${ESC}\\\\`, 'g');
+  for (const m of s.matchAll(re)) out.push({ keys: m[1]!, payload: m[2]! });
+  return out;
+};
+
+/** The control keys of one chunk, as a map. */
+const keyMap = (keys: string): Record<string, string> =>
+  Object.fromEntries(
+    keys
+      .split(',')
+      .filter(Boolean)
+      .map((kv) => kv.split('=') as [string, string]),
+  );
+
+describe('renderKittyImage', () => {
+  const out = renderKittyImage(BANNER_IMAGE_PNG_BASE64);
+  const chunks = parseKitty(out);
+
+  it('emits every byte inside an APC frame and nothing outside one', () => {
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(out.startsWith(`${ESC}_G`)).toBe(true);
+    expect(out.endsWith(`${ESC}\\`)).toBe(true);
+    // Rebuilding the frames byte-for-byte reproduces the whole string: there is
+    // no stray text between chunks that a non-kitty terminal could print.
+    const rebuilt = chunks.map((c) => `${ESC}_G${c.keys};${c.payload}${ESC}\\`).join('');
+    expect(rebuilt).toBe(out);
+  });
+
+  it('declares PNG direct transmission and a cell-sized placement, once', () => {
+    const first = keyMap(chunks[0]!.keys);
+    expect(first.f).toBe('100'); // f=100: the payload is a PNG, not raw RGBA
+    expect(first.a).toBe('T'); // a=T: transmit AND display
+    expect(first.c).toBe(String(IMAGE_CELL_COLS));
+    expect(first.r).toBe(String(IMAGE_CELL_ROWS));
+    expect(first.C).toBe('1'); // do not move the cursor; we place the text ourselves
+    // Control keys ride the FIRST chunk only; the rest carry continuation alone.
+    for (const chunk of chunks.slice(1)) {
+      expect(Object.keys(keyMap(chunk.keys))).toEqual(['m']);
+    }
+  });
+
+  it('chunks the payload with m=1 and closes with m=0', () => {
+    for (const chunk of chunks.slice(0, -1)) expect(keyMap(chunk.keys).m).toBe('1');
+    expect(keyMap(chunks.at(-1)!.keys).m).toBe('0');
+  });
+
+  it('never exceeds 4096 payload bytes in a chunk', () => {
+    expect(KITTY_CHUNK_LIMIT).toBe(4096);
+    for (const chunk of chunks) {
+      expect(chunk.payload.length).toBeLessThanOrEqual(KITTY_CHUNK_LIMIT);
+      expect(Buffer.byteLength(chunk.payload, 'utf8')).toBeLessThanOrEqual(KITTY_CHUNK_LIMIT);
+    }
+    // ...and fills them: only the last chunk may be short.
+    for (const chunk of chunks.slice(0, -1)) {
+      expect(chunk.payload.length).toBe(KITTY_CHUNK_LIMIT);
+    }
+  });
+
+  it('round-trips: the concatenated payload is the PNG', () => {
+    const joined = chunks.map((c) => c.payload).join('');
+    expect(joined).toBe(BANNER_IMAGE_PNG_BASE64);
+    const bytes = Buffer.from(joined, 'base64');
+    expect(bytes.subarray(0, 8)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+  });
+
+  it('keeps the bird square: ~2:1 cells mean twice as many columns as rows', () => {
+    expect(IMAGE_CELL_ROWS).toBe(10);
+    expect(IMAGE_CELL_COLS).toBe(IMAGE_CELL_ROWS * 2);
+  });
+});
+
+describe('renderImageBanner', () => {
+  it('puts the text block BELOW the image, clear of its rows', () => {
+    const out = renderImageBanner({ ...INFO, color: false });
+    const end = out.lastIndexOf(`${ESC}\\`) + 2;
+    const below = out.slice(end);
+    // Exactly as many newlines as the image is tall, before anything is drawn.
+    expect(below.startsWith('\n'.repeat(IMAGE_CELL_ROWS))).toBe(true);
+    expect(below).toContain('Sparrow');
+    expect(below).toContain('v0.1.43');
+    expect(below).toContain('http://localhost:8722');
+    expect(below).toContain(DEFAULT_DOCS_URL);
+  });
+
+  it('drops the ASCII bird — the image IS the bird', () => {
+    const out = renderImageBanner({ ...INFO, color: false });
+    for (const row of SPARROW_ART) expect(out).not.toContain(row.trim());
+  });
+
+  it('carries the same PNG the text-free path does', () => {
+    const chunks = parseKitty(renderImageBanner({ ...INFO, color: true }));
+    expect(chunks.map((c) => c.payload).join('')).toBe(BANNER_IMAGE_PNG_BASE64);
+  });
+
+  it('colours the text block exactly as the text banner does, or not at all', () => {
+    const plain = renderImageBanner({ ...INFO, color: false });
+    const below = (s: string): string => s.slice(s.lastIndexOf(`${ESC}\\`) + 2);
+    // Colour off: no SGR anywhere below the image.
+    expect(below(plain)).not.toMatch(new RegExp(`${ESC}\\[[0-9;]*m`));
+    const painted = below(renderImageBanner({ ...INFO, color: true }));
+    expect(strip(painted)).toBe(below(plain));
+    expect(painted).toContain(`${ESC}[32m`); // version green
+    expect(painted).toContain(`${ESC}[1m`); // wordmark bold
+  });
+});
+
+describe('imageBannerMode', () => {
+  const tty = { isTTY: true };
+  const pipe = { isTTY: false };
+
+  it('needs a TTY, whatever the terminal says it is', () => {
+    expect(imageBannerMode({ TERM: 'xterm-kitty' }, tty)).toBe('image');
+    expect(imageBannerMode({ TERM: 'xterm-kitty' }, pipe)).toBe('text');
+    expect(imageBannerMode({ TERM: 'xterm-kitty' }, {})).toBe('text');
+    // FORCE_COLOR opts a PIPE into colour; it never opts one into graphics.
+    expect(imageBannerMode({ TERM: 'xterm-kitty', FORCE_COLOR: '1' }, pipe)).toBe('text');
+  });
+
+  it('allows kitty, Ghostty and WezTerm — and only by env, never a heuristic', () => {
+    expect(imageBannerMode({ TERM: 'xterm-kitty' }, tty)).toBe('image');
+    expect(imageBannerMode({ KITTY_WINDOW_ID: '1' }, tty)).toBe('image');
+    expect(imageBannerMode({ TERM_PROGRAM: 'ghostty' }, tty)).toBe('image');
+    expect(imageBannerMode({ TERM_PROGRAM: 'Ghostty' }, tty)).toBe('image');
+    expect(imageBannerMode({ TERM: 'xterm-ghostty' }, tty)).toBe('image');
+    expect(imageBannerMode({ GHOSTTY_RESOURCES_DIR: '/x' }, tty)).toBe('image');
+    expect(imageBannerMode({ TERM_PROGRAM: 'WezTerm' }, tty)).toBe('image');
+    expect(imageBannerMode({ TERM_PROGRAM: 'wezterm' }, tty)).toBe('image');
+  });
+
+  it('falls back to text for everything else', () => {
+    for (const env of [
+      {},
+      { TERM: 'xterm-256color' },
+      { TERM: 'vt100' },
+      { TERM: 'dumb' },
+      { TERM_PROGRAM: 'Apple_Terminal' },
+      { TERM_PROGRAM: 'vscode' },
+      { TERM: 'xterm-kitty-ish' },
+    ]) {
+      expect(imageBannerMode(env, tty)).toBe('text');
+    }
+  });
+
+  it('is text in iTerm2 even though it can render: it may PROMPT the user', () => {
+    expect(imageBannerMode({ TERM_PROGRAM: 'iTerm.app' }, tty)).toBe('text');
+    expect(imageBannerMode({ LC_TERMINAL: 'iTerm2' }, tty)).toBe('text');
+    // Even when another allowlist key is also present (iTerm2 wins, downward).
+    expect(imageBannerMode({ TERM_PROGRAM: 'iTerm.app', TERM: 'xterm-kitty' }, tty)).toBe('text');
+  });
+
+  it('is text inside tmux or screen: passthrough is unreliable', () => {
+    expect(imageBannerMode({ TERM: 'xterm-kitty', TMUX: '/tmp/tmux-1000/default,1,0' }, tty)).toBe(
+      'text',
+    );
+    expect(imageBannerMode({ TERM: 'screen.xterm-kitty', KITTY_WINDOW_ID: '1' }, tty)).toBe('text');
+    expect(imageBannerMode({ TERM: 'tmux-256color', KITTY_WINDOW_ID: '1' }, tty)).toBe('text');
+    // An empty TMUX (compose-style `${TMUX:-}`) is not "inside tmux".
+    expect(imageBannerMode({ TERM: 'xterm-kitty', TMUX: '' }, tty)).toBe('image');
+  });
+
+  it('honours the opt-out over every allowlist entry', () => {
+    expect(BANNER_IMAGE_ENV).toBe('SPARROW_BANNER_IMAGE');
+    for (const v of ['0', 'false', 'off', 'OFF', 'False']) {
+      expect(imageBannerMode({ TERM: 'xterm-kitty', SPARROW_BANNER_IMAGE: v }, tty)).toBe('text');
+    }
+  });
+
+  it('honours the opt-in on a TTY the allowlist cannot see (docker -t)', () => {
+    for (const v of ['1', 'true', 'on', 'ON', 'True']) {
+      expect(imageBannerMode({ SPARROW_BANNER_IMAGE: v }, tty)).toBe('image');
+      // ...but a pipe is still a pipe, and tmux is still tmux.
+      expect(imageBannerMode({ SPARROW_BANNER_IMAGE: v }, pipe)).toBe('text');
+    }
+    // Forced ON deliberately overrides the tmux and iTerm2 guards too: the
+    // operator has said, explicitly, that this terminal can take it.
+    expect(imageBannerMode({ SPARROW_BANNER_IMAGE: '1', TMUX: 'x' }, tty)).toBe('image');
+  });
+
+  it('treats an empty or unknown value as unset (compose always defines the var)', () => {
+    for (const v of ['', '  ', 'maybe']) {
+      expect(imageBannerMode({ TERM: 'xterm-kitty', SPARROW_BANNER_IMAGE: v }, tty)).toBe('image');
+      expect(imageBannerMode({ TERM: 'xterm', SPARROW_BANNER_IMAGE: v }, tty)).toBe('text');
+    }
+  });
+});
+
+describe('printBanner (image mode)', () => {
+  const sink = (isTTY: boolean): { out: string; isTTY: boolean; write: (s: string) => void } => {
+    const s = {
+      out: '',
+      isTTY,
+      write: (chunk: string) => {
+        s.out += chunk;
+      },
+    };
+    return s;
+  };
+
+  it('writes the image banner ONCE on an allowlisted TTY', () => {
+    const s = sink(true);
+    printBanner({ ...INFO, env: { TERM: 'xterm-kitty' }, stream: s, logging: true });
+    expect(parseKitty(s.out).length).toBeGreaterThan(1);
+    expect(s.out.match(/v0\.1\.43/g)).toHaveLength(1);
+    expect(s.out).toContain('http://localhost:8722');
+    expect(s.out.endsWith('\n')).toBe(true);
+    // A TTY is coloured, so the text block below the image is painted.
+    expect(s.out).toContain(`${ESC}[1m`);
+  });
+
+  it('writes the ASCII banner on a TTY that is not allowlisted', () => {
+    const s = sink(true);
+    printBanner({ ...INFO, env: { TERM: 'xterm-256color' }, stream: s, logging: true });
+    expect(parseKitty(s.out)).toHaveLength(0);
+    expect(s.out).toContain('(o  )>');
+  });
+
+  it('never writes an image when the banner is suppressed', () => {
+    for (const env of [{ TERM: 'xterm-kitty', SPARROW_NO_BANNER: '1' }]) {
+      const s = sink(true);
+      printBanner({ ...INFO, env, stream: s, logging: true });
+      expect(s.out).toBe('');
+    }
+    const off = sink(true);
+    printBanner({ ...INFO, env: { TERM: 'xterm-kitty' }, stream: off, logging: false });
+    expect(off.out).toBe('');
+  });
+
+  it('is plain text when stdout is a file, on any terminal', () => {
+    const s = sink(false);
+    printBanner({ ...INFO, env: { TERM: 'xterm-kitty' }, stream: s, logging: true });
+    expect(s.out).not.toContain(ESC);
   });
 });
