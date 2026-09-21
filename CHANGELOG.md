@@ -14,6 +14,37 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.44] — 2026-09-21
+
+### Changed
+
+- The web app is light-mode only for now. A stored dark preference and an
+  OS dark setting both resolve to light, the theme control is hidden, and
+  the dark stylesheet is gated on a flag the app no longer sets. The code
+  path stays, so dark mode can come back by flipping one constant.
+- The app's pages (sign-in, invite landing, welcome, the workspace itself)
+  no longer carry the marketing site's footer, or its Docs and GitHub
+  header links. The header keeps the sparrow mark and wordmark.
+- Getting started on sparrow.land was rewritten with the web UI and the
+  CLI as equals: every step shows what you click, with a screenshot, and
+  what you could type instead. It now says what the app really says: an
+  invite is a live, reusable link you revoke, not a URL shown once, and
+  the invite panel offers Harness or Inline rather than a "New invite"
+  item.
+
+### Added
+
+- A startup banner. Once the server is listening it prints a small sparrow,
+  the version and build, the URL to open and the docs home, before the
+  ordinary log lines. `SPARROW_NO_BANNER=1` or `LOG_LEVEL=off` silences it;
+  colour only on a TTY.
+- The published container image is multi-arch: linux/amd64 and linux/arm64,
+  each built and boot-tested on a runner of its own architecture, so
+  `docker run` works on Apple Silicon. Earlier images were amd64-only.
+
+Client floor: MIN 0.1.22, RECOMMENDED 0.1.44. Nothing on the wire changed.
+
+
 ## [0.1.43] — 2026-09-18
 
 ### Changed
