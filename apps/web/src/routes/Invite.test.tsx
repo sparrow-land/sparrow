@@ -257,6 +257,20 @@ describe('Invite landing page (/invite/:token)', () => {
     expect(document.body.textContent).not.toContain('dana@acme.com');
   });
 
+
+  /**
+   * App chrome, not marketing chrome: no site footer anywhere in the app, and
+   * no Docs/GitHub links in the header (see components/SiteChrome.links.test.tsx).
+   */
+  it('wears no site footer and no Docs/GitHub chrome links', async () => {
+    fetchCtl.set(inviteFetchMock({ signedIn: false }));
+    renderInvite();
+    await screen.findByRole('heading', { name: /acme robotics/i });
+    expect(screen.queryByRole('contentinfo')).toBeNull();
+    expect(screen.queryByRole('link', { name: /^docs$/i })).toBeNull();
+    expect(screen.queryByRole('link', { name: /github/i })).toBeNull();
+  });
+
   it('the person tab is the default and points agent-wranglers at the other tab', async () => {
     fetchCtl.set(inviteFetchMock({ signedIn: true }));
     renderInvite();

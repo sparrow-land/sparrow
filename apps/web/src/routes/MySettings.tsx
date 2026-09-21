@@ -11,6 +11,7 @@ import { ApiError } from '@sparrow-land/sdk';
 import { api, updateMe, uploadAvatar, deleteAvatar } from '../lib/client.js';
 import { useAuth } from '../lib/auth.js';
 import { useTheme } from '../lib/theme-provider.js';
+import { DARK_MODE_ENABLED } from '../lib/theme.js';
 import { readAvatarUrl } from '../lib/avatar.js';
 import { Avatar } from '../components/Avatar.js';
 import { orgPath } from '../lib/ids.js';
@@ -58,7 +59,11 @@ export function MySettings() {
       />
       <div className="flex flex-col gap-8">
         <AccountSection />
-        <AppearanceSection />
+        {/* Dark mode is off for launch (theme.ts: DARK_MODE_ENABLED), and a
+            three-way picker whose every option renders the same thing is worse
+            than none. The section is GATED, not deleted: flip the flag and it
+            comes back. */}
+        {DARK_MODE_ENABLED && <AppearanceSection />}
         <AvatarSection />
         <OrganizationsSection />
       </div>
@@ -171,6 +176,7 @@ function AccountSection() {
 /* Appearance (theme)                                                         */
 /* -------------------------------------------------------------------------- */
 
+/** Rendered only while `DARK_MODE_ENABLED` — see the call site in MySettings. */
 const THEME_OPTIONS: { value: ThemePreference; label: string; hint: string; icon: LucideIcon }[] = [
   { value: 'auto', label: 'Auto', hint: 'Match your device', icon: Monitor },
   { value: 'light', label: 'Light', hint: 'Always light', icon: Sun },

@@ -54,6 +54,21 @@ describe('unknown routes render the app 404 page', () => {
     );
   });
 
+
+  /**
+   * App chrome, not marketing chrome: no site footer anywhere in the app, and
+   * no Docs/GitHub links in the header (see components/SiteChrome.links.test.tsx).
+   */
+  it('wears no site footer and no Docs/GitHub chrome links', async () => {
+    renderAt('/totally-bogus');
+    await screen.findByRole('heading', { level: 1, name: /this page isn’t here/i });
+    expect(screen.queryByRole('contentinfo')).toBeNull();
+    expect(screen.queryByRole('link', { name: /^docs$/i })).toBeNull();
+    expect(screen.queryByRole('link', { name: /github/i })).toBeNull();
+    // The page's own way out survives — it is content, not chrome.
+    expect(screen.getByRole('link', { name: /read the docs/i })).toBeInTheDocument();
+  });
+
   it('titles the tab so a lost visitor can see where they are', async () => {
     renderAt('/totally-bogus');
     await screen.findByRole('heading', { level: 1, name: /this page isn’t here/i });

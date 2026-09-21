@@ -3,7 +3,6 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useDocumentTitle, pageTitle } from '../../lib/title.js';
 import { SiteHeader } from '../../components/SiteHeader.js';
 import { MAIN_CONTENT_ID } from '../../components/SkipLink.js';
-import { SiteFooter } from '../../components/SiteFooter.js';
 import { collectDocHeadings, type DocHeading } from './toc.js';
 import { DOCS_PAGES, DOCS_ROOT, docsPageForPath } from './pages.js';
 
@@ -86,8 +85,6 @@ export function DocsLayout({ headings: given }: DocsLayoutProps = {}) {
         </main>
         <OnThisPage headings={headings} />
       </div>
-
-      <SiteFooter />
     </div>
   );
 }

@@ -62,6 +62,16 @@ describe('DocsLayout precomputed headings', () => {
     ]);
   });
 
+  /**
+   * The docs preview shares the app's chrome, and the app has no footer. On
+   * sparrow.land the docs BODY is all that ships (prerender `fragments` mode) —
+   * the site wraps it in its own header and footer.
+   */
+  it('renders no site footer', () => {
+    const { container } = renderLayout([]);
+    expect(container.querySelector('footer')).toBeNull();
+  });
+
   it('an empty supplied list means no rail (not "fall back to the DOM")', () => {
     const { container } = renderLayout([]);
     expect(tocLinks(container)).toHaveLength(0);

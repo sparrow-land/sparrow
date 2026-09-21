@@ -6,8 +6,8 @@ import { App } from '../App.js';
 
 /**
  * The personal `/me/*` pages (approvals, settings) must wear the SAME chrome as the
- * rest of the signed-in app: the AppShell left-nav sidebar, NOT the marketing
- * SiteHeader/SiteFooter. These tests drive the real App routing (MeLayout →
+ * rest of the signed-in app: the AppShell left-nav sidebar, NOT the bare
+ * SiteHeader. These tests drive the real App routing (MeLayout →
  * AppShell → the page in the Outlet) and assert the shell is present and the
  * marketing chrome is gone.
  */

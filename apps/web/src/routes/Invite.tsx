@@ -23,7 +23,6 @@ import {
 import { Terminal } from '../components/Terminal.js';
 import { SiteHeader } from '../components/SiteHeader.js';
 import { MAIN_CONTENT_ID } from '../components/SkipLink.js';
-import { SiteFooter } from '../components/SiteFooter.js';
 import { useDocumentTitle, pageTitle } from '../lib/title.js';
 
 /**
@@ -170,7 +169,6 @@ export function Invite() {
           )}
         </div>
       </main>
-      <SiteFooter />
     </div>
   );
 }

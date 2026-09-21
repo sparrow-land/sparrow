@@ -2,7 +2,6 @@ import { Link } from 'react-router-dom';
 import { useDocumentTitle, pageTitle } from '../lib/title.js';
 import { Mark } from '../components/Logo.js';
 import { SiteHeader } from '../components/SiteHeader.js';
-import { SiteFooter } from '../components/SiteFooter.js';
 import { MAIN_CONTENT_ID } from '../components/SkipLink.js';
 import { docsUrl } from '../lib/docsUrl.js';
 
@@ -44,7 +43,6 @@ export function NotFound() {
           </div>
         </div>
       </main>
-      <SiteFooter />
     </div>
   );
 }

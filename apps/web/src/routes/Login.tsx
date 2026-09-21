@@ -7,7 +7,6 @@ import { api } from '../lib/client.js';
 import { Logo } from '../components/Logo.js';
 import { SiteHeader } from '../components/SiteHeader.js';
 import { MAIN_CONTENT_ID } from '../components/SkipLink.js';
-import { SiteFooter } from '../components/SiteFooter.js';
 import { useDocumentTitle, pageTitle } from '../lib/title.js';
 
 /* ------------------------------------------------------------------ *
@@ -156,7 +155,6 @@ export function Login() {
             <p className="mt-5 text-sm text-[var(--sparrow-muted)]">Taking you to sign in…</p>
           </div>
         </main>
-        <SiteFooter />
       </div>
     );
   }
@@ -376,7 +374,6 @@ export function Login() {
           )}
         </div>
       </main>
-      <SiteFooter />
     </div>
   );
 }

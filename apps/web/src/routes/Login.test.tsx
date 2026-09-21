@@ -165,6 +165,22 @@ describe('Login page (/login)', () => {
     expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
   });
 
+
+  /**
+   * App chrome, not marketing chrome: no site footer anywhere in the app, and
+   * no Docs/GitHub links in the header (see components/SiteChrome.links.test.tsx).
+   */
+  it('wears no site footer and no Docs/GitHub chrome links', async () => {
+    fetchCtl.set(authFetchMock());
+    renderLogin('/login');
+    await screen.findByRole('heading', { name: /sign in/i });
+    expect(screen.queryByRole('contentinfo')).toBeNull();
+    expect(screen.queryByRole('link', { name: /^docs$/i })).toBeNull();
+    expect(screen.queryByRole('link', { name: /github/i })).toBeNull();
+    // The sign-in / create-account toggle is the page's own control and stays.
+    expect(screen.getByRole('button', { name: /create an account/i })).toBeInTheDocument();
+  });
+
   it('logs in with credentials and redirects to next (default /)', async () => {
     fetchCtl.set(authFetchMock());
     renderLogin('/login');

@@ -2,8 +2,8 @@
 
 /*
  * sparrow design system — "precision machinery"
- * Dark-first, engineered, calm. Near-black slate surfaces, 1px hairline
- * borders, a single warm copper/amber accent used sparingly.
+ * Engineered, calm. Warm paper surfaces, 1px hairline borders, a single warm
+ * copper/amber accent used sparingly.
  *
  * The `--sparrow-*` tokens are the long-standing names used across the app
  * (Room view, CopyButton, etc.); every surface reads the palette through these
@@ -11,41 +11,43 @@
  * `.dark` class or a raw `@media` query of its own.
  *
  * Theme resolution (see lib/theme.ts + the pre-paint snippet in index.html):
- *   - DARK is the default palette (`:root`) and the explicit-dark override
- *     (`:root[data-theme='dark']`). Explicit dark needs no separate rule — with
- *     the attribute present, the light media query below no longer matches, so
- *     the base dark tokens simply stand.
- *   - LIGHT applies when the choice is `auto` AND the OS prefers light
- *     (`@media (prefers-color-scheme: light)` on a root WITHOUT the attribute),
- *     OR the choice is explicit light (`:root[data-theme='light']`). The light
- *     tokens are declared once per selector; a root override wins in BOTH
- *     directions without any per-rule duplication because every rule reads
- *     `var(--sparrow-*)`.
+ *   - DARK MODE IS OFF (`DARK_MODE_ENABLED = false` in lib/theme.ts). LIGHT is
+ *     the unconditional default palette (`:root`), so an OS-dark visitor and
+ *     someone whose stored choice is `dark` both get the light app.
+ *   - The dark palette below is kept, whole, but GATED on `[data-dark-enabled]`
+ *     — an attribute `applyTheme` writes on `<html>` only while the flag is on.
+ *     That gate is what makes `@media (prefers-color-scheme: dark)` inert:
+ *     without it the media query would repaint the app for every OS-dark
+ *     visitor no matter what the JS decided.
+ *   - With the flag ON: `auto` leaves `data-theme` off and the media query
+ *     governs live; `dark` / `light` set `data-theme` and win in both
+ *     directions. Explicit light needs no rule of its own — the base `:root`
+ *     tokens are the light ones, and neither dark selector matches.
  */
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
-  /* Surfaces — near-black slate, not pure black. */
-  --sparrow-bg: #0a0c0f;
-  --sparrow-panel: #101317;
-  --sparrow-panel-2: #171b21;
-  --sparrow-border: #23282f;
-  --sparrow-border-strong: #2e343d;
+  /* Surfaces — warm paper, not pure white. */
+  --sparrow-bg: #f7f6f3;
+  --sparrow-panel: #ffffff;
+  --sparrow-panel-2: #f1efea;
+  --sparrow-border: #e3ded5;
+  --sparrow-border-strong: #d0c9bc;
 
   /* Ink. */
-  --sparrow-text: #e7eaef;
-  --sparrow-muted: #8b93a0;
-  --sparrow-faint: #616976;
+  --sparrow-text: #1b1e23;
+  --sparrow-muted: #5b626d;
+  --sparrow-faint: #8a909b;
 
   /* Single accent: warm copper / machinery brass. */
-  --sparrow-accent: #d3924b;
-  --sparrow-accent-2: #a96f31;
-  --sparrow-accent-soft: rgba(211, 146, 75, 0.12);
-  --sparrow-accent-glow: rgba(211, 146, 75, 0.22);
+  --sparrow-accent: #b06f2b;
+  --sparrow-accent-2: #8a5620;
+  --sparrow-accent-soft: rgba(176, 111, 43, 0.12);
+  --sparrow-accent-glow: rgba(176, 111, 43, 0.2);
 
   /* Semantic (used by read receipts / presence / errors). */
-  --sparrow-good: #5bb98b;
-  --sparrow-danger: #e0555b;
+  --sparrow-good: #2f8f5b;
+  --sparrow-danger: #c23c42;
 
   /*
    * Info-box type identity — one desaturated hue per register, applied to the
@@ -56,10 +58,10 @@
    * disposition. The registry in components/MediumGlyph.tsx maps type → token;
    * a new medium adds one token pair here and one registry line there.
    */
-  --sparrow-type-email: #6ea8dc; /* correspondence blue */
-  --sparrow-type-voice: #d489a8; /* spoken rose */
-  --sparrow-type-hint: #4fbfae; /* system teal — sparrow itself speaking */
-  --sparrow-type-dm: #a894e6; /* agent↔agent violet */
+  --sparrow-type-email: #33689c; /* correspondence blue */
+  --sparrow-type-voice: #a8517d; /* spoken rose */
+  --sparrow-type-hint: #177a6a; /* system teal — sparrow itself speaking */
+  --sparrow-type-dm: #6d55b8; /* agent↔agent violet */
 
   /*
    * Info-box container alphas — the "Tinted Etch" dials (see `.info-box`
@@ -67,74 +69,75 @@
    * to keep a perceivable boundary. Load-bearing: push the hatch much past
    * ~16% and the type tones start to hum.
    */
-  --sparrow-wash-a: 6%;
-  --sparrow-hatch-a: 13%;
+  --sparrow-wash-a: 7%;
+  --sparrow-hatch-a: 16%;
 }
 
 /*
- * LIGHT palette — warm paper surfaces, same machinery accent (darkened for
- * contrast on light). Applied for "auto + system light" and for explicit light.
- * Keep these two blocks in sync (CSS has no mixins; the values are identical).
+ * DARK palette — near-black slate surfaces, same machinery accent (brightened
+ * for contrast on dark). INERT until lib/theme.ts sets `data-dark-enabled`.
+ * Applied for "auto + system dark" and for explicit dark. Keep these two blocks
+ * in sync (CSS has no mixins; the values are identical).
  */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme]) {
-    color-scheme: light;
+@media (prefers-color-scheme: dark) {
+  :root[data-dark-enabled]:not([data-theme]) {
+    color-scheme: dark;
 
-    --sparrow-bg: #f7f6f3;
-    --sparrow-panel: #ffffff;
-    --sparrow-panel-2: #f1efea;
-    --sparrow-border: #e3ded5;
-    --sparrow-border-strong: #d0c9bc;
+    --sparrow-bg: #0a0c0f;
+    --sparrow-panel: #101317;
+    --sparrow-panel-2: #171b21;
+    --sparrow-border: #23282f;
+    --sparrow-border-strong: #2e343d;
 
-    --sparrow-text: #1b1e23;
-    --sparrow-muted: #5b626d;
-    --sparrow-faint: #8a909b;
+    --sparrow-text: #e7eaef;
+    --sparrow-muted: #8b93a0;
+    --sparrow-faint: #616976;
 
-    --sparrow-accent: #b06f2b;
-    --sparrow-accent-2: #8a5620;
-    --sparrow-accent-soft: rgba(176, 111, 43, 0.12);
-    --sparrow-accent-glow: rgba(176, 111, 43, 0.2);
+    --sparrow-accent: #d3924b;
+    --sparrow-accent-2: #a96f31;
+    --sparrow-accent-soft: rgba(211, 146, 75, 0.12);
+    --sparrow-accent-glow: rgba(211, 146, 75, 0.22);
 
-    --sparrow-good: #2f8f5b;
-    --sparrow-danger: #c23c42;
+    --sparrow-good: #5bb98b;
+    --sparrow-danger: #e0555b;
 
-    --sparrow-type-email: #33689c;
-    --sparrow-type-voice: #a8517d;
-    --sparrow-type-hint: #177a6a;
-    --sparrow-type-dm: #6d55b8;
+    --sparrow-type-email: #6ea8dc;
+    --sparrow-type-voice: #d489a8;
+    --sparrow-type-hint: #4fbfae;
+    --sparrow-type-dm: #a894e6;
 
-    --sparrow-wash-a: 7%;
-    --sparrow-hatch-a: 16%;
+    --sparrow-wash-a: 6%;
+    --sparrow-hatch-a: 13%;
   }
 }
-:root[data-theme='light'] {
-  color-scheme: light;
+:root[data-dark-enabled][data-theme='dark'] {
+  color-scheme: dark;
 
-  --sparrow-bg: #f7f6f3;
-  --sparrow-panel: #ffffff;
-  --sparrow-panel-2: #f1efea;
-  --sparrow-border: #e3ded5;
-  --sparrow-border-strong: #d0c9bc;
+  --sparrow-bg: #0a0c0f;
+  --sparrow-panel: #101317;
+  --sparrow-panel-2: #171b21;
+  --sparrow-border: #23282f;
+  --sparrow-border-strong: #2e343d;
 
-  --sparrow-text: #1b1e23;
-  --sparrow-muted: #5b626d;
-  --sparrow-faint: #8a909b;
+  --sparrow-text: #e7eaef;
+  --sparrow-muted: #8b93a0;
+  --sparrow-faint: #616976;
 
-  --sparrow-accent: #b06f2b;
-  --sparrow-accent-2: #8a5620;
-  --sparrow-accent-soft: rgba(176, 111, 43, 0.12);
-  --sparrow-accent-glow: rgba(176, 111, 43, 0.2);
+  --sparrow-accent: #d3924b;
+  --sparrow-accent-2: #a96f31;
+  --sparrow-accent-soft: rgba(211, 146, 75, 0.12);
+  --sparrow-accent-glow: rgba(211, 146, 75, 0.22);
 
-  --sparrow-good: #2f8f5b;
-  --sparrow-danger: #c23c42;
+  --sparrow-good: #5bb98b;
+  --sparrow-danger: #e0555b;
 
-  --sparrow-type-email: #33689c;
-  --sparrow-type-voice: #a8517d;
-  --sparrow-type-hint: #177a6a;
-  --sparrow-type-dm: #6d55b8;
+  --sparrow-type-email: #6ea8dc;
+  --sparrow-type-voice: #d489a8;
+  --sparrow-type-hint: #4fbfae;
+  --sparrow-type-dm: #a894e6;
 
-  --sparrow-wash-a: 7%;
-  --sparrow-hatch-a: 16%;
+  --sparrow-wash-a: 6%;
+  --sparrow-hatch-a: 13%;
 }
 
 html,

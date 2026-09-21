@@ -6,32 +6,44 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#0a0c0f" />
+    <meta name="theme-color" content="#f7f6f3" />
 
     <!--
       Pre-paint theme: apply the human's saved choice (dark / light / auto) from
       localStorage BEFORE first paint so there's no flash of the wrong theme.
-      Mirrors lib/theme.ts; the app reconciles with the server value after /me
-      loads. `auto` leaves the root attribute off so the CSS media query governs.
+      Mirrors lib/theme.ts — INCLUDING its `DARK_MODE_ENABLED` switch, which is
+      the `DARK` constant here: keep the two in sync. While it is false the root
+      is pinned to light and the `data-dark-enabled` gate every dark rule in
+      index.css hangs off is never written, so an OS-dark visitor still gets the
+      light app. The app reconciles with the server value after /me loads.
     -->
     <script>
       (function () {
         try {
+          var DARK = false; // mirrors DARK_MODE_ENABLED in src/lib/theme.ts
           var COLORS = { dark: '#0a0c0f', light: '#f7f6f3' };
+          var root = document.documentElement;
           var pref = localStorage.getItem('sparrow:theme');
           if (pref !== 'dark' && pref !== 'light' && pref !== 'auto') pref = 'auto';
-          if (pref === 'auto') {
-            delete document.documentElement.dataset.theme;
+          var effective = 'light';
+          if (!DARK) {
+            root.removeAttribute('data-dark-enabled');
+            root.dataset.theme = 'light';
           } else {
-            document.documentElement.dataset.theme = pref;
+            root.setAttribute('data-dark-enabled', '');
+            if (pref === 'auto') {
+              delete root.dataset.theme;
+            } else {
+              root.dataset.theme = pref;
+            }
+            var systemDark =
+              !window.matchMedia || window.matchMedia('(prefers-color-scheme: dark)').matches;
+            effective = pref === 'auto' ? (systemDark ? 'dark' : 'light') : pref;
           }
-          var systemDark =
-            !window.matchMedia || window.matchMedia('(prefers-color-scheme: dark)').matches;
-          var effective = pref === 'auto' ? (systemDark ? 'dark' : 'light') : pref;
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute('content', COLORS[effective]);
         } catch (e) {
-          /* storage/matchMedia unavailable — fall back to the CSS dark default */
+          /* storage/matchMedia unavailable — fall back to the CSS light default */
         }
       })();
     </script>

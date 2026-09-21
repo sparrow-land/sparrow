@@ -24,6 +24,7 @@ const fetchCtl = vi.hoisted(() => {
 
 import { AuthProvider } from '../lib/auth.js';
 import { ThemeProvider } from '../lib/theme-provider.js';
+import { DARK_MODE_ENABLED } from '../lib/theme.js';
 import { MySettings } from './MySettings.js';
 
 const jake = {
@@ -316,21 +317,30 @@ describe('My settings (/me/settings)', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: 'Jake' }).tagName.toLowerCase()).toBe('svg'));
   });
 
-  it('shows the Appearance control with three theme options, Auto selected by default', async () => {
+  it('offers the Appearance control only while dark mode is enabled', async () => {
     fetchCtl.set(settingsFetchMock());
     renderSettings();
 
-    expect(await screen.findByRole('heading', { name: /appearance/i })).toBeInTheDocument();
-    const auto = screen.getByRole('radio', { name: /auto/i });
-    const light = screen.getByRole('radio', { name: /light/i });
-    const dark = screen.getByRole('radio', { name: /dark/i });
-    // Jake's stored theme is `auto`, so Auto is the selected option.
-    expect(auto).toHaveAttribute('aria-checked', 'true');
-    expect(light).toHaveAttribute('aria-checked', 'false');
-    expect(dark).toHaveAttribute('aria-checked', 'false');
+    // Anchor on a section that is always there, so "not yet rendered" can never
+    // masquerade as "correctly hidden".
+    await screen.findByRole('heading', { name: /account/i });
+
+    if (DARK_MODE_ENABLED) {
+      expect(screen.getByRole('heading', { name: /appearance/i })).toBeInTheDocument();
+      const auto = screen.getByRole('radio', { name: /auto/i });
+      // Jake's stored theme is `auto`, so Auto is the selected option.
+      expect(auto).toHaveAttribute('aria-checked', 'true');
+      expect(screen.getByRole('radio', { name: /light/i })).toHaveAttribute('aria-checked', 'false');
+      expect(screen.getByRole('radio', { name: /dark/i })).toHaveAttribute('aria-checked', 'false');
+    } else {
+      // Light-only launch: the control is GATED, not deleted (see theme.ts).
+      expect(screen.queryByRole('heading', { name: /appearance/i })).toBeNull();
+      expect(screen.queryByRole('radiogroup', { name: /theme/i })).toBeNull();
+      expect(screen.queryByRole('radio', { name: /dark/i })).toBeNull();
+    }
   });
 
-  it('choosing Dark selects it, applies data-theme, and PATCHes /me with the theme', async () => {
+  (DARK_MODE_ENABLED ? it : it.skip)('choosing Dark selects it, applies data-theme, and PATCHes /me with the theme', async () => {
     const mock = settingsFetchMock();
     fetchCtl.set(mock);
     renderSettings();

@@ -41,13 +41,15 @@ function h1Text(root: ParentNode): string {
 
 function shell(title: string, cssHref: string, body: string): string {
   return `<!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>${escapeHtml(title)}</title>
 <link rel="stylesheet" href="${cssHref}" />
-<script>(function(){try{var p=localStorage.getItem('sparrow:theme');if(p==='dark'||p==='light')document.documentElement.dataset.theme=p;else delete document.documentElement.dataset.theme;}catch(e){}})()</script>
+<!-- Mirrors the pre-paint snippet in index.html, DARK included: while dark mode
+     is off the preview pins light and never writes the data-dark-enabled gate. -->
+<script>(function(){try{var DARK=false;var r=document.documentElement;if(!DARK){r.removeAttribute('data-dark-enabled');r.dataset.theme='light';return;}r.setAttribute('data-dark-enabled','');var p=localStorage.getItem('sparrow:theme');if(p==='dark'||p==='light')r.dataset.theme=p;else delete r.dataset.theme;}catch(e){}})()</script>
 </head>
 <body><div id="root">${body}</div></body>
 </html>

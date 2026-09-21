@@ -9,8 +9,7 @@ import { useAuth } from '../lib/auth.js';
  * create-org page and the no-org `/me/*` fallback. It wears a slim app-style top
  * bar matching the {@link AppShell} header (logo left; signed-in identity + Sign
  * out right) over the app background, so it reads unmistakably as "you ARE logged
- * in" — just without an org to hang the full shell on. No marketing
- * SiteHeader/SiteFooter.
+ * in" — just without an org to hang the full shell on. No marketing chrome.
  */
 export function BareShell({ children }: { children: ReactNode }) {
   const auth = useAuth();

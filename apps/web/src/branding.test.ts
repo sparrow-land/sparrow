@@ -28,8 +28,8 @@ describe('web app manifest + icons', () => {
     const manifest = JSON.parse(raw) as Manifest;
     expect(manifest.name).toBe('sparrow');
     // Dark-palette surface color (matches --sparrow-bg and the pre-paint meta default).
-    expect(manifest.theme_color).toBe('#0a0c0f');
-    expect(manifest.background_color).toBe('#0a0c0f');
+    expect(manifest.theme_color).toBe('#f7f6f3');
+    expect(manifest.background_color).toBe('#f7f6f3');
     expect(Array.isArray(manifest.icons)).toBe(true);
     expect(manifest.icons.length).toBeGreaterThan(0);
   });
