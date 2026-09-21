@@ -14,6 +14,29 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.45] — 2026-09-21
+
+### Added
+
+- The startup banner draws the flying-sparrow illustration on terminals that
+  render the kitty graphics protocol without prompting: kitty, Ghostty and
+  WezTerm, detected from the environment; never inside tmux or screen and
+  never in iTerm2. Everywhere else it prints a compact four-line ASCII
+  sparrow. `SPARROW_BANNER_IMAGE=1` forces the illustration on a TTY (the
+  escape hatch for `docker run -it`, where the host terminal is invisible);
+  `0` forces the ASCII bird.
+
+### Changed
+
+- On a terminal the banner and the logs are in colour: the bird in an accent,
+  the version green, the URL underlined; logs render through pino-pretty as
+  single lines. Anything that is not a TTY, `docker logs` included, still
+  receives plain text and JSON records, byte for byte.
+- The banner names the product Sparrow.
+
+Client floor: MIN 0.1.22, RECOMMENDED 0.1.45. Nothing on the wire changed.
+
+
 ## [0.1.44] — 2026-09-21
 
 ### Changed
