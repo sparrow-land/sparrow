@@ -4,6 +4,7 @@ import { envConfig } from './config.js';
 import { installShutdownHandlers } from './shutdown.js';
 import { API_VERSION, BUILD_STAMP } from './version.js';
 import { bannerUrl, printBanner } from './banner.js';
+import { listenQuietly } from './listen.js';
 import { docsHome } from './public-homes.js';
 
 async function main(): Promise<void> {
@@ -15,7 +16,13 @@ async function main(): Promise<void> {
   installShutdownHandlers(app);
   const startupLine = `sparrow API ${API_VERSION}${BUILD_STAMP ? `+${BUILD_STAMP}` : ''} listening on :${port}`;
   try {
-    await app.listen({ port, host: '0.0.0.0' });
+    // `listenQuietly`, not `app.listen`: fastify narrates the bind with one
+    // `Server listening at <addr>` INFO record PER BOUND ADDRESS, emitted from
+    // inside `listen()` — so in a container those lines landed above AND below
+    // the banner. They are suppressed (see `listen.ts`); nothing is lost,
+    // because the startup line below carries the port, and bind FAILURES still
+    // reject into the `catch`.
+    await listenQuietly(app, { port, host: '0.0.0.0' });
     // The human-facing banner: printed ONCE, the moment we are actually
     // serving, and set off by blank lines so it reads as a header rather than
     // as another log record. On a graphics terminal it is the real
