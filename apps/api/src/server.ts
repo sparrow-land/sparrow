@@ -22,6 +22,7 @@ import { emitStatusExpiry } from './status-helpers.js';
 import { ApiError } from './errors.js';
 import type { AppContext, ServerConfig } from './context.js';
 import { API_VERSION, BUILD_STAMP } from './version.js';
+import { useColor } from './banner.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerOrgRoutes } from './routes/orgs.js';
 import { registerInviteRoutes } from './routes/invites.js';
@@ -194,19 +195,51 @@ const LOG_LEVELS = new Set(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
 const LOG_OFF = new Set(['', 'off', 'false', 'none', 'silent', '0']);
 
 /**
+ * The pino transport that turns records into coloured single lines for a human
+ * at a terminal. `singleLine` keeps one event on one row (a request log with a
+ * `req` object otherwise sprawls), `translateTime` trades the epoch millis for
+ * a clock, and `pid`/`hostname` are noise in a single-container server.
+ */
+export interface PrettyTransport {
+  target: 'pino-pretty';
+  options: {
+    colorize: true;
+    singleLine: true;
+    translateTime: string;
+    ignore: string;
+  };
+}
+
+/** Fastify's `logger` option as this server configures it. */
+export interface ServerLoggerOptions {
+  level: string;
+  redact: { paths: string[]; censor: string };
+  /** Present ONLY for a colour-capable terminal; absent means raw JSON. */
+  transport?: PrettyTransport;
+}
+
+/**
  * Translate `LOG_LEVEL` into Fastify's `logger` option. Unset/empty (and the
  * explicit off-switches) → `false`, the historical silence and the right
  * default for an embedded/in-test server; a level → pino at that level with the
  * `authorization` and `cookie` request headers (and `set-cookie` on the way
  * out) redacted. An unrecognized level degrades to `info` rather than crashing
  * the boot on a typo.
+ *
+ * `opts.color` adds the `pino-pretty` transport, and nothing else changes: the
+ * level, the redaction and every field are identical either way. Colour is a
+ * property of the TERMINAL, never of the log — decide it with `useColor`, the
+ * same rule the banner uses, so that `docker logs`, a redirected file and the
+ * scenario harness keep receiving byte-identical JSON. Redaction happens in
+ * pino, before the transport, so a pretty line is redacted too.
  */
 export function loggerOptions(
   level: string | undefined,
-): false | { level: string; redact: { paths: string[]; censor: string } } {
+  opts: { color?: boolean } = {},
+): false | ServerLoggerOptions {
   const wanted = (level ?? '').trim().toLowerCase();
   if (LOG_OFF.has(wanted)) return false;
-  return {
+  const base: ServerLoggerOptions = {
     level: LOG_LEVELS.has(wanted) ? wanted : 'info',
     redact: {
       paths: [
@@ -215,6 +248,19 @@ export function loggerOptions(
         'res.headers["set-cookie"]',
       ],
       censor: '[redacted]',
+    },
+  };
+  if (!opts.color) return base;
+  return {
+    ...base,
+    transport: {
+      target: 'pino-pretty',
+      options: {
+        colorize: true,
+        singleLine: true,
+        translateTime: 'HH:MM:ss.l',
+        ignore: 'pid,hostname',
+      },
     },
   };
 }
@@ -345,7 +391,12 @@ export function buildServer(config: ServerConfig): FastifyInstance {
   // pipeline with no HTTP and no token — bound late, since it needs the context.
   emailFake?.bindDeliver((payload) => deliverInbound(ctx, payload));
 
-  const app = Fastify({ bodyLimit: BODY_LIMIT, logger: loggerOptions(config.logLevel) });
+  const app = Fastify({
+    bodyLimit: BODY_LIMIT,
+    // Pretty, coloured logs when a human is watching a terminal; raw JSON for
+    // everything that parses them. Same decision function as the banner.
+    logger: loggerOptions(config.logLevel, { color: useColor(process.env, process.stdout) }),
+  });
 
   // Long-lived SSE responses are requests that never finish, and `close()` waits
   // for in-flight requests: one open stream used to pin the shutdown past

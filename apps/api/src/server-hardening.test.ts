@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isSpaRoute, looksLikeStaticAsset, loggerOptions, wantsSpaShell } from './server.js';
+import { useColor } from './banner.js';
 import { envConfig } from './config.js';
 import { API_VERSION, BUILD_STAMP } from './version.js';
 import { createInvite, firstOrgId, makeTestServer, signup, type TestServer } from './test-helpers.js';
@@ -534,5 +535,57 @@ describe('envConfig (LOG_LEVEL / CORS_ALLOWED_ORIGINS)', () => {
     expect(
       envConfig({ CORS_ALLOWED_ORIGINS: '' } as NodeJS.ProcessEnv).corsAllowedOrigins,
     ).toBeUndefined();
+  });
+});
+
+/**
+ * Pretty logs are a TERMINAL affordance, nothing more: attached to a TTY a
+ * human reads coloured single lines; everywhere else (docker logs, a file, the
+ * scenario harness) the JSON records they parse are byte-for-byte what they
+ * always were.
+ */
+describe('loggerOptions — pretty on a terminal, JSON everywhere else', () => {
+  const transportOf = (o: unknown): { target?: string; options?: Record<string, unknown> } | undefined =>
+    (o as { transport?: { target?: string; options?: Record<string, unknown> } }).transport;
+
+  it('emits plain JSON (no transport) when colour is off — the unchanged default', () => {
+    expect(transportOf(loggerOptions('info', { color: false }))).toBeUndefined();
+    // …and with no options at all, which is how every embedded caller calls it.
+    expect(transportOf(loggerOptions('info'))).toBeUndefined();
+  });
+
+  it('routes through pino-pretty, colorized and single-line, when colour is on', () => {
+    const t = transportOf(loggerOptions('debug', { color: true }))!;
+    expect(t.target).toBe('pino-pretty');
+    expect(t.options!.colorize).toBe(true);
+    expect(t.options!.singleLine).toBe(true);
+    expect(t.options!.ignore).toBe('pid,hostname');
+    expect(typeof t.options!.translateTime).toBe('string');
+  });
+
+  it('keeps the level and the redaction in pretty mode', () => {
+    const opts = loggerOptions('warn', { color: true }) as {
+      level: string;
+      redact: { paths: string[]; censor: string };
+    };
+    expect(opts.level).toBe('warn');
+    expect(opts.redact.paths).toContain('req.headers.authorization');
+    expect(opts.redact.censor).toBe('[redacted]');
+  });
+
+  it('never prettifies silence: LOG_LEVEL=off is off, TTY or not', () => {
+    expect(loggerOptions('off', { color: true })).toBe(false);
+    expect(loggerOptions(undefined, { color: true })).toBe(false);
+    expect(loggerOptions('', { color: true })).toBe(false);
+  });
+
+  it('turns pretty on exactly when the banner would colour', () => {
+    const pretty = (env: NodeJS.ProcessEnv, stream: { isTTY?: boolean }): boolean =>
+      transportOf(loggerOptions('info', { color: useColor(env, stream) })) !== undefined;
+    expect(pretty({}, { isTTY: true })).toBe(true); // a human at a terminal
+    expect(pretty({}, { isTTY: false })).toBe(false); // docker logs, a pipe, a file
+    expect(pretty({}, {})).toBe(false); // no TTY information at all
+    expect(pretty({ NO_COLOR: '1' }, { isTTY: true })).toBe(false); // NO_COLOR wins
+    expect(pretty({ FORCE_COLOR: '1' }, { isTTY: false })).toBe(true); // opted in on a pipe
   });
 });

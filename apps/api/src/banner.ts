@@ -41,12 +41,22 @@ const PAD = '  ';
 /** Separator between version and build, as the CLI prints it. */
 const DOT = '·';
 
+/**
+ * The whole palette, and deliberately a small one: standard SGR attributes and
+ * the 16-colour set only. 256-colour (`38;5;n`) and truecolor render as noise
+ * on a `TERM=vt100` SSH session or a CI capture, and the banner is exactly the
+ * thing an operator sees over a bad connection.
+ */
 const RESET = '[0m';
-const BOLD = '[1m';
 const DIM = '[2m';
 /** Sparrow-brown for the art; basic ANSI only — 256-color is not universal. */
 const FEATHER = '[33m';
-const LINK = '[1;36m';
+/** The wordmark: the product's name carries the weight, nothing else. */
+const WORDMARK = '[1m';
+/** The one thing to act on, in the second accent: bold + underlined cyan. */
+const LINK = '[1;4;36m';
+/** Field labels ("Open", "Docs") and the docs URL: present, never competing. */
+const LABEL = '[2m';
 
 /** What the banner says about this server. */
 export interface BannerInfo {
@@ -82,10 +92,10 @@ export function renderBanner(info: BannerInfo): string {
     '',
     ...SPARROW_ART.map((row) => paint(PAD + row, FEATHER, color)),
     '',
-    `${PAD}${paint('sparrow', BOLD, color)}   ${paint(stamp, DIM, color)}`,
+    `${PAD}${paint('Sparrow', WORDMARK, color)}   ${paint(stamp, DIM, color)}`,
     '',
-    `${PAD}${paint('Open', DIM, color)}   ${paint(url, LINK, color)}`,
-    `${PAD}${paint('Docs', DIM, color)}   ${paint(docsUrl, DIM, color)}`,
+    `${PAD}${paint('Open', LABEL, color)}   ${paint(url, LINK, color)}`,
+    `${PAD}${paint('Docs', LABEL, color)}   ${paint(docsUrl, DIM, color)}`,
     '',
   ];
   return lines.join('\n');

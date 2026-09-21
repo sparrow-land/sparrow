@@ -38,8 +38,12 @@ describe('renderBanner', () => {
     expect(out).not.toContain('0.0.0.0');
   });
 
-  it('names the product', () => {
-    expect(strip(renderBanner({ ...INFO, color: false }))).toContain('sparrow');
+  it('names the product, capitalized — it is a proper noun in prose', () => {
+    const out = strip(renderBanner({ ...INFO, color: false }));
+    expect(out).toContain('Sparrow');
+    // The wordmark line itself never spells it lowercase (the docs URL still may).
+    const wordmark = out.split('\n').find((l) => l.includes('Sparrow'))!;
+    expect(wordmark).not.toMatch(/\bsparrow\b/);
   });
 
   it('omits the build fragment when the build is unstamped', () => {
@@ -50,6 +54,31 @@ describe('renderBanner', () => {
 
   it('emits NO escape codes when color is off (docker logs, piped stdout)', () => {
     expect(renderBanner({ ...INFO, color: false })).not.toContain(ESC);
+  });
+
+  it('paints each part deliberately: wordmark bold, version dim, URL an underlined accent', () => {
+    const out = renderBanner({ ...INFO, color: true });
+    const line = (needle: string): string =>
+      out.split('\n').find((l) => strip(l).includes(needle))!;
+    // The bird gets its own accent colour, and only that.
+    expect(line(SPARROW_ART[2]!)).toMatch(new RegExp(`${ESC}\\[3[0-7]m`));
+    // Wordmark bold, version dim, on one line.
+    const mark = line('Sparrow');
+    expect(mark).toContain(`${ESC}[1m`);
+    expect(mark).toContain(`${ESC}[2m`);
+    // The URL is the thing to click: bold + underlined, in a second colour.
+    const open = line('Open');
+    expect(open).toMatch(new RegExp(`${ESC}\\[[0-9;]*4[;m]`));
+    expect(open).toMatch(new RegExp(`${ESC}\\[[0-9;]*1[;m]`));
+    // Labels are quiet.
+    expect(open.indexOf(`${ESC}[2m`)).toBeLessThan(open.indexOf('Open'));
+    expect(line('Docs')).toContain(`${ESC}[2m`);
+    // Only standard 16-colour/attribute SGR — nothing 256-colour (38;5;n) or truecolor.
+    for (const seq of out.match(new RegExp(`${ESC}\\[[0-9;]*m`, 'g')) ?? []) {
+      expect(seq).not.toContain('38;5;');
+      expect(seq).not.toContain('48;5;');
+      expect(seq).not.toContain('38;2;');
+    }
   });
 
   it('emits escape codes when color is on, and resets every one it opens', () => {
