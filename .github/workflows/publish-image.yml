@@ -1,19 +1,36 @@
-# Publish the sparrow-core container image to GHCR.
+# Publish the sparrow-core container image to GHCR — MULTI-ARCH (amd64 + arm64).
 #
 # Triggers on a published GitHub release (the normal path) and on manual dispatch.
-# It never runs on a plain push, so it stays inert until the repo is public and a
-# release is cut.
+# It never runs on a plain push, so it stays inert until a release is cut.
+#
+# DESIGN: one native runner per architecture, then a manifest merge.
+#   meta   resolves the image name / version / BUILD_SHA once (DRY).
+#   build  is a matrix of {linux/amd64 on ubuntu-latest, linux/arm64 on
+#          ubuntu-24.04-arm}. Each job builds ONLY its own platform on a runner
+#          of that architecture, pushes it BY DIGEST (no tags), boots the image
+#          it just pushed, and uploads the digest as an artifact.
+#   merge  stitches the two digests into one manifest list carrying the three
+#          real tags, then inspects it and FAILS unless both platforms are there.
+#
+# Why not QEMU (`platforms: linux/amd64,linux/arm64` on one x86 runner): the
+# build is `pnpm install` + a full TypeScript/Vite build + native better-sqlite3.
+# Under emulation that is an order of magnitude slower and flaky enough to time
+# out. Native runners cost nothing here — GitHub-hosted arm64 runners
+# (`ubuntu-24.04-arm`) are free for PUBLIC repos, which this one is.
+#
+# The merge job's `imagetools inspect` assertion is the multi-arch GATE. Before
+# 2026-09-21 this workflow had no `platforms:` at all, so it silently published
+# an amd64-only image and `docker run` failed on Apple Silicon with
+# "no matching manifest for linux/arm64/v8". The assertion makes that loud.
 #
 # The image is stamped: `.git` is excluded from the Docker build context, so the
 # version baked into the served CLI/MCP bundles comes from the BUILD_SHA build
 # arg. Without it the Dockerfile stamps `<version>+<date>.dev` bundles, which it
-# says never to ship — so this workflow always passes a real short SHA.
+# says never to ship — so this workflow always passes a real short SHA, and the
+# per-arch verify step re-reads that stamp back off the pushed image.
 #
-# ONE-TIME SETTING: after the first successful publish, the GHCR package
-# `sparrow` must be flipped to Public (GitHub → Packages → sparrow →
-# Package settings → Change visibility). Until that is done
-# `docker pull ghcr.io/sparrow-land/sparrow` returns 403 for anonymous users
-# even though the workflow succeeded.
+# GHCR visibility was flipped to Public once, by hand, after the first publish;
+# nothing here needs to repeat it.
 name: Publish image
 
 on:
@@ -31,11 +48,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  meta:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      version: ${{ steps.meta.outputs.version }}
+      build_sha: ${{ steps.meta.outputs.build_sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,7 +76,31 @@ jobs:
             echo "version=$VERSION"
             echo "build_sha=$BUILD_SHA"
           } >> "$GITHUB_OUTPUT"
-          echo "Publishing $IMAGE:$VERSION (+ :latest) from $BUILD_SHA"
+          echo "Publishing $IMAGE:$VERSION (+ :latest, :sha-$BUILD_SHA) from $BUILD_SHA"
+
+  build:
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            # GitHub-hosted arm64 runner; free on public repositories.
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Sanitize the platform name for artifact/cache keys
+        run: |
+          set -eu
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
@@ -67,26 +111,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          platforms: ${{ matrix.platform }}
           # The Dockerfile FAILS the build if BUILD_SHA is set but the bundles
           # come out unstamped, so a green run here proves the stamp landed.
           build-args: |
-            BUILD_SHA=${{ steps.meta.outputs.build_sha }}
-          tags: |
-            ${{ steps.meta.outputs.image }}:latest
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
-            ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.build_sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            BUILD_SHA=${{ needs.meta.outputs.build_sha }}
+          # No `tags:` — each arch is pushed as a bare digest and only the merge
+          # job attaches the human-facing tags to the manifest list.
+          outputs: type=image,name=${{ needs.meta.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          # Per-arch cache scopes: a single shared scope has the two runners
+          # overwrite each other's manifest every run, so neither ever hits.
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
 
       - name: Verify the published image reports the stamp
         run: |
           set -eu
-          IMAGE="${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}"
+          # Verify the exact artifact this job pushed, by digest, on a runner of
+          # this architecture — that is what proves the arm64 image really boots.
+          IMAGE="${{ needs.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          echo "Verifying ${{ matrix.platform }}: $IMAGE"
           docker run -d --name verify -p 8722:8722 "$IMAGE"
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8722/healthz >/dev/null 2>&1; then break; fi
@@ -97,9 +146,77 @@ jobs:
           # sparrow.land since 0.1.9); the build stamp it reports on /healthz is the
           # proof that the pushed image is the one this run built.
           curl -fsS http://127.0.0.1:8722/healthz \
-            | grep -q '"build":"[0-9]*\.${{ steps.meta.outputs.build_sha }}"' \
+            | grep -q '"build":"[0-9]*\.${{ needs.meta.outputs.build_sha }}"' \
             || { echo "FATAL: published image is not stamped with this build"; exit 1; }
           # The server process itself (pid 1) must not be root. `docker exec`
           # would report the image's default user, so read pid 1 directly.
           test "$(docker exec verify sh -c 'cat /proc/1/status | awk "/^Uid:/{print \$2}"')" != "0"
           docker rm -f verify
+
+      - name: Export digest
+        run: |
+          set -eu
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the manifest list and push the tags
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ needs.meta.outputs.image }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          BUILD_SHA: ${{ needs.meta.outputs.build_sha }}
+        run: |
+          set -eu
+          ls -l
+          docker buildx imagetools create \
+            -t "$IMAGE:latest" \
+            -t "$IMAGE:$VERSION" \
+            -t "$IMAGE:sha-$BUILD_SHA" \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Assert the manifest list is multi-arch
+        env:
+          IMAGE: ${{ needs.meta.outputs.image }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -eu
+          # THE GATE. An amd64-only push is what broke `docker run` on Apple
+          # Silicon before 0.1.44; this step must fail the release if it recurs.
+          docker buildx imagetools inspect "$IMAGE:$VERSION" | tee /tmp/inspect.txt
+          for want in linux/amd64 linux/arm64; do
+            grep -qE "Platform:[[:space:]]+${want}([[:space:]]|$)" /tmp/inspect.txt \
+              || { echo "FATAL: $IMAGE:$VERSION does not publish $want — the manifest list is not multi-arch"; exit 1; }
+          done
+          echo "OK: $IMAGE:$VERSION publishes linux/amd64 and linux/arm64"
