@@ -35,6 +35,10 @@ function headingTexts(container: HTMLElement, level: 'h2' | 'h3'): string[] {
   );
 }
 
+function figures(container: HTMLElement): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>('figure')];
+}
+
 /**
  * The presence rule, stated the same way here, in the CLI reference, and in the
  * onboarding document served to agents at `GET /invite/:token`. If it drifts in
@@ -46,6 +50,35 @@ const PRESENCE_RULE =
   'sparrow loop --exec as a wake mechanism; or the human runs sparrow harness and the ' +
   'agent never has to remember.';
 
+/**
+ * Every GUI instruction on this page quotes a string the web app really
+ * renders. The component each one comes from is named so a rename in the app
+ * fails here rather than in a reader's face.
+ */
+const UI_STRINGS: [label: string, source: string][] = [
+  ['Create your account', 'routes/Login.tsx'],
+  ['Workspace name', 'routes/Login.tsx'],
+  ['Create account', 'routes/Login.tsx'],
+  ['Welcome to', 'routes/OrgHome.tsx'],
+  ['HUMANS', 'components/AppShell.tsx — Humans section'],
+  ['AGENTS', 'components/AppShell.tsx — Agents section'],
+  ['ROOMS', 'components/AppShell.tsx — Rooms section'],
+  ['Invite an agent', 'components/AppShell.tsx / InviteDialog.tsx'],
+  ['How should the agent connect?', 'components/InviteDialog.tsx'],
+  ['Harness', 'components/InviteDialog.tsx — ModeCard'],
+  ['Needs the CLI', 'components/InviteDialog.tsx — ModeCard pill'],
+  ['Inline', 'components/InviteDialog.tsx — ModeCard'],
+  ['No install', 'components/InviteDialog.tsx — ModeCard pill'],
+  ['Approvals', 'routes/MyApprovals.tsx'],
+  ['Pending requests', 'routes/MyApprovals.tsx'],
+  ['Approve', 'routes/MyApprovals.tsx'],
+  ['Deny', 'routes/MyApprovals.tsx'],
+  ['Create a room', 'components/AppShell.tsx — Rooms "+"'],
+  ['New room', 'components/NewRoomModal.tsx'],
+  ['Add people', 'routes/Room.tsx — room header'],
+  ['Add agent', 'routes/Room.tsx — room header'],
+];
+
 describe('Getting started', () => {
   it('opens with the five-minute promise', () => {
     const { container } = renderPage();
@@ -54,18 +87,22 @@ describe('Getting started', () => {
   });
 
   /**
-   * The page is a numbered walk, and the numbers are part of the headings so
-   * the TOC rail reads as the walk too. Exact list, exact order.
+   * The page is a numbered walk and the numbers are part of the headings, so
+   * the TOC rail reads as the walk too. Exact list, exact order. Steps 2–7 each
+   * show the web UI first and the CLI right after; "Where next" is the unnumbered
+   * send-off.
    */
-  it('walks six numbered steps, in order', () => {
+  it('walks seven numbered steps and a send-off, in order', () => {
     const { container } = renderPage();
     expect(headingTexts(container, 'h2')).toEqual([
       '1. Run the server',
       '2. Sign up',
-      '3. Make an invite',
-      '4. Connect an agent',
-      '5. Say hello',
-      '6. Make a room',
+      '3. Your workspace',
+      '4. Invite an agent',
+      '5. Approve it',
+      '6. Say hello',
+      '7. Make a room',
+      'Where next',
     ]);
   });
 
@@ -84,6 +121,30 @@ describe('Getting started', () => {
     expect(flatText(container)).toMatch(/first account on a fresh instance owns the workspace/i);
   });
 
+  /* ------------------------------------------------------------------ GUI -- */
+
+  /**
+   * The web UI is the first-class half of this page: a reader who never opens a
+   * terminal after `docker run` must still get all the way through. Each of
+   * these is a string the app actually renders — invented labels are the one
+   * way a screenshot-led page can lie.
+   */
+  it.each(UI_STRINGS)('quotes the real UI string %s (%s)', (label) => {
+    const { container } = renderPage();
+    expect(flatText(container)).toContain(label);
+  });
+
+  it('describes the invite dialog as the two-card choice the app really offers', () => {
+    const { container } = renderPage();
+    const text = flatText(container);
+    // The dialog asks ONE question with TWO answers, and reuses one live invite
+    // rather than minting a write-it-down-now secret (InviteDialog LiveInviteNote).
+    expect(text).toMatch(/live invite/i);
+    expect(text).toMatch(/Org admin → Invites/);
+    expect(text).not.toMatch(/shown once/i);
+    expect(text).not.toContain('New invite');
+  });
+
   it('shows an invite URL on this instance, and says fetching enrolls nobody', () => {
     const { container } = renderPage();
     expect(terminals(container).some((t) => t.includes(`${serverOrigin()}/invite/`))).toBe(true);
@@ -91,6 +152,50 @@ describe('Getting started', () => {
     expect(text).toMatch(/plain-text onboarding doc/i);
     expect(text).toMatch(/Fetching never enrolls anyone by itself/i);
   });
+
+  it('starts a DM by clicking the agent in the sidebar, not an invented button', () => {
+    const { container } = renderPage();
+    // OrgHome's own copy: "click a name under HUMANS or AGENTS in the sidebar".
+    expect(flatText(container)).toMatch(/click .{0,40}under (HUMANS|AGENTS)/i);
+  });
+
+  /* -------------------------------------------------------------- figures -- */
+
+  const FIGURES = ['signup', 'home', 'invite', 'approve', 'dm', 'room'] as const;
+
+  it('illustrates the walk with one screenshot per GUI step, in order', () => {
+    const { container } = renderPage();
+    const srcs = figures(container).map((f) => f.querySelector('img')?.getAttribute('src'));
+    expect(srcs).toEqual(FIGURES.map((n) => `/docs/img/getting-started/${n}.png`));
+  });
+
+  /**
+   * Root-relative, exactly like the cross-page links: these pages are published
+   * from sparrow.land, where `build-docs.mjs` copies `scripts/docs-assets/img/`
+   * to `/docs/img/`. An absolute host here would break every preview build.
+   */
+  it('addresses images the same way the page addresses its own links', () => {
+    const { container } = renderPage();
+    for (const img of container.querySelectorAll('img')) {
+      expect(img.getAttribute('src')).toMatch(/^\/docs\/img\//);
+      expect(img.getAttribute('loading')).toBe('lazy');
+    }
+  });
+
+  /** Alt text describes the screen, so the page still teaches with images off. */
+  it('gives every screenshot real alt text and a caption', () => {
+    const { container } = renderPage();
+    const figs = figures(container);
+    expect(figs.length).toBe(FIGURES.length);
+    for (const fig of figs) {
+      const alt = fig.querySelector('img')?.getAttribute('alt') ?? '';
+      expect(alt.length, alt).toBeGreaterThan(40);
+      expect(alt.toLowerCase(), alt).not.toContain('screenshot');
+      expect(fig.querySelector('figcaption')?.textContent?.trim()).toBeTruthy();
+    }
+  });
+
+  /* ------------------------------------------------------------------ CLI -- */
 
   /**
    * Three modes, in the README's order: less machinery first, most robust last.
@@ -158,9 +263,8 @@ describe('Getting started', () => {
     expect(flatText(container)).not.toContain('--timeout 900');
   });
 
-  it('tells the reader to approve the enrollment', () => {
+  it('approves the enrollment both ways', () => {
     const { container } = renderPage();
-    expect(flatText(container)).toMatch(/approve the enrollment/i);
     expect(flatText(container)).toContain('sparrow requests approve');
   });
 
@@ -186,9 +290,9 @@ describe('Getting started', () => {
     expect(container.querySelector('a[href="/docs/concepts"]')).toBeTruthy();
   });
 
-  it('closes by pointing at the CLI, API and self-hosting pages', () => {
+  it('closes by pointing at the CLI, API, SDK, MCP and self-hosting pages', () => {
     const { container } = renderPage();
-    for (const href of ['/docs/cli', '/docs/api', '/docs/self-hosting']) {
+    for (const href of ['/docs/cli', '/docs/api', '/docs/sdk', '/docs/mcp', '/docs/self-hosting']) {
       expect(container.querySelector(`a[href="${href}"]`), href).toBeTruthy();
     }
   });
@@ -196,13 +300,14 @@ describe('Getting started', () => {
   /**
    * The old page had grown to ~1,900 words: an HTTP signup curl, a four-column
    * action table, and the Codex trust steps duplicated from the CLI page. A
-   * first page nobody finishes teaches nothing, so its length is a contract.
+   * first page nobody finishes teaches nothing, so its length stays a contract —
+   * widened once, when the web UI became the page's other half.
    */
   it('stays a five-minute read', () => {
     const { container } = renderPage();
     const words = flatText(container).trim().split(/\s+/).length;
-    expect(words).toBeGreaterThanOrEqual(600);
-    expect(words).toBeLessThanOrEqual(750);
+    expect(words).toBeGreaterThanOrEqual(750);
+    expect(words).toBeLessThanOrEqual(1100);
   });
 
   it('drops the old page’s structure', () => {

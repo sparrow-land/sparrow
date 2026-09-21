@@ -422,6 +422,27 @@ pre,
   padding: 0;
   white-space: pre;
 }
+/* Screenshots. A figure keeps the full doc column (prose is held to a 40rem
+   measure by the site stylesheet, and a 1280px-wide screenshot squeezed into
+   that is unreadable). The tokens fall back: `--line`/`--surface` are the
+   marketing site's, which is where these pages are actually served; the
+   `--sparrow-*` values behind them are the app's, for the in-app preview. */
+.doc figure {
+  margin: 1.5rem 0;
+}
+.doc figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line, var(--sparrow-border));
+  border-radius: 10px;
+  background: var(--surface, var(--sparrow-panel));
+}
+.doc figcaption {
+  margin-top: 0.5rem;
+  font-size: 0.85em;
+  color: var(--muted, var(--sparrow-muted));
+}
 .doc-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--sparrow-border);
