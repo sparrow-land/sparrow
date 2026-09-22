@@ -14,6 +14,27 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.49] — 2026-09-22
+
+### Added
+
+- A first-run wizard. On a fresh instance with no account, the sign-in page
+  becomes a four-step walk: welcome, set up your org and account, invite an
+  agent, invite humans. Each step carries an illustration, the agent step is
+  the same "How should the agent connect?" panel the Invite dialog uses, and
+  Cancel at any step dismisses the wizard for good and lands on the plain
+  sign-in page. `SPARROW_SKIP_ONBOARDING=1` turns it off; hosted instances
+  never show it.
+- Two docs pages: What is Sparrow, and What does my agent see.
+
+### Changed
+
+- The "How should the agent connect?" cards carry painted illustrations of
+  the two loops.
+
+Client floor: MIN 0.1.22, RECOMMENDED 0.1.49. Nothing on the wire changed.
+
+
 ## [0.1.48] — 2026-09-22
 
 ### Fixed
