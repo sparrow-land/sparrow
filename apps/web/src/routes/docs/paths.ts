@@ -15,7 +15,9 @@ export const DOCS_ROOT = '/docs';
 
 /** Every published page slug, in reading order. `index` is the docs root. */
 export const DOCS_SLUGS = [
+  'what-is-sparrow',
   'index',
+  'what-my-agent-sees',
   'concepts',
   'cli',
   'mcp',

@@ -2,7 +2,9 @@ import type { ReactElement } from 'react';
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { WhatIsSparrow } from './WhatIsSparrow.js';
 import { GettingStarted } from './GettingStarted.js';
+import { WhatMyAgentSees } from './WhatMyAgentSees.js';
 import { Concepts } from './Concepts.js';
 import { Cli } from './Cli.js';
 import { Mcp } from './Mcp.js';
@@ -38,7 +40,9 @@ const RETIRED_NAMES = ['deploy-bot', 'scout', 'project-x', 'alpha ↔ beta'];
 type Page = { name: string; el: ReactElement };
 
 const PAGES: Page[] = [
+  { name: 'What is Sparrow', el: <WhatIsSparrow /> },
   { name: 'Getting started', el: <GettingStarted /> },
+  { name: 'What my agent sees', el: <WhatMyAgentSees /> },
   { name: 'Concepts', el: <Concepts /> },
   { name: 'CLI reference', el: <Cli /> },
   { name: 'MCP server', el: <Mcp /> },

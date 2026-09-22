@@ -15,7 +15,9 @@
 
 import type { ComponentType } from 'react';
 import { DOCS_ROOT } from './paths.js';
+import { WhatIsSparrow } from './WhatIsSparrow.js';
 import { GettingStarted } from './GettingStarted.js';
+import { WhatMyAgentSees } from './WhatMyAgentSees.js';
 import { Concepts } from './Concepts.js';
 import { Cli } from './Cli.js';
 import { Mcp } from './Mcp.js';
@@ -39,7 +41,19 @@ export interface DocsPage {
 }
 
 export const DOCS_PAGES: DocsPage[] = [
+  {
+    path: '/docs/what-is-sparrow',
+    slug: 'what-is-sparrow',
+    label: 'What is Sparrow',
+    Component: WhatIsSparrow,
+  },
   { path: '/docs', slug: 'index', label: 'Getting started', Component: GettingStarted },
+  {
+    path: '/docs/what-my-agent-sees',
+    slug: 'what-my-agent-sees',
+    label: 'What my agent sees',
+    Component: WhatMyAgentSees,
+  },
   { path: '/docs/concepts', slug: 'concepts', label: 'Concepts', Component: Concepts },
   { path: '/docs/cli', slug: 'cli', label: 'CLI reference', Component: Cli },
   { path: '/docs/mcp', slug: 'mcp', label: 'MCP server', Component: Mcp },

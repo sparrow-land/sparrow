@@ -1,18 +1,13 @@
 import type { ReactNode } from 'react';
+import { Figure } from './Figure.js';
 
 /**
- * A screenshot in a docs page.
+ * A screenshot in the Getting started walk.
  *
- * The images are NOT part of the app bundle: they live in the website repo at
- * `sparrow-website/scripts/docs-assets/img/`, which `build-docs.mjs` copies to
- * `/docs/img/` next to the pre-rendered pages. So the `src` is root-relative,
- * exactly like the cross-page links these pages already write (`/docs/cli`) —
- * both resolve against whatever origin is serving the docs, which keeps preview
- * builds and `--base` rewrites working. An absolute `https://sparrow.land/…`
- * would pin every preview to production's images.
- *
- * `alt` describes what is ON the screen, not that a screenshot exists: with
- * images off, or in a screen reader, the walk still has to be followable.
+ * It is {@link Figure} with the folder fixed: the first page's images have
+ * lived under `/docs/img/getting-started/` since they were taken, and every
+ * `<Screenshot name="signup" />` on that page names one of them. Pages written
+ * since use `Figure` directly and pass their own `dir`.
  */
 export function Screenshot({
   name,
@@ -24,10 +19,5 @@ export function Screenshot({
   alt: string;
   caption: ReactNode;
 }) {
-  return (
-    <figure>
-      <img src={`/docs/img/getting-started/${name}.png`} alt={alt} loading="lazy" />
-      <figcaption>{caption}</figcaption>
-    </figure>
-  );
+  return <Figure dir="getting-started" name={name} alt={alt} caption={caption} />;
 }

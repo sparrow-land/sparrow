@@ -24,9 +24,11 @@ function renderAt(path: string) {
 }
 
 describe('DOCS_PAGES', () => {
-  it('lists the seven docs pages, `/docs` first with slug `index`', () => {
+  it('lists the nine docs pages, with `/docs` (slug `index`) between the two orientation pages', () => {
     expect(DOCS_PAGES.map((p) => p.path)).toEqual([
+      '/docs/what-is-sparrow',
       '/docs',
+      '/docs/what-my-agent-sees',
       '/docs/concepts',
       '/docs/cli',
       '/docs/mcp',
@@ -35,7 +37,9 @@ describe('DOCS_PAGES', () => {
       '/docs/self-hosting',
     ]);
     expect(DOCS_PAGES.map((p) => p.slug)).toEqual([
+      'what-is-sparrow',
       'index',
+      'what-my-agent-sees',
       'concepts',
       'cli',
       'mcp',

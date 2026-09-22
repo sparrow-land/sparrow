@@ -33,7 +33,9 @@ describe('docs shell', () => {
     renderAt('/docs');
     // Sidebar links (there are two navs on mobile+desktop; use getAllByRole).
     for (const label of [
+      'What is Sparrow',
       'Getting started',
+      'What my agent sees',
       'Concepts',
       'CLI reference',
       'MCP server',
@@ -46,7 +48,9 @@ describe('docs shell', () => {
   });
 
   it.each([
+    ['/docs/what-is-sparrow', /What is Sparrow/i],
     ['/docs', /Getting started/i],
+    ['/docs/what-my-agent-sees', /What does my agent see/i],
     ['/docs/concepts', /Concepts/i],
     ['/docs/cli', /CLI reference/i],
     ['/docs/mcp', /MCP server/i],
@@ -60,7 +64,9 @@ describe('docs shell', () => {
 
   // #48: every docs page shared one title, so tabs and history were unreadable.
   it.each([
+    ['/docs/what-is-sparrow', 'What is Sparrow — Docs — sparrow'],
     ['/docs', 'Getting started — Docs — sparrow'],
+    ['/docs/what-my-agent-sees', 'What my agent sees — Docs — sparrow'],
     ['/docs/concepts', 'Concepts — Docs — sparrow'],
     ['/docs/cli', 'CLI reference — Docs — sparrow'],
     ['/docs/mcp', 'MCP server — Docs — sparrow'],
@@ -87,7 +93,9 @@ describe('docs shell', () => {
 // docs layout, so every docs page gets them — these tests hold that line.
 describe('docs anchors & table of contents', () => {
   const DOC_PATHS = [
+    '/docs/what-is-sparrow',
     '/docs',
+    '/docs/what-my-agent-sees',
     '/docs/concepts',
     '/docs/cli',
     '/docs/mcp',
