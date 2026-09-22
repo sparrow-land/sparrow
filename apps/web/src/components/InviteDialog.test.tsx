@@ -232,6 +232,24 @@ describe('InviteDialog', () => {
       expect(screen.getByText('How should the agent connect?')).toBeInTheDocument();
     });
 
+    // The two cards carry the painted "who calls whom" pictures — sparrow
+    // calling the terminal (harness), the terminal calling sparrow (inline).
+    // They are the fastest way to read the difference, so they are content, not
+    // decoration, and each carries real alt text.
+    it('paints each connect mode with its own picture', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'agent' });
+      await screen.findByText('How should the agent connect?');
+      const harness = screen.getByAltText('A sparrow calling out to a desktop terminal');
+      const inline = screen.getByAltText('A desktop terminal calling out to a sparrow');
+      expect(harness).toHaveAttribute('src', '/onboarding/connect-harness.png');
+      expect(inline).toHaveAttribute('src', '/onboarding/connect-inline.png');
+      expect(within(screen.getByRole('radio', { name: /harness/i })).getByRole('img')).toBe(
+        harness,
+      );
+      expect(within(screen.getByRole('radio', { name: /inline/i })).getByRole('img')).toBe(inline);
+    });
+
     it('the header Invite button opens WHO even in an org with zero agents', async () => {
       useFetch(mockFetch({}, rec));
       renderDialog({ initialStep: 'who', hasAgents: false });
@@ -395,15 +413,6 @@ describe('InviteDialog', () => {
       expect(within(harness).getByText(/needs the cli/i)).toBeInTheDocument();
       const inline = screen.getByRole('radio', { name: /inline/i });
       expect(within(inline).getByText(/no install/i)).toBeInTheDocument();
-    });
-
-    it('draws the loop art on each mode card, ring on the mode’s loop holder', async () => {
-      useFetch(mockFetch({}, rec));
-      renderDialog({ initialStep: 'agent' });
-      const harness = await screen.findByRole('radio', { name: /harness/i });
-      expect(harness.querySelector('[data-part="ring"]')).toHaveAttribute('data-holder', 'sparrow');
-      const inline = screen.getByRole('radio', { name: /inline/i });
-      expect(inline.querySelector('[data-part="ring"]')).toHaveAttribute('data-holder', 'agent');
     });
 
     it('switching to inline swaps the harness command for the invitation blob', async () => {

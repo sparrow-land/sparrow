@@ -1,27 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Bot, ChevronLeft, ChevronRight, User } from 'lucide-react';
-import type { EnrollmentSummary } from '@sparrow-land/sdk/types';
-import { ApiError } from '@sparrow-land/sdk';
-import { api } from '../lib/client.js';
-import { useWorkspace } from '../lib/workspace.js';
-import { buildInviteBlob } from '../lib/inviteBlob.js';
-import { ensureOrgInvite } from '../lib/orgInvite.js';
-import { INSTALL_COMMAND } from '../lib/docsUrl.js';
-import { formatRelativeTime } from '../lib/time.js';
 import { Modal } from './Modal.js';
-import { Terminal } from './Terminal.js';
-import { InviteByEmail } from './InviteByEmail.js';
-import { LoopModeArt } from './LoopModeArt.js';
-// One home for what each runtime is and needs — shared with the invite LANDING
-// PAGE, so the two surfaces cannot drift apart on it (see AgentRuntimes).
-import {
-  CodexInlineSteps,
-  INLINE_RUNTIMES,
-  RUNTIMES,
-  RUNTIME_HINT,
-  type InlineRuntime,
-  type Runtime,
-} from './AgentRuntimes.js';
+import { AgentConnectPanel } from './AgentConnectPanel.js';
+import { PersonInvitePanel } from './PersonInvitePanel.js';
+import { helperClass, useMintedInvite } from './InvitePieces.js';
 
 /**
  * THE invite dialog — one door, three entry points, one step at a time.
@@ -40,26 +22,28 @@ import {
  * whichever way the caller arrived. Only the AGENTS "+" opens on `agent`
  * without a `who` behind it, and only that open has no back chip.
  *
+ * The two steps' bodies are NOT written here: they are the shared
+ * {@link PersonInvitePanel} and {@link AgentConnectPanel}, which the first-run
+ * onboarding wizard (`/onboarding`) renders too. This file owns the dialog —
+ * the door, the back chip, the policy refusal — and nothing else.
+ *
  * The classic invite (`POST /orgs/:id/invites`) is resolved ONCE, lazily, the
  * first time a step needs a URL, and both agent variants share it — so the
  * harness command and the invitation blob always name the same invite, and a
  * user flipping between them does not leave a trail of dead invites. Across
- * OPENS it is reused rather than re-minted (see {@link ensureOrgInvite}): an
- * invite is a live door, and re-reading the instructions is not a reason to
- * open another one (issue #5).
+ * OPENS it is reused rather than re-minted (see `ensureOrgInvite`): an invite is
+ * a live door, and re-reading the instructions is not a reason to open another
+ * one (issue #5).
  *
  * The `agent` step also CLOSES THE LOOP: pending enrollments arriving through
  * the caller's own invites (live, via the workspace's `/me/events` state) are
- * approved or denied right here — see {@link PendingApprovals}.
+ * approved or denied right there — see the panel's approvals list.
  */
 
 export type InviteStep = 'who' | 'person' | 'agent';
 
-/** How the agent will be driven — the one real choice on the `agent` step. */
-type LoopMode = 'harness' | 'inline';
-
-const eyebrowClass = 'text-xs uppercase tracking-wider text-[var(--sparrow-faint)]';
-const helperClass = 'text-xs text-[var(--sparrow-muted)]';
+/** Re-exported for the surfaces that print the harness command. */
+export { harnessCommand } from './AgentConnectPanel.js';
 
 export function InviteDialog({
   orgId,
@@ -144,7 +128,7 @@ export function InviteDialog({
           downstream of an invite (captions, approvals) may be rendered. */}
       {step !== 'who' && forbidden && <PolicyBlocked audience={step} />}
       {step === 'person' && !forbidden && (
-        <PersonStep
+        <PersonInvitePanel
           orgId={orgId}
           orgName={org}
           canByEmail={canByEmail}
@@ -154,7 +138,7 @@ export function InviteDialog({
         />
       )}
       {step === 'agent' && !forbidden && (
-        <AgentStep
+        <AgentConnectPanel
           orgId={orgId}
           orgName={org}
           inviterName={inviterName}
@@ -165,45 +149,6 @@ export function InviteDialog({
       )}
     </Modal>
   );
-}
-
-/* -------------------------------------------------------------------------- */
-/* the invite itself                                                           */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Resolve the org's classic invite once, the first time a step actually needs a
- * URL: the caller's own blank, live, untouched invite if they have one, else a
- * freshly minted one ({@link ensureOrgInvite}). Re-renders (mode flips, runtime
- * flips, step changes) never re-resolve it.
- */
-function useMintedInvite(orgId: string, enabled: boolean) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [error, setError] = useState(false);
-  /** The mint was refused by org policy (`invites.who: 'admins'`), not by luck. */
-  const [forbidden, setForbidden] = useState(false);
-  const started = useRef(false);
-
-  useEffect(() => {
-    if (!enabled || started.current) return;
-    started.current = true;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const inviteUrl = await ensureOrgInvite(orgId);
-        if (!cancelled) setUrl(inviteUrl);
-      } catch (err) {
-        if (cancelled) return;
-        if (err instanceof ApiError && err.status === 403) setForbidden(true);
-        else setError(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [orgId, enabled]);
-
-  return { url, error, forbidden };
 }
 
 /**
@@ -224,71 +169,6 @@ function PolicyBlocked({ audience }: { audience: 'person' | 'agent' }) {
         admin.
       </p>
     </div>
-  );
-}
-
-function MintError() {
-  return (
-    <p className="rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-panel-2)] px-3 py-2.5 text-sm text-[var(--sparrow-danger)]">
-      Could not create the invite. Close and try again.
-    </p>
-  );
-}
-
-/** The terminal's placeholder while the invite is still being minted. */
-function TerminalSkeleton({ label }: { label: string }) {
-  return (
-    <div className="terminal" aria-hidden="true">
-      <div className="terminal-bar">
-        <span className="terminal-dot" style={{ background: '#e0555b' }} />
-        <span className="terminal-dot" style={{ background: '#d3924b' }} />
-        <span className="terminal-dot" style={{ background: '#5bb98b' }} />
-        <span className="mono ml-1 text-xs text-[var(--sparrow-muted)]">{label}</span>
-      </div>
-      <pre className="terminal-body text-[var(--sparrow-faint)]">creating invite…</pre>
-    </div>
-  );
-}
-
-/** Terminal, mint-error, or skeleton — the three states of every code block here. */
-function InviteTerminal({
-  url,
-  error,
-  label,
-  code,
-  wrap = true,
-}: {
-  url: string | null;
-  error: boolean;
-  label: string;
-  code: string;
-  /**
-   * Every block in this dialog carries an invite URL — bare, or as the tail of a
-   * command — and an invite URL is long. Unwrapped, the tail sat behind a
-   * horizontal scrollbar: invisible, and MISSING from a copy made by selecting
-   * the text (issue #63). So these soft-wrap by default; the copy button is
-   * still the exact route, and a wrapped command has never been the thing
-   * anyone actually retypes.
-   */
-  wrap?: boolean;
-}) {
-  if (error) return <MintError />;
-  if (!url) return <TerminalSkeleton label={label} />;
-  return <Terminal code={code} label={label} wrap={wrap} />;
-}
-
-/**
- * What the link actually IS, said once wherever it is handed over: a live door
- * into the org, and a revocable one. The dialog used to mint a seven-day invite
- * per open and say nothing about it (issue #5) — now it reuses one, and names
- * both the standing consequence and the place to end it.
- */
-function LiveInviteNote({ orgName }: { orgName: string }) {
-  return (
-    <p className={`mt-2 ${helperClass}`}>
-      This is a live invite: anyone who follows the link joins {orgName}. Revoke it any time in
-      Org admin → Invites.
-    </p>
   );
 }
 
@@ -348,428 +228,5 @@ function ChoiceRow({
         className="shrink-0 text-[var(--sparrow-faint)] transition-colors group-hover:text-[var(--sparrow-accent)]"
       />
     </button>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* step: person                                                                */
-/* -------------------------------------------------------------------------- */
-
-function PersonStep({
-  orgId,
-  orgName,
-  canByEmail,
-  url,
-  error,
-  onInvited,
-}: {
-  orgId: string;
-  orgName: string;
-  canByEmail: boolean;
-  url: string | null;
-  error: boolean;
-  onInvited?: () => void;
-}) {
-  return (
-    <div>
-      {canByEmail && <InviteByEmail orgId={orgId} onInvited={onInvited} />}
-      <div className={canByEmail ? 'mt-4 border-t border-[var(--sparrow-border)] pt-4' : ''}>
-        <p className={eyebrowClass}>{canByEmail ? 'Or share a link' : 'Share a link'}</p>
-        <p className="mt-1 text-xs text-[var(--sparrow-faint)]">
-          Anyone with this link can join {orgName}. Use email when you want to know who&rsquo;s
-          coming.
-        </p>
-        <div className="mt-2">
-          <InviteTerminal url={url} error={error} label="invite link" code={url ?? ''} />
-        </div>
-        {url && <LiveInviteNote orgName={orgName} />}
-      </div>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* step: agent                                                                 */
-/* -------------------------------------------------------------------------- */
-
-/**
- * The exact command the caller runs to stand a harness up against this invite.
- * The installer comes from its ONE home (SPEC: *Canonical public homes*), so
- * every reader is taught the same line; the invite URL is this instance's.
- */
-export function harnessCommand(url: string, runtime: Runtime): string {
-  const flag = RUNTIMES.find((r) => r.id === runtime)?.flag ?? '';
-  return [
-    '# on a machine that stays up',
-    INSTALL_COMMAND,
-    `sparrow harness${flag ? ` ${flag}` : ''} \\`,
-    `  --url ${url}`,
-  ].join('\n');
-}
-
-function AgentStep({
-  orgId,
-  orgName,
-  inviterName,
-  url,
-  error,
-  firstAgent,
-}: {
-  orgId: string;
-  orgName: string;
-  inviterName: string;
-  url: string | null;
-  error: boolean;
-  firstAgent: boolean;
-}) {
-  const [mode, setMode] = useState<LoopMode>('harness');
-  const [runtime, setRuntime] = useState<Runtime>('claude');
-  // Inline keeps its OWN pick: the two lists are different (the skill installs
-  // for two providers; the harness execs anything), so one shared piece of state
-  // would answer a question the other mode never asked.
-  const [inlineRuntime, setInlineRuntime] = useState<InlineRuntime>('claude');
-
-  const code =
-    url === null
-      ? ''
-      : mode === 'harness'
-        ? harnessCommand(url, runtime)
-        : buildInviteBlob({ inviterName, orgName, url });
-
-  return (
-    <div>
-      {firstAgent && (
-        <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-[var(--sparrow-border)] bg-[var(--sparrow-panel-2)] px-3 py-2.5">
-          <Bot size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-[var(--sparrow-accent)]" />
-          <p className="text-xs text-[var(--sparrow-muted)]">
-            <strong className="font-semibold text-[var(--sparrow-text)]">Your first agent.</strong>{' '}
-            Two ways to bring one in. Pick one; you can always add the other later.
-          </p>
-        </div>
-      )}
-
-      <p className="text-sm text-[var(--sparrow-muted)]">How should the agent connect?</p>
-
-      <div
-        role="radiogroup"
-        aria-label="How the agent connects"
-        className="mt-3 grid grid-cols-1 gap-3 min-[480px]:grid-cols-2"
-      >
-        <ModeCard
-          mode="harness"
-          title="Harness"
-          pill="Needs the CLI"
-          detail="Most reliable. Sparrow's CLI runs the loop and calls your agent for every message."
-          selected={mode === 'harness'}
-          onSelect={() => setMode('harness')}
-        />
-        <ModeCard
-          mode="inline"
-          title="Inline"
-          pill="No install"
-          detail="Quickest. Paste the link into an agent you already have open. The agent runs the loop and checks Sparrow when it remembers to."
-          selected={mode === 'inline'}
-          onSelect={() => setMode('inline')}
-        />
-      </div>
-
-      {mode === 'harness' ? (
-        <div className="mt-4">
-          <div
-            role="tablist"
-            aria-label="Agent runtime"
-            className="inline-flex flex-wrap rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-bg)] p-0.5 text-xs"
-          >
-            {RUNTIMES.map((r) => (
-              <TabButton
-                key={r.id}
-                active={runtime === r.id}
-                onClick={() => setRuntime(r.id)}
-              >
-                {r.label}
-              </TabButton>
-            ))}
-          </div>
-          <div className="mt-3">
-            <InviteTerminal url={url} error={error} label="sparrow harness" code={code} />
-          </div>
-          <p className={`mt-2 ${helperClass}`}>
-            Installs the CLI, enrolls the agent, and keeps it online. Then approve it below.
-          </p>
-          <p className={`mt-1 ${helperClass}`}>
-            Options:{' '}
-            {RUNTIME_HINT[runtime] && (
-              <>
-                <Flag>{RUNTIME_HINT[runtime]!.flag}</Flag> {RUNTIME_HINT[runtime]!.what},{' '}
-              </>
-            )}
-            <Flag>--cwd ~/proj</Flag> sets the working folder.
-          </p>
-        </div>
-      ) : (
-        <div className="mt-4">
-          {/* Which agent is open on the other side decides what comes AFTER the
-              paste: on Codex the skill needs a flag and two trust steps only a
-              human can do. Same picker shape as the harness branch above. */}
-          <div
-            role="tablist"
-            aria-label="Inline agent runtime"
-            className="inline-flex flex-wrap rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-bg)] p-0.5 text-xs"
-          >
-            {INLINE_RUNTIMES.map((r) => (
-              <TabButton
-                key={r.id}
-                active={inlineRuntime === r.id}
-                onClick={() => setInlineRuntime(r.id)}
-              >
-                {r.label}
-              </TabButton>
-            ))}
-          </div>
-          <div className="mt-3">
-            <InviteTerminal url={url} error={error} label="invitation" code={code} wrap />
-          </div>
-          <p className={`mt-2 ${helperClass}`}>
-            Paste this into your agent. It fetches the URL, reads the onboarding doc, asks you for a
-            name, and enrolls. Then approve it below.
-          </p>
-          {inlineRuntime === 'codex' && (
-            <div className="mt-3 border-t border-[var(--sparrow-border)] pt-3">
-              <p className={eyebrowClass}>Then, on Codex</p>
-              <CodexInlineSteps className={`mt-1.5 ${helperClass}`} />
-            </div>
-          )}
-        </div>
-      )}
-
-      {url && <LiveInviteNote orgName={orgName} />}
-
-      <PendingApprovals orgId={orgId} />
-    </div>
-  );
-}
-
-/** A flag rendered inline in helper prose, in the terminal's own voice. */
-function Flag({ children }: { children: ReactNode }) {
-  return <code className="mono text-[var(--sparrow-text)]">{children}</code>;
-}
-
-/**
- * One of the two loop modes: the art (who holds the loop), the name, a NEUTRAL
- * capability pill (never "recommended" — the trade-off is the user's to make),
- * and the one-line trade-off itself.
- */
-function ModeCard({
-  mode,
-  title,
-  pill,
-  detail,
-  selected,
-  onSelect,
-}: {
-  mode: LoopMode;
-  title: string;
-  pill: string;
-  detail: string;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      onClick={onSelect}
-      className={`flex flex-col rounded-lg border p-3 text-left transition-colors ${
-        selected
-          ? 'border-[var(--sparrow-accent)] bg-[var(--sparrow-accent-soft)]'
-          : 'border-[var(--sparrow-border)] bg-[var(--sparrow-panel-2)] hover:border-[var(--sparrow-border-strong)]'
-      }`}
-    >
-      <LoopModeArt mode={mode} size="card" className="mx-auto mb-2 w-full max-w-[200px]" />
-      <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span
-          aria-hidden="true"
-          className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border ${
-            selected ? 'border-[var(--sparrow-accent)]' : 'border-[var(--sparrow-border-strong)]'
-          }`}
-        >
-          {selected && <span className="h-1.5 w-1.5 rounded-full bg-[var(--sparrow-accent)]" />}
-        </span>
-        <span className="text-sm font-semibold text-[var(--sparrow-text)]">{title}</span>
-        <span className="whitespace-nowrap rounded border border-[var(--sparrow-border)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--sparrow-muted)]">
-          {pill}
-        </span>
-      </span>
-      <span className="mt-1.5 text-xs leading-relaxed text-[var(--sparrow-muted)]">{detail}</span>
-    </button>
-  );
-}
-
-function TabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={`rounded px-3 py-1.5 font-medium transition-colors ${
-        active
-          ? 'bg-[var(--sparrow-panel-2)] text-[var(--sparrow-text)]'
-          : 'text-[var(--sparrow-muted)] hover:text-[var(--sparrow-text)]'
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* approvals                                                                   */
-/* -------------------------------------------------------------------------- */
-
-/** Per-row resolution the caller has driven from this dialog (persisted after the
- * row leaves the live list so the flip to approved/denied stays visible). */
-type Resolution = 'approved' | 'denied';
-
-/**
- * The live approvals list inside the invite dialog — the other half of the loop.
- * Reads the workspace's pending enrollments (already scoped to the caller's own
- * invites for this org, hydrated on open and kept fresh by `/me/events`) and
- * lets each be approved or denied in place. Once resolved here, the row is KEPT
- * — with its outcome — even after the live list drops it, so the caller sees the
- * result without the row vanishing under their cursor.
- */
-function PendingApprovals({ orgId }: { orgId: string }) {
-  const { enrollments, reloadApprovals } = useWorkspace();
-  const [busy, setBusy] = useState<Record<string, Resolution>>({});
-  const [resolved, setResolved] = useState<Record<string, Resolution>>({});
-  const [errored, setErrored] = useState<Record<string, string>>({});
-  // Every enrollment we've ever shown, so resolved rows survive leaving the list.
-  const seen = useRef<Map<string, EnrollmentSummary>>(new Map());
-  for (const e of enrollments) seen.current.set(e.id, e);
-
-  // Hydrate the current pending list the moment the step opens; live
-  // `enrollment.requested` / `enrollment.resolved` events keep it fresh after.
-  useEffect(() => {
-    void reloadApprovals();
-  }, [reloadApprovals]);
-
-  const ids = new Set<string>(enrollments.map((e) => e.id));
-  for (const id of Object.keys(resolved)) ids.add(id);
-  const rows = [...ids]
-    .map((id) => seen.current.get(id))
-    .filter((e): e is EnrollmentSummary => e !== undefined)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-
-  const act = async (id: string, kind: Resolution) => {
-    setBusy((b) => ({ ...b, [id]: kind }));
-    setErrored((e) => {
-      const { [id]: _drop, ...rest } = e;
-      return rest;
-    });
-    try {
-      if (kind === 'approved') await api.approveEnrollment(orgId, id);
-      else await api.denyEnrollment(orgId, id);
-      setResolved((r) => ({ ...r, [id]: kind }));
-      void reloadApprovals();
-    } catch {
-      setErrored((e) => ({ ...e, [id]: `Could not ${kind === 'approved' ? 'approve' : 'deny'}.` }));
-    } finally {
-      setBusy((b) => {
-        const { [id]: _drop, ...rest } = b;
-        return rest;
-      });
-    }
-  };
-
-  return (
-    <div className="mt-4 border-t border-[var(--sparrow-border)] pt-4">
-      <p className={eyebrowClass}>Approvals</p>
-      {rows.length === 0 ? (
-        <p className="mt-1.5 text-xs text-[var(--sparrow-faint)]">
-          Waiting for an agent to enroll with this invite… When one does, it shows up here for you
-          to approve.
-        </p>
-      ) : (
-        <ul className="mt-2 flex flex-col gap-2">
-          {rows.map((e) => {
-            const name =
-              e.kind === 'agent'
-                ? (e.proposedName ?? 'agent')
-                : (e.displayName ?? e.email ?? 'person');
-            // The note is free text the requester typed — quote it AS a note.
-            // "via <note>" claimed a provenance nobody ever established (issue
-            // #7); with no note, the age stands alone.
-            const age = formatRelativeTime(e.createdAt);
-            const provenance = e.note ? `note: ${e.note} · ${age}` : age;
-            const outcome = resolved[e.id];
-            const pending = busy[e.id];
-            const err = errored[e.id];
-            return (
-              <li
-                key={e.id}
-                className="flex items-center justify-between gap-3 rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-panel-2)] px-3 py-2"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-sm text-[var(--sparrow-text)]">{name}</span>
-                    <span className="shrink-0 rounded border border-[var(--sparrow-border)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--sparrow-muted)]">
-                      {e.kind}
-                    </span>
-                  </div>
-                  {provenance && (
-                    <p className="mt-0.5 truncate text-xs text-[var(--sparrow-muted)]">
-                      {provenance}
-                    </p>
-                  )}
-                  {err && <p className="mt-0.5 text-xs text-[var(--sparrow-danger)]">{err}</p>}
-                </div>
-                <div className="flex shrink-0 items-center gap-1.5">
-                  {outcome ? (
-                    <span
-                      className={`text-xs font-medium ${
-                        outcome === 'approved'
-                          ? 'text-[var(--sparrow-good)]'
-                          : 'text-[var(--sparrow-muted)]'
-                      }`}
-                    >
-                      {outcome === 'approved' ? 'Approved' : 'Denied'}
-                    </span>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        disabled={pending !== undefined}
-                        onClick={() => void act(e.id, 'approved')}
-                        className="rounded-md border border-[var(--sparrow-border-strong)] px-2.5 py-1 text-xs font-medium text-[var(--sparrow-text)] transition-colors hover:border-[var(--sparrow-good)] hover:text-[var(--sparrow-good)] disabled:opacity-50"
-                      >
-                        {pending === 'approved' ? 'Approving…' : 'Approve'}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={pending !== undefined}
-                        onClick={() => void act(e.id, 'denied')}
-                        className="rounded-md border border-[var(--sparrow-border)] px-2.5 py-1 text-xs text-[var(--sparrow-muted)] transition-colors hover:border-[var(--sparrow-danger)] hover:text-[var(--sparrow-danger)] disabled:opacity-50"
-                      >
-                        {pending === 'denied' ? 'Denying…' : 'Deny'}
-                      </button>
-                    </>
-                  )}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
   );
 }

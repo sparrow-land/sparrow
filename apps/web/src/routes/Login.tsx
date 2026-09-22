@@ -1,59 +1,19 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
-import { ApiError } from '@sparrow-land/sdk';
 import { useAuth } from '../lib/auth.js';
 import { useAutoSso } from '../lib/auto-sso.js';
-import { api } from '../lib/client.js';
+import { AuthForm } from '../components/AuthForm.js';
 import { Logo } from '../components/Logo.js';
 import { SiteHeader } from '../components/SiteHeader.js';
 import { MAIN_CONTENT_ID } from '../components/SkipLink.js';
 import { useDocumentTitle, pageTitle } from '../lib/title.js';
 
-/* ------------------------------------------------------------------ *
- * Validation copy
- * ------------------------------------------------------------------ */
-
-/** Field names the API validates, in the words a person would use. */
-const FIELD_LABEL: Record<string, string> = {
-  password: 'Password',
-  email: 'Email',
-  displayName: 'Display name',
-};
-
-/** `displayName` → "Display name"; an unknown field → "Nickname". */
-function fieldLabel(field: string): string {
-  const known = FIELD_LABEL[field];
-  if (known) return known;
-  const spaced = field.replace(/[_-]+/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2');
-  return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
-}
-
 /**
- * Turn the API's verbatim validation text into something a human wrote.
- *
- * `apps/api/src/validate.ts` renders a failed zod parse as `"<path>: <zod
- * message>"`, so a short password arrives at the browser as
- * `password: String must contain at least 8 character(s)` — machine grammar,
- * parenthesised plural and all, on the most-hit error path in the product.
- * We rewrite only shapes we RECOGNISE; anything else (a `forbidden`, a bad
- * password, a server's own sentence) is passed through untouched, because a
- * message we don't understand is exactly the one a person must still see.
+ * The API's validation text, in a human's words. Lives with the form it belongs
+ * to ({@link AuthForm}); re-exported here because this page is where it was
+ * born and where its tests still address it.
  */
-export function humanizeAuthError(raw: string): string {
-  const message = raw.trim();
-
-  const length = /^(\w+): String must contain at (least|most) (\d+) character\(s\)$/.exec(message);
-  if (length) {
-    const field = length[1] ?? '';
-    const bound = length[2] ?? 'least';
-    const n = Number(length[3] ?? 0);
-    return `${fieldLabel(field)} must be at ${bound} ${n} ${n === 1 ? 'character' : 'characters'}.`;
-  }
-
-  if (/^email: Invalid email$/.test(message)) return 'Enter a valid email address.';
-
-  return raw;
-}
+export { humanizeAuthError } from '../components/AuthForm.js';
 
 /**
  * The Login page (`/login`). v3: a normal route, NOT an app-wide wall — the
@@ -89,13 +49,6 @@ export function Login() {
   const view: 'login' | 'signup' = searchParams.get('view') === 'signup' ? 'signup' : 'login';
   useDocumentTitle(pageTitle(view === 'signup' ? 'Create your account' : 'Sign in'));
 
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [orgName, setOrgName] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   const next = searchParams.get('next') || '/';
   // An invitee sent here from the invite landing page (`/invite/:token`) gets a
   // hint tying the sign-in back to the invitation they were following.
@@ -106,7 +59,6 @@ export function Login() {
     const params = new URLSearchParams(searchParams);
     if (nextView === 'signup') params.set('view', 'signup');
     else params.delete('view');
-    setError(null);
     setSearchParams(params, { replace: true });
   }
 
@@ -159,40 +111,6 @@ export function Login() {
     );
   }
 
-  async function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (busy || !email.trim() || !password) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res =
-        view === 'signup'
-          ? await api.signup({
-              email: email.trim(),
-              password,
-              displayName: displayName.trim() || undefined,
-              // Blank (or an instance that is not bootstrapping) sends nothing, and
-              // the server falls back to "{displayName}'s org" exactly as before.
-              orgName: (founding && orgName.trim()) || undefined,
-            })
-          : await api.login({ email: email.trim(), password });
-      await auth.completeSignIn(res.user);
-      navigate(next, { replace: true });
-    } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? humanizeAuthError(err.message)
-          : view === 'signup'
-            ? 'Could not create the account'
-            : 'Could not sign in',
-      );
-      setBusy(false);
-    }
-  }
-
-  const inputClass =
-    'w-full rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-bg)] px-3 py-2.5 text-sm text-[var(--sparrow-text)] outline-none transition-colors placeholder:text-[var(--sparrow-faint)] focus:border-[var(--sparrow-accent)]';
-
   return (
     <div className="flex min-h-full flex-col">
       <SiteHeader />
@@ -224,98 +142,11 @@ export function Login() {
 
           <div className="mt-6 rounded-xl border border-[var(--sparrow-border)] bg-[var(--sparrow-panel)] p-5">
             {credentials && (
-              <form onSubmit={onSubmit} className="flex flex-col gap-3">
-                {view === 'signup' && (
-                  <div>
-                    <label
-                      htmlFor="login-name"
-                      className="mb-1 block text-xs font-medium text-[var(--sparrow-muted)]"
-                    >
-                      Display name
-                    </label>
-                    <input
-                      id="login-name"
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      placeholder="e.g. Jake"
-                      autoComplete="name"
-                      className={inputClass}
-                    />
-                  </div>
-                )}
-                {view === 'signup' && founding && (
-                  <div>
-                    <label
-                      htmlFor="login-org-name"
-                      className="mb-1 block text-xs font-medium text-[var(--sparrow-muted)]"
-                    >
-                      Workspace name
-                    </label>
-                    <input
-                      id="login-org-name"
-                      value={orgName}
-                      onChange={(e) => setOrgName(e.target.value)}
-                      placeholder="e.g. Acme Robotics"
-                      autoComplete="organization"
-                      aria-describedby="login-org-name-hint"
-                      className={inputClass}
-                    />
-                    <p id="login-org-name-hint" className="mt-1 text-xs text-[var(--sparrow-faint)]">
-                      You are the first person here, so this account founds the workspace. Optional
-                      — leave it blank and we will name it after you; you can rename it later.
-                    </p>
-                  </div>
-                )}
-                <div>
-                  <label
-                    htmlFor="login-email"
-                    className="mb-1 block text-xs font-medium text-[var(--sparrow-muted)]"
-                  >
-                    Email
-                  </label>
-                  <input
-                    id="login-email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
-                    autoComplete="email"
-                    autoFocus
-                    className={`mono ${inputClass}`}
-                  />
-                </div>
-                <div>
-                  <label
-                    htmlFor="login-password"
-                    className="mb-1 block text-xs font-medium text-[var(--sparrow-muted)]"
-                  >
-                    Password
-                  </label>
-                  <input
-                    id="login-password"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder={view === 'signup' ? 'At least 8 characters' : '••••••••'}
-                    autoComplete={view === 'signup' ? 'new-password' : 'current-password'}
-                    className={`mono ${inputClass}`}
-                  />
-                </div>
-                {error && <p className="text-sm text-[var(--sparrow-danger)]">{error}</p>}
-                <button
-                  type="submit"
-                  disabled={busy || !email.trim() || !password}
-                  className="mt-1 rounded-md bg-[var(--sparrow-accent)] px-4 py-2.5 text-sm font-semibold text-black transition-opacity hover:opacity-90 disabled:opacity-50"
-                >
-                  {busy
-                    ? view === 'signup'
-                      ? 'Creating account…'
-                      : 'Signing in…'
-                    : view === 'signup'
-                      ? 'Create account'
-                      : 'Sign in'}
-                </button>
-              </form>
+              <AuthForm
+                view={view}
+                founding={founding}
+                onDone={() => navigate(next, { replace: true })}
+              />
             )}
 
             {credentials && oauth.length > 0 && (

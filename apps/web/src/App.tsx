@@ -1,5 +1,5 @@
 import { Routes, Route, Outlet, useParams, Navigate, useLocation, matchPath } from 'react-router-dom';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { OrgRole, OrgSummary } from '@sparrow-land/sdk/types';
 import { AppShell } from './components/AppShell.js';
 import { BareShell } from './components/BareShell.js';
@@ -13,6 +13,7 @@ import { OrgSettings } from './routes/OrgSettings.js';
 import { MyApprovals } from './routes/MyApprovals.js';
 import { MySettings } from './routes/MySettings.js';
 import { Login } from './routes/Login.js';
+import { Onboarding } from './routes/Onboarding.js';
 import { Invite } from './routes/Invite.js';
 import { NotFound } from './routes/NotFound.js';
 import { AvatarGallery } from './routes/AvatarGallery.js';
@@ -27,6 +28,7 @@ import type { CapabilitiesResponse } from '@sparrow-land/sdk/types';
 import { OrgProvider } from './lib/org.js';
 import { WorkspaceProvider } from './lib/workspace.js';
 import { getLastOrg, setLastOrg } from './lib/prefs.js';
+import { useOnboardingStatus } from './lib/onboarding.js';
 import { wire, setScopedMode, activeRoomIdFromPath } from './lib/ids.js';
 import { type Scope, activeOrgForScope } from './lib/scope.js';
 import { api } from './lib/client.js';
@@ -213,6 +215,24 @@ function ScopedRoutes({ scope }: { scope: Scope }) {
   );
 }
 
+/**
+ * The first-run door. A fresh self-hosted instance (`GET /api/v1/onboarding` →
+ * `active`) answers `/` and `/login` with the guided setup instead; every other
+ * instance — populated, dismissed, disabled, hosted — renders the page asked
+ * for. The probe runs ONCE per page load (see `lib/onboarding`), and the beat it
+ * takes renders nothing rather than flashing a sign-in form that is about to be
+ * replaced.
+ *
+ * UNSCOPED TREE ONLY. An org-scoped host is a tenant of something already set
+ * up; `ScopedRoutes` mounts neither this gate nor `/onboarding`.
+ */
+function OnboardingGate({ children }: { children: ReactNode }) {
+  const status = useOnboardingStatus();
+  if (status === null) return null;
+  if (status.active) return <Navigate to="/onboarding" replace />;
+  return <>{children}</>;
+}
+
 function AppRoutes({ scope }: { scope: Scope | null }) {
   const auth = useAuth();
 
@@ -244,7 +264,15 @@ function AppRoutes({ scope }: { scope: Scope | null }) {
     <Routes>
       {import.meta.env.DEV && <Route path="/__dev/avatars" element={<AvatarGallery />} />}
       {import.meta.env.DEV && <Route path="/__dev/avatar-motion" element={<AvatarMotion />} />}
-      <Route path="/" element={<Home />} />
+      <Route
+        path="/"
+        element={
+          <OnboardingGate>
+            <Home />
+          </OnboardingGate>
+        }
+      />
+      <Route path="/onboarding" element={<Onboarding />} />
       <Route path="/welcome" element={<Welcome />} />
       <Route path="/org/:orgId" element={<OrgLayout />}>
         <Route index element={<OrgHome />} />
@@ -259,7 +287,14 @@ function AppRoutes({ scope }: { scope: Scope | null }) {
         <Route path="invites" element={<Navigate to="/me/approvals" replace />} />
         <Route path="settings" element={<MySettings />} />
       </Route>
-      <Route path="/login" element={<Login />} />
+      <Route
+        path="/login"
+        element={
+          <OnboardingGate>
+            <Login />
+          </OnboardingGate>
+        }
+      />
       <Route path="/invite/:token" element={<Invite />} />
       {docsRoutes}
       <Route path="*" element={<NotFound />} />
