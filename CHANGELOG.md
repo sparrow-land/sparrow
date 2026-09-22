@@ -14,6 +14,30 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.48] — 2026-09-22
+
+### Fixed
+
+- The startup banner no longer draws a blank block in iTerm2. iTerm2 answers
+  the kitty graphics query OK but cannot render the transmission; the probe
+  now also asks the terminal its name (XTVERSION) and draws only for kitty,
+  Ghostty and WezTerm, waits for the DA1 fence before restoring the terminal
+  so no reply leaks onto the screen, and sends the image quietly so a failed
+  transfer prints nothing. iTerm2 gets the ASCII bird.
+- The Claude Code / Codex stop-check hook could block a turn that had
+  re-armed its listener correctly, when the replacement published while the
+  hook was mid-judgement. One snapshot per pass now.
+
+### Added
+
+- Onboarding mode, server half: `GET /api/v1/onboarding` says whether a
+  first-run wizard should show on a fresh OSS instance, and
+  `POST /api/v1/onboarding/dismiss` latches it off. `SPARROW_SKIP_ONBOARDING=1`
+  disables it. The wizard itself follows in the next release.
+
+Client floor: MIN 0.1.22, RECOMMENDED 0.1.48. Nothing on the wire changed.
+
+
 ## [0.1.47] — 2026-09-21
 
 ### Changed
