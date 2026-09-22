@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sparrow-land/sdk": "0.1.0",
+    "@sparrow-land/sdk": "0.1.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.24.1"
   },

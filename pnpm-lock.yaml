@@ -23,8 +23,8 @@ importers:
         specifier: ^11.3.0
         version: 11.3.0
       '@sparrow-land/sdk':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       better-sqlite3:
         specifier: ^12.2.0
         version: 12.11.1
@@ -72,8 +72,8 @@ importers:
   apps/cli:
     dependencies:
       '@sparrow-land/sdk':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@sparrow/skill':
         specifier: workspace:*
         version: link:../../packages/skill
@@ -106,8 +106,8 @@ importers:
   apps/mail-gateway:
     dependencies:
       '@sparrow-land/sdk':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@sparrow/mail-parse':
         specifier: workspace:*
         version: link:../../packages/mail-parse
@@ -149,8 +149,8 @@ importers:
         specifier: ^1.30.0
         version: 1.30.0(zod@3.25.76)
       '@sparrow-land/sdk':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       zod:
         specifier: ^3.24.1
         version: 3.25.76
@@ -174,8 +174,8 @@ importers:
   apps/web:
     dependencies:
       '@sparrow-land/sdk':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       lucide-react:
         specifier: ^1.33.0
         version: 1.33.0(react@18.3.1)
@@ -238,8 +238,8 @@ importers:
   packages/mail-parse:
     dependencies:
       '@sparrow-land/sdk':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       mailparser:
         specifier: ^3.9.19
         version: 3.9.19
@@ -260,8 +260,8 @@ importers:
   packages/skill:
     devDependencies:
       '@sparrow-land/sdk':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@types/node':
         specifier: ^22.10.5
         version: 22.20.1
@@ -960,8 +960,8 @@ packages:
     peerDependencies:
       selderee: ~0.12.0
 
-  '@sparrow-land/sdk@0.1.0':
-    resolution: {integrity: sha512-3oSCMWoiyzBCg4rugCrD3YeHFheFlMciU+8NlIsBfIiGOU4UjT3gXrO6CVNCXgoCCnEPevgCAlJDffuLF4DQuQ==}
+  '@sparrow-land/sdk@0.1.1':
+    resolution: {integrity: sha512-I5HS7qDzqvlVETvxfWuSnqWlwal7jHa9cMusCMoHBD/rE4qzjobYgOAtl+jONYdHpO4evvMJrac67mpdZic4vQ==}
     engines: {node: '>=22'}
 
   '@standard-schema/spec@1.1.0':
@@ -3546,7 +3546,7 @@ snapshots:
       domhandler: 5.0.3
       selderee: 0.12.0
 
-  '@sparrow-land/sdk@0.1.0':
+  '@sparrow-land/sdk@0.1.1':
     dependencies:
       nanoid: 5.1.16
       zod: 3.25.76

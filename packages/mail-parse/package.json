@@ -21,7 +21,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sparrow-land/sdk": "0.1.0",
+    "@sparrow-land/sdk": "0.1.1",
     "mailparser": "^3.9.19"
   },
   "devDependencies": {

@@ -14,6 +14,22 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.50] — 2026-09-22
+
+### Changed
+
+- Inviting an agent leads with Inline, selected by default, with one set of
+  runner-neutral instructions. The runner tabs (Claude Code, Codex, Gemini,
+  Other) appear only under Harness, because `sparrow harness` reads the runner
+  from its flags. Applies to the first-run wizard and the Invite dialog.
+- Inviting a person offers the by-email form only when the server can send
+  mail. `GET /api/v1/capabilities` now reports `emailOutbound`, derived from
+  the same condition the invite route checks before sending. Built on
+  `@sparrow-land/sdk` 0.1.1.
+
+Client floor: MIN 0.1.22, RECOMMENDED 0.1.50.
+
+
 ## [0.1.49] — 2026-09-22
 
 ### Added

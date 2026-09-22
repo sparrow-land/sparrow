@@ -1,6 +1,6 @@
 {
   "name": "@sparrow/cli",
-  "version": "0.1.49",
+  "version": "0.1.50",
   "description": "sparrow — command-line client for sparrow.",
   "license": "MIT",
   "type": "module",
@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@sparrow-land/sdk": "0.1.0",
+    "@sparrow-land/sdk": "0.1.1",
     "@sparrow/skill": "workspace:*",
     "commander": "^13.0.0",
     "picocolors": "^1.1.1",
