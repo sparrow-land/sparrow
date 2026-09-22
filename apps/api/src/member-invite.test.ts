@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { eq } from 'drizzle-orm';
 import {
   makeTestServer,
+  makeEmailServer,
   auth,
   signup,
   firstOrgId,
@@ -190,5 +191,76 @@ describe('POST /orgs/:orgId/members — fused low-friction invite', () => {
     });
     expect(res.statusCode).toBe(201);
     expect(res.json().inviteUrl).toContain(`${slug}.example.com/invite/`);
+  });
+  /**
+   * The UI must not OFFER to email an invitation on an instance that cannot send
+   * one. `GET /capabilities` therefore advertises `emailOutbound` — true iff
+   * `email.webhookUrl` is configured, which is exactly the condition this route
+   * checks before it tries to send. The tests live here, next to the route whose
+   * behaviour the flag promises, so the two cannot drift.
+   */
+  describe('capabilities.emailOutbound — can this instance send the invitation?', () => {
+    it('false with no webhook configured, and the route then emails nobody', async () => {
+      const caps = await ts.app.inject({ method: 'GET', url: '/api/v1/capabilities' });
+      expect(caps.json().emailOutbound).toBe(false);
+
+      const owner = await signup(ts.app, { email: 'owner4@acme.com', displayName: 'Owner' });
+      const orgId = await firstOrgId(ts.app, owner.token);
+      const res = await addMember(ts, owner.token, orgId, 'nomail@acme.com');
+      expect(res.statusCode).toBe(201);
+      expect(res.json().emailSent).toBe(false);
+    });
+
+    it('true once the webhook is configured — the same condition the route uses', async () => {
+      hook = await startHook(200);
+      const owner = await signup(ts.app, { email: 'owner5@acme.com', displayName: 'Owner' });
+      const orgId = await firstOrgId(ts.app, owner.token);
+
+      const before = await ts.app.inject({ method: 'GET', url: '/api/v1/capabilities' });
+      expect(before.json().emailOutbound).toBe(false);
+
+      await configureHook(ts, hook.url, 'hook-token');
+
+      const after = await ts.app.inject({ method: 'GET', url: '/api/v1/capabilities' });
+      expect(after.json().emailOutbound).toBe(true);
+      const res = await addMember(ts, owner.token, orgId, 'mailed@acme.com');
+      expect(res.json().emailSent).toBe(true);
+      expect(hook.calls).toHaveLength(1);
+    });
+
+    it('a whitespace-only webhook URL is not a webhook', async () => {
+      await ts.app.inject({
+        method: 'PUT',
+        url: '/api/v1/config',
+        headers: adminHeader,
+        payload: { values: { 'email.webhookUrl': '   ' } },
+      });
+      const caps = await ts.app.inject({ method: 'GET', url: '/api/v1/capabilities' });
+      expect(caps.json().emailOutbound).toBe(false);
+    });
+
+    /**
+     * It is NOT `capabilities.email`. The medium needs `EMAIL_ORG_SUFFIX` and a
+     * registered provider; sending an invitation needs a webhook. The `fake`
+     * provider runs the whole medium with nothing to relay through — medium on,
+     * outbound off — and a plain instance with a webhook and no suffix is the
+     * mirror image.
+     */
+    it('is independent of the email medium in both directions', async () => {
+      const mediumOn = await makeEmailServer();
+      try {
+        const caps = await mediumOn.app.inject({ method: 'GET', url: '/api/v1/capabilities' });
+        expect(caps.json().email).toBe(true);
+        expect(caps.json().emailOutbound).toBe(false);
+      } finally {
+        await mediumOn.close();
+      }
+
+      hook = await startHook(200);
+      await configureHook(ts, hook.url, 'hook-token');
+      const caps = await ts.app.inject({ method: 'GET', url: '/api/v1/capabilities' });
+      expect(caps.json().email).toBe(false);
+      expect(caps.json().emailOutbound).toBe(true);
+    });
   });
 });

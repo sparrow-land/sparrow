@@ -174,6 +174,7 @@ function installMedia(getUserMedia?: () => Promise<MediaStream>) {
 function caps(voice: Partial<CapabilitiesResponse['voice']>): CapabilitiesResponse {
   return {
     email: false,
+    emailOutbound: false,
     emailReviewer: false,
     voice: { stt: true, tts: true, sttStreaming: true, ...voice },
     orgHostSuffix: null,

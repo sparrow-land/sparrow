@@ -16,20 +16,22 @@ import {
 } from './InvitePieces.js';
 // One home for what each runtime is and needs — shared with the invite LANDING
 // PAGE, so the two surfaces cannot drift apart on it (see AgentRuntimes).
-import {
-  CodexInlineSteps,
-  INLINE_RUNTIMES,
-  RUNTIMES,
-  RUNTIME_HINT,
-  type InlineRuntime,
-  type Runtime,
-} from './AgentRuntimes.js';
+import { RUNTIMES, RUNTIME_HINT, type Runtime } from './AgentRuntimes.js';
 
 /**
  * "How should the agent connect?" — the whole agent half of an invite, in one
- * component: the harness/inline choice, the runtime tabs, the copyable command
+ * component: the inline/harness choice, the copyable command or invitation
  * carrying THIS instance's live invite, and the approvals list that closes the
  * loop when the agent enrolls.
+ *
+ * INLINE IS THE PREFERRED MODE (Jake, 2026-09-22): it installs nothing, so it is
+ * the left-hand card and the one already chosen. It also asks NO runner
+ * question — the instructions are the same paste whatever agent is open on the
+ * other side. The runner tabs belong to harness alone, and they are a real
+ * question there: `sparrow harness` chooses its runner from FLAGS only, with
+ * `claude -p` as a hard-coded default and no environment probing at all (see
+ * `resolveRunner` in apps/cli harness/command.ts) — so a Codex user who is not
+ * handed `--codex` gets a harness that spawns the wrong binary.
  *
  * Two surfaces render it and must never drift: the {@link InviteDialog}'s agent
  * step, and step 3 of the first-run onboarding wizard (`/onboarding`). The
@@ -91,12 +93,8 @@ export function AgentConnectPanel({
   /** Lead in with "Your first agent." (the dialog's empty-org open). */
   firstAgent?: boolean;
 }) {
-  const [mode, setMode] = useState<LoopMode>('harness');
+  const [mode, setMode] = useState<LoopMode>('inline');
   const [runtime, setRuntime] = useState<Runtime>('claude');
-  // Inline keeps its OWN pick: the two lists are different (the skill installs
-  // for two providers; the harness execs anything), so one shared piece of state
-  // would answer a question the other mode never asked.
-  const [inlineRuntime, setInlineRuntime] = useState<InlineRuntime>('claude');
 
   const code =
     url === null
@@ -125,20 +123,20 @@ export function AgentConnectPanel({
         className="mt-3 grid grid-cols-1 gap-3 min-[480px]:grid-cols-2"
       >
         <ModeCard
-          mode="harness"
-          title="Harness"
-          pill="Needs the CLI"
-          detail="Most reliable. Sparrow's CLI runs the loop and calls your agent for every message."
-          selected={mode === 'harness'}
-          onSelect={() => setMode('harness')}
-        />
-        <ModeCard
           mode="inline"
           title="Inline"
           pill="No install"
           detail="Quickest. Paste the link into an agent you already have open. The agent runs the loop and checks Sparrow when it remembers to."
           selected={mode === 'inline'}
           onSelect={() => setMode('inline')}
+        />
+        <ModeCard
+          mode="harness"
+          title="Harness"
+          pill="Needs the CLI"
+          detail="Most reliable. Sparrow's CLI runs the loop and calls your agent for every message."
+          selected={mode === 'harness'}
+          onSelect={() => setMode('harness')}
         />
       </div>
 
@@ -176,38 +174,17 @@ export function AgentConnectPanel({
           </p>
         </div>
       ) : (
+        /* Inline asks nothing else. The paste is identical on every runner —
+           the agent fetches the URL and the onboarding doc tells IT the rest —
+           so there is no picker here and no per-runner wall of text under it.
+           (The invite LANDING page still teaches Codex's manual trust steps,
+           where the reader is the person actually setting Codex up.) */
         <div className="mt-4">
-          {/* Which agent is open on the other side decides what comes AFTER the
-              paste: on Codex the skill needs a flag and two trust steps only a
-              human can do. Same picker shape as the harness branch above. */}
-          <div
-            role="tablist"
-            aria-label="Inline agent runtime"
-            className="inline-flex flex-wrap rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-bg)] p-0.5 text-xs"
-          >
-            {INLINE_RUNTIMES.map((r) => (
-              <TabButton
-                key={r.id}
-                active={inlineRuntime === r.id}
-                onClick={() => setInlineRuntime(r.id)}
-              >
-                {r.label}
-              </TabButton>
-            ))}
-          </div>
-          <div className="mt-3">
-            <InviteTerminal url={url} error={error} label="invitation" code={code} wrap />
-          </div>
+          <InviteTerminal url={url} error={error} label="invitation" code={code} wrap />
           <p className={`mt-2 ${helperClass}`}>
             Paste this into your agent. It fetches the URL, reads the onboarding doc, asks you for a
             name, and enrolls. Then approve it below.
           </p>
-          {inlineRuntime === 'codex' && (
-            <div className="mt-3 border-t border-[var(--sparrow-border)] pt-3">
-              <p className={eyebrowClass}>Then, on Codex</p>
-              <CodexInlineSteps className={`mt-1.5 ${helperClass}`} />
-            </div>
-          )}
         </div>
       )}
 

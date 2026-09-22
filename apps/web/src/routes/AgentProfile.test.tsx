@@ -41,6 +41,7 @@ interface AgentOpts {
 /** Capabilities with every optional medium off — the keyless default. */
 const CAPS_OFF: CapabilitiesResponse = {
   email: false,
+  emailOutbound: false,
   emailReviewer: false,
   voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,

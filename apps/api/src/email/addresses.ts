@@ -23,6 +23,32 @@ export function emailMediumOn(ctx: AppContext): boolean {
   return !!ctx.config.emailOrgSuffix && ctx.email.provider !== null;
 }
 
+/**
+ * The configured outbound-mail webhook (`email.webhookUrl`), trimmed, or `''`
+ * when there is none. Read at CALL time — the value is admin-settable at
+ * runtime through `PUT /config`, so nothing may cache it.
+ */
+export function outboundWebhookUrl(ctx: AppContext): string {
+  return String(ctx.configStore.get('email.webhookUrl') ?? '').trim();
+}
+
+/**
+ * Whether this instance can SEND mail at all: a webhook is configured.
+ *
+ * Deliberately NOT {@link emailMediumOn}. The medium is agent mailboxes, which
+ * also need `EMAIL_ORG_SUFFIX` and a registered provider; relaying one message
+ * out needs only the webhook. They come apart in both directions — `fake` runs
+ * the medium with nothing to relay through, and a webhook with no suffix relays
+ * mail with the medium off — so a client that gated "invite by email" on the
+ * medium would offer to email on an instance that cannot, and hide the offer on
+ * one that can. This is the exact condition `POST /orgs/:orgId/members` checks
+ * before it tries to send, and `GET /capabilities` advertises it as
+ * `emailOutbound`.
+ */
+export function outboundMailOn(ctx: AppContext): boolean {
+  return outboundWebhookUrl(ctx) !== '';
+}
+
 /** The mail domain of an org: `<slug><EMAIL_ORG_SUFFIX>`, or null with the medium off. */
 export function orgMailDomain(ctx: AppContext, org: Pick<OrgRow, 'slug'>): string | null {
   if (!emailMediumOn(ctx)) return null;

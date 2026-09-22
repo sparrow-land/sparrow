@@ -16,6 +16,11 @@ import { api } from './client.js';
  * its boolean is false; `email` hides every email surface the same way, so a
  * keyless dev stack shows neither.
  *
+ * `emailOutbound` is a fact about the SERVER rather than a medium: whether it can
+ * send mail at all (a webhook is configured). It gates every "we will email
+ * them" offer — the invite-by-email form above all — so an instance that cannot
+ * send never promises to; it is independent of `email`, which is the medium.
+ *
  * `emailReviewer` is not a medium but a fact ABOUT one: whether an automatic
  * reviewer (an LLM judge) is registered here. It gates no surface — it lets org
  * admin state the server's degrade-to-approve rule plainly instead of hedging.
@@ -35,6 +40,7 @@ export type Capabilities = CapabilitiesResponse;
 
 const DEFAULT_CAPABILITIES: Capabilities = {
   email: false,
+  emailOutbound: false,
   emailReviewer: false,
   voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,

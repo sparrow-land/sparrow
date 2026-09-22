@@ -23,6 +23,7 @@ import { json } from './apiStub.js';
 /** Presence is medium-independent: the email medium is off in this fixture. */
 export const CAPS: CapabilitiesResponse = {
   email: false,
+  emailOutbound: false,
   emailReviewer: false,
   voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,

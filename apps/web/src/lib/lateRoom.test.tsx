@@ -30,6 +30,7 @@ import { presenceStore } from '../lib/presenceStore.js';
 
 const CAPS: CapabilitiesResponse = {
   email: false,
+  emailOutbound: false,
   emailReviewer: false,
   voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,

@@ -1741,12 +1741,18 @@ Shapes: lists → `{ items: [...] }`; deletes → `{ ok: true }`.
   `client.minimum`/`client.recommended` are the configured version-gate floors (both
   `null` when unset). Never gated.
 - `GET /api/v1/capabilities` → `200 { voice: { stt: boolean, tts: boolean,
-  sttStreaming: boolean }, email: boolean, emailReviewer: boolean, orgHostSuffix: string | null,
+  sttStreaming: boolean }, email: boolean, emailOutbound: boolean, emailReviewer: boolean,
+  orgHostSuffix: string | null,
   workspaceSwitcher: { directoryUrl, createUrl: string | null } | null }`, no auth.
   The instance-wide feature advertisement:
   booleans derived from registered providers and configured suffixes, never key
   material. `voice.*` follows the registered speech providers (*Voice*); `email` is
-  the email medium's on/off (*Server configuration (env)*); `emailReviewer` is true
+  the email medium's on/off (*Server configuration (env)*); `emailOutbound` is true
+  iff an outbound mail webhook is configured (config `email.webhookUrl`) — the plain
+  ability to SEND, independent of the medium (which also needs `EMAIL_ORG_SUFFIX` and a
+  registered provider), and exactly the condition `POST /orgs/:orgId/members` checks
+  before it emails an invitation, so a client offers “invite by email” only where the
+  invitation would actually go out; `emailReviewer` is true
   iff an `LlmJudge` is registered, so a client can tell an org admin that a `judge`
   policy will degrade to approve here instead of guessing; `orgHostSuffix` is the
   operator's `ORG_HOST_SUFFIX` (e.g. `.example.com`) or `null`, so the SPA can detect
@@ -4971,6 +4977,12 @@ completely — no disabled controls, no "unavailable" placeholders, no empty sta
 
 Turning email on later needs no client change: capabilities flips, every surface
 appears. The same rule already governs voice controls and stays as written.
+
+`emailOutbound` gates one thing of its own: the **invite by email** form (the invite
+dialog's person step and the first-run wizard's humans step). With it false the panel
+offers only the share-a-link path — an instance with no mail webhook must not offer to
+send an invitation it cannot send. The link path is always there, whichever way the
+boolean falls.
 
 ## Monorepo layout
 

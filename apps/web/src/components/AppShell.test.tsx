@@ -275,6 +275,20 @@ function renderShell(caps?: CapabilitiesResponse, activeRoomId: string | null = 
   );
 }
 
+/**
+ * Instance capabilities for the invite tests. `emailOutbound` is what the
+ * by-email form is gated on — whether this server can actually SEND an
+ * invitation — so a test that wants that form has to say the server can.
+ */
+const CAPS_MAIL: CapabilitiesResponse = {
+  email: false,
+  emailOutbound: true,
+  emailReviewer: false,
+  voice: { stt: false, tts: false, sttStreaming: false },
+  orgHostSuffix: null,
+  workspaceSwitcher: null,
+};
+
 describe('AppShell — unified invite UX', () => {
   let rec: Recorder;
   beforeEach(() => {
@@ -337,6 +351,14 @@ describe('AppShell — unified invite UX', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: /an agent/i }));
     expect(await within(dialog).findByText('Your first agent.')).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: /back/i })).toBeInTheDocument();
+    // Inline is the default mode, so the invitation to paste is what shows first.
+    await waitFor(() =>
+      expect(
+        within(dialog).getByText(/sparrow enroll https:\/\/sparrow\.example\.com\/invite\/ivk_/),
+      ).toBeInTheDocument(),
+    );
+    // The harness command names the same invite.
+    await userEvent.click(within(dialog).getByRole('radio', { name: /harness/i }));
     await waitFor(() =>
       expect(
         within(dialog).getByText(/--url https:\/\/sparrow\.example\.com\/invite\/ivk_secrettoken/),
@@ -347,7 +369,7 @@ describe('AppShell — unified invite UX', () => {
 
   it('HUMANS + opens the dialog on the person step: by-email form + a shareable link', async () => {
     useFetch(shellFetchMock({ invitesWho: 'members', role: 'owner' }, rec));
-    renderShell();
+    renderShell(CAPS_MAIL);
     // The HUMANS section header "+" (aria-label "Invite a person").
     await userEvent.click(await screen.findByRole('button', { name: /invite a person/i }));
     const dialog = await screen.findByRole('dialog', { name: /invite a person/i });
@@ -377,22 +399,22 @@ describe('AppShell — unified invite UX', () => {
     // this entry point, so no back chip either.
     expect(within(dialog).getByText('Your first agent.')).toBeInTheDocument();
     expect(within(dialog).queryByRole('button', { name: /back/i })).not.toBeInTheDocument();
-    // Harness is the default: the install + harness command, against this invite.
-    // The installer is the canonical one (SPEC: *Canonical public homes*) — the
-    // instance's own origin only carries the invite URL.
-    await waitFor(() =>
-      expect(
-        within(dialog).getByText(/curl -fsSL https:\/\/sparrow\.land\/install\.sh \| sh/),
-      ).toBeInTheDocument(),
-    );
-    // Inline shows the invitation blob instead — the same invite, no second mint.
-    await userEvent.click(within(dialog).getByRole('radio', { name: /inline/i }));
+    // Inline is the default: the invitation blob to paste into an open agent.
     await waitFor(() =>
       expect(
         within(dialog).getByText(/sparrow enroll https:\/\/sparrow\.example\.com\/invite\/ivk_/),
       ).toBeInTheDocument(),
     );
     expect(within(dialog).getByText(/Jake is inviting you to join Acme/)).toBeInTheDocument();
+    // Harness shows the install + harness command instead — the same invite, no
+    // second mint. The installer is the canonical one (SPEC: *Canonical public
+    // homes*); the instance's own origin only carries the invite URL.
+    await userEvent.click(within(dialog).getByRole('radio', { name: /harness/i }));
+    await waitFor(() =>
+      expect(
+        within(dialog).getByText(/curl -fsSL https:\/\/sparrow\.land\/install\.sh \| sh/),
+      ).toBeInTheDocument(),
+    );
     expect(screen.queryByLabelText(/agent name/i)).not.toBeInTheDocument();
     expect(
       rec.calls.filter((c) => c.method === 'POST' && c.url.includes('/orgs/org_1/invites')),
@@ -520,6 +542,7 @@ describe('AppShell — unified invite UX', () => {
   // --- Org identity moved into the leftnav header (change #2 / #3) -----------
   const noSwitcher: CapabilitiesResponse = {
     email: false,
+    emailOutbound: false,
     emailReviewer: false,
     voice: { stt: false, tts: false, sttStreaming: false },
     orgHostSuffix: null,

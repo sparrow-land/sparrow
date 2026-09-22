@@ -29,7 +29,7 @@ import { parse } from '../validate.js';
 import { badGateway, notFound, payloadTooLarge } from '../errors.js';
 import { requireRoomMember } from '../room-helpers.js';
 import { messageInRoom, memberCanReadMessage } from '../message-helpers.js';
-import { emailMediumOn } from '../email/addresses.js';
+import { emailMediumOn, outboundMailOn } from '../email/addresses.js';
 import type { MessageRow } from '../db/schema.js';
 
 /**
@@ -160,6 +160,12 @@ export function registerVoiceRoutes(app: FastifyInstance, ctx: AppContext): void
       // The email medium's on/off. This unauthenticated route — not a `404` from
       // `/me/email/*` — is where a client learns a medium exists.
       email: emailMediumOn(ctx),
+      // Whether this instance can SEND mail (an outbound webhook is configured).
+      // Not the medium: the medium is agent mailboxes (suffix + provider), this
+      // is the plain ability to relay one message out — the exact condition the
+      // invite-by-email route checks. Clients gate every "we will email them"
+      // offer on it, so an instance that cannot send never promises to.
+      emailOutbound: outboundMailOn(ctx),
       // Whether an automatic reviewer exists here. Independent of the medium:
       // a `judge` policy without one degrades to approve, and an org admin is
       // told that plainly rather than the UI guessing (SPEC *Web UI → Org admin*).

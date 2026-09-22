@@ -36,6 +36,8 @@ interface MockOpts {
   signedIn?: boolean;
   /** Captures the parsed `POST /auth/signup` body. */
   onSignup?: (body: Record<string, unknown>) => void;
+  /** What `GET /capabilities` reports for `emailOutbound` (default false). */
+  emailOutbound?: boolean;
 }
 
 interface Recorder {
@@ -107,6 +109,9 @@ function mockFetch(opts: MockOpts = {}, rec: Recorder = { calls: [] }) {
     if (url.includes('/capabilities')) {
       return json({
         email: false,
+        // Whether this instance can SEND mail — the by-email form on step 4 is
+        // gated on it (a keyless instance offers only the link).
+        emailOutbound: opts.emailOutbound ?? false,
         emailReviewer: false,
         voice: { stt: false, tts: false },
         orgHostSuffix: null,
@@ -277,7 +282,6 @@ describe('Onboarding wizard (/onboarding)', () => {
       expect(screen.getByText('How should the agent connect?')).toBeInTheDocument();
       expect(screen.getByRole('radio', { name: /harness/i })).toBeInTheDocument();
       expect(screen.getByRole('radio', { name: /inline/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: 'Claude Code' })).toBeInTheDocument();
       // The live invite really is minted and shown in the command.
       await waitFor(() =>
         expect(document.querySelector('pre.terminal-body')?.textContent ?? '').toContain(
@@ -288,6 +292,40 @@ describe('Onboarding wizard (/onboarding)', () => {
       expect(screen.getByText('Approvals')).toBeInTheDocument();
       expect(screen.getByAltText(/three sparrows carrying letters/i).getAttribute('src')).toBe(
         '/onboarding/agents.png',
+      );
+    });
+
+    /**
+     * The wizard and the in-app invite dialog render the SAME panel, so the
+     * preferred mode is preferred in both: inline is the left-hand card, already
+     * chosen, and it asks no runner question (see AgentConnectPanel).
+     */
+    it('prefers inline: the first card, already chosen, with no runner tabs', async () => {
+      useFetch(mockFetch({}, rec));
+      renderWizard();
+      await walkToAgents();
+      const inline = screen.getByRole('radio', { name: /inline/i });
+      const harness = screen.getByRole('radio', { name: /harness/i });
+      expect(inline).toHaveAttribute('aria-checked', 'true');
+      expect(harness).toHaveAttribute('aria-checked', 'false');
+      expect(
+        inline.compareDocumentPosition(harness) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(screen.queryAllByRole('tab')).toHaveLength(0);
+      expect(bodyText()).not.toMatch(/then, on codex/i);
+      expect(bodyText()).not.toContain('sparrow skill install');
+    });
+
+    it('choosing harness brings back the runner tabs and the CLI command', async () => {
+      useFetch(mockFetch({}, rec));
+      renderWizard();
+      await walkToAgents();
+      await userEvent.click(screen.getByRole('radio', { name: /harness/i }));
+      expect(screen.getByRole('tab', { name: 'Claude Code' })).toBeInTheDocument();
+      await waitFor(() =>
+        expect(document.querySelector('pre.terminal-body')?.textContent ?? '').toContain(
+          'sparrow harness',
+        ),
       );
     });
 
@@ -328,6 +366,31 @@ describe('Onboarding wizard (/onboarding)', () => {
       expect(screen.getByAltText(/holding a letter out to a sparrow/i).getAttribute('src')).toBe(
         '/onboarding/humans.png',
       );
+    });
+
+    /**
+     * Only offer what the server can do: with no outbound mail webhook the
+     * by-email form is gone and the link is the whole step (`emailOutbound`).
+     */
+    it('offers only the link when the instance cannot send mail', async () => {
+      useFetch(mockFetch({ emailOutbound: false }, rec));
+      renderWizard();
+      await walkToAgents();
+      await userEvent.click(screen.getByRole('button', { name: /^next$/i }));
+      await screen.findByRole('heading', { name: /humans are welcome too/i });
+      await waitFor(() => expect(document.body.textContent ?? '').toContain(INVITE_URL));
+      expect(screen.queryByLabelText(/invite by email/i)).not.toBeInTheDocument();
+      expect(screen.getByText('Share a link')).toBeInTheDocument();
+    });
+
+    it('offers the by-email form once the instance CAN send mail', async () => {
+      useFetch(mockFetch({ emailOutbound: true }, rec));
+      renderWizard();
+      await walkToAgents();
+      await userEvent.click(screen.getByRole('button', { name: /^next$/i }));
+      await screen.findByRole('heading', { name: /humans are welcome too/i });
+      expect(await screen.findByLabelText(/invite by email/i)).toBeInTheDocument();
+      expect(screen.getByText('Or share a link')).toBeInTheDocument();
     });
 
     it('Finish lands in the workspace', async () => {

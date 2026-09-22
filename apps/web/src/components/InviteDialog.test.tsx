@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { AuthProvider } from '../lib/auth.js';
+import { CapabilitiesProvider, type Capabilities } from '../lib/capabilities.js';
 import { OrgProvider } from '../lib/org.js';
 import { WorkspaceProvider } from '../lib/workspace.js';
 import { api } from '../lib/client.js';
@@ -146,25 +147,44 @@ function mockFetch(opts: MockOpts = {}, rec: Recorder = { calls: [] }) {
 
 type DialogProps = Partial<React.ComponentProps<typeof InviteDialog>>;
 
-function renderDialog(props: DialogProps = {}) {
+/**
+ * Instance capabilities the dialog renders under. `emailOutbound` is the one
+ * that matters here: it is whether this server can actually SEND an invitation
+ * (a mail webhook is configured), and the by-email form is gated on it — a
+ * keyless instance offers only the link.
+ */
+function caps(emailOutbound: boolean): Capabilities {
+  return {
+    email: false,
+    emailOutbound,
+    emailReviewer: false,
+    voice: { stt: false, tts: false, sttStreaming: false },
+    orgHostSuffix: null,
+    workspaceSwitcher: null,
+  };
+}
+
+function renderDialog(props: DialogProps = {}, opts: { emailOutbound?: boolean } = {}) {
   const onClose = vi.fn();
   const tree = (extra: DialogProps) => (
     <MemoryRouter initialEntries={[`/org/${ORG_ID}`]}>
       <AuthProvider>
-        <OrgProvider orgId={ORG_ID}>
-          <WorkspaceProvider activeRoomId={null}>
-            <InviteDialog
-              orgId={ORG_ID}
-              orgName="Acme"
-              inviterName="Jake"
-              canByEmail
-              hasAgents
-              onClose={onClose}
-              {...props}
-              {...extra}
-            />
-          </WorkspaceProvider>
-        </OrgProvider>
+        <CapabilitiesProvider initial={caps(opts.emailOutbound ?? true)}>
+          <OrgProvider orgId={ORG_ID}>
+            <WorkspaceProvider activeRoomId={null}>
+              <InviteDialog
+                orgId={ORG_ID}
+                orgName="Acme"
+                inviterName="Jake"
+                canByEmail
+                hasAgents
+                onClose={onClose}
+                {...props}
+                {...extra}
+              />
+            </WorkspaceProvider>
+          </OrgProvider>
+        </CapabilitiesProvider>
       </AuthProvider>
     </MemoryRouter>
   );
@@ -359,18 +379,75 @@ describe('InviteDialog', () => {
       expect(await screen.findByText(INVITE_URL)).toBeInTheDocument();
       expect(screen.queryByLabelText(/invite by email/i)).not.toBeInTheDocument();
     });
+
+    /**
+     * An instance with no outbound mail webhook cannot send an invitation, so it
+     * must not OFFER to: `capabilities.emailOutbound` is exactly the condition
+     * `POST /orgs/:id/members` checks before it tries. Admin rights are the other
+     * half — both are required, and the link path is there either way.
+     */
+    it('hides the by-email form when the instance cannot send mail, keeping the link', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'person' }, { emailOutbound: false });
+      expect(await screen.findByText(INVITE_URL)).toBeInTheDocument();
+      expect(screen.queryByLabelText(/invite by email/i)).not.toBeInTheDocument();
+      // No "Or share a link" either — the link is the only path, so it is THE heading.
+      expect(screen.getByText('Share a link')).toBeInTheDocument();
+      expect(screen.queryByText('Or share a link')).not.toBeInTheDocument();
+    });
+
+    it('offers the by-email form when the instance CAN send mail', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'person' }, { emailOutbound: true });
+      expect(await screen.findByLabelText(/invite by email/i)).toBeInTheDocument();
+      expect(screen.getByText('Or share a link')).toBeInTheDocument();
+      expect(await screen.findByText(INVITE_URL)).toBeInTheDocument();
+      // The form is only shown where mail works, so it promises plainly instead
+      // of hedging "if email is set up" — the reader cannot act on that hedge.
+      expect(bodyText()).toContain('We’ll email them an invitation');
+      expect(bodyText()).not.toContain('if email is set up');
+    });
   });
 
   describe('AGENT step', () => {
-    it('selects harness by default and shows the install + harness command', async () => {
+    /**
+     * INLINE is the preferred mode (Jake, 2026-09-22): it needs no install, so it
+     * is the left-hand card and the one already chosen. Harness is the deliberate
+     * second choice, one click away.
+     */
+    it('selects INLINE by default and shows the invitation to paste', async () => {
       useFetch(mockFetch({}, rec));
       renderDialog({ initialStep: 'agent' });
 
-      expect(await screen.findByRole('radio', { name: /harness/i })).toHaveAttribute(
+      expect(await screen.findByRole('radio', { name: /inline/i })).toHaveAttribute(
         'aria-checked',
         'true',
       );
-      expect(screen.getByRole('radio', { name: /inline/i })).toHaveAttribute('aria-checked', 'false');
+      expect(screen.getByRole('radio', { name: /harness/i })).toHaveAttribute(
+        'aria-checked',
+        'false',
+      );
+
+      const blob = buildInviteBlob({ inviterName: 'Jake', orgName: 'Acme', url: INVITE_URL });
+      await waitFor(() => expect(terminalText()).toContain(blob));
+      expect(terminalText()).not.toContain('curl -fsSL');
+      expect(screen.getByText(/paste this into your agent/i)).toBeInTheDocument();
+    });
+
+    it('puts the inline card FIRST — the preferred mode is the one on the left', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'agent' });
+      const inline = await screen.findByRole('radio', { name: /inline/i });
+      const harness = screen.getByRole('radio', { name: /harness/i });
+      expect(
+        inline.compareDocumentPosition(harness) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+
+    it('choosing harness shows the install + harness command', async () => {
+      useFetch(mockFetch({}, rec));
+      renderDialog({ initialStep: 'agent' });
+      await userEvent.click(await screen.findByRole('radio', { name: /harness/i }));
 
       await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
       const text = terminalText();
@@ -415,9 +492,10 @@ describe('InviteDialog', () => {
       expect(within(inline).getByText(/no install/i)).toBeInTheDocument();
     });
 
-    it('switching to inline swaps the harness command for the invitation blob', async () => {
+    it('switching back to inline swaps the harness command for the invitation blob', async () => {
       useFetch(mockFetch({}, rec));
       renderDialog({ initialStep: 'agent' });
+      await userEvent.click(await screen.findByRole('radio', { name: /harness/i }));
       await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
 
       await userEvent.click(screen.getByRole('radio', { name: /inline/i }));
@@ -429,90 +507,58 @@ describe('InviteDialog', () => {
     });
 
     /**
-     * The INLINE branch stopped being Claude-Code-only when the sparrow skill
-     * grew a Codex adapter: handing a Codex user Claude-flavoured instructions
-     * is handing them the wrong ones. Same picker pattern as harness.
+     * INLINE INSTRUCTIONS ARE RUNNER-INDEPENDENT (Jake, 2026-09-22). The paste is
+     * the same paste whatever is open on the other side, so the panel asks no
+     * runner question in inline mode and carries no per-runner wall of text: one
+     * set of instructions — the link, and what to do with it. (The invite LANDING
+     * page still teaches Codex's manual trust steps; see routes/Invite.test.tsx.)
      */
-    it('the inline branch picks a runtime too — Claude Code and Codex, Claude first', async () => {
+    it('inline offers NO runner choice and no runner-specific copy', async () => {
       useFetch(mockFetch({}, rec));
       renderDialog({ initialStep: 'agent' });
-      await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
-      await userEvent.click(screen.getByRole('radio', { name: /inline/i }));
-
-      const tabs = screen.getAllByRole('tab').map((t) => t.textContent);
-      expect(tabs).toEqual(['Claude Code', 'Codex']);
-      expect(screen.getByRole('tab', { name: 'Claude Code' })).toHaveAttribute(
-        'aria-selected',
-        'true',
-      );
-      // Claude Code inline is exactly what it always was — the blob, nothing else.
       const blob = buildInviteBlob({ inviterName: 'Jake', orgName: 'Acme', url: INVITE_URL });
-      expect(terminalText()).toContain(blob);
+      await waitFor(() => expect(terminalText()).toContain(blob));
+
+      expect(screen.queryAllByRole('tab')).toHaveLength(0);
+      expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+      const text = bodyText();
+      expect(text).not.toMatch(/then, on codex/i);
+      expect(text).not.toContain('sparrow skill install');
+      expect(text).not.toContain('sparrow skill verify');
+      expect(text).not.toContain('--dangerously-bypass-hook-trust');
+      expect(text).not.toContain('CODEX_THREAD_ID');
+      // The one caption stays, and it names no runner.
       expect(screen.getByText(/paste this into your agent/i)).toBeInTheDocument();
-      expect(bodyText()).not.toContain('sparrow skill install --codex');
     });
 
     /**
-     * Live-verified against codex-cli 0.153.3: project-scoped `.codex/` files are
-     * SILENTLY ignored until the project is trusted, and hooks need per-hook trust
-     * on top of that. Neither step is something the installer can do, and neither
-     * failure says anything — so both, plus the verify that proves the hooks
-     * really fire, have to be on this surface.
+     * `sparrow harness` picks its runner from FLAGS only — `claude -p` is a
+     * hard-coded default and nothing probes the environment (apps/cli
+     * harness/command.ts `resolveRunner`). So the runner question is real here,
+     * and only here.
      */
-    it('Codex inline names the install, both manual trust steps, and verify', async () => {
+    it('the runner tabs exist only under harness', async () => {
       useFetch(mockFetch({}, rec));
       renderDialog({ initialStep: 'agent' });
-      await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
+      await screen.findByRole('radio', { name: /harness/i });
+      expect(screen.queryAllByRole('tab')).toHaveLength(0);
+
+      await userEvent.click(screen.getByRole('radio', { name: /harness/i }));
+      expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+        'Claude Code',
+        'Codex',
+        'Gemini',
+        'Other',
+      ]);
+
       await userEvent.click(screen.getByRole('radio', { name: /inline/i }));
-      await userEvent.click(screen.getByRole('tab', { name: 'Codex' }));
-
-      const text = bodyText();
-      // What the install writes.
-      expect(text).toContain('sparrow skill install --codex');
-      expect(text).toContain('unbounded');
-      expect(text).toContain('sparrow await');
-      expect(text).toContain('426');
-      expect(text).not.toContain('sparrow await --timeout 900');
-      expect(text).toContain('CODEX_THREAD_ID');
-      expect(text).toMatch(/process exit by itself does not wake Codex/i);
-      expect(text).toContain('.agents/skills/sparrow/SKILL.md');
-      expect(text).toContain('$sparrow');
-      expect(text).toContain('AGENTS.md');
-      expect(text).toContain('.codex/hooks.json');
-      expect(text).toContain('.codex/config.toml');
-      // (a) trust the project.
-      expect(text).toMatch(/trust this folder/i);
-      expect(text).toContain('~/.codex/config.toml');
-      expect(text).toContain('trust_level = "trusted"');
-      // (b) trust the hooks.
-      expect(text).toContain('/hooks');
-      expect(text).toContain('--dangerously-bypass-hook-trust');
-      // Why they matter, and the proof that replaces "the files are there".
-      expect(text).toMatch(/never fire/i);
-      expect(text).toMatch(/no error message/i);
-      expect(text).toContain('sparrow skill verify --codex');
-      expect(text).toContain('codex-cli 0.153.3');
-      // The paste-this blob is still the first move.
-      const blob = buildInviteBlob({ inviterName: 'Jake', orgName: 'Acme', url: INVITE_URL });
-      expect(terminalText()).toContain(blob);
-    });
-
-    it('switching the inline runtime back to Claude Code drops the Codex steps', async () => {
-      useFetch(mockFetch({}, rec));
-      renderDialog({ initialStep: 'agent' });
-      await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
-      await userEvent.click(screen.getByRole('radio', { name: /inline/i }));
-      await userEvent.click(screen.getByRole('tab', { name: 'Codex' }));
-      expect(bodyText()).toContain('sparrow skill install --codex');
-
-      await userEvent.click(screen.getByRole('tab', { name: 'Claude Code' }));
-      expect(bodyText()).not.toContain('--codex');
-      expect(bodyText()).not.toContain('sparrow skill verify');
+      expect(screen.queryAllByRole('tab')).toHaveLength(0);
     });
 
     it('the runtime picker changes the harness command', async () => {
       useFetch(mockFetch({}, rec));
       renderDialog({ initialStep: 'agent' });
+      await userEvent.click(await screen.findByRole('radio', { name: /harness/i }));
       await waitFor(() => expect(terminalText()).toContain('sparrow harness'));
       // Claude Code is the default: no runner flag.
       expect(terminalText()).not.toContain('--codex');
@@ -532,6 +578,7 @@ describe('InviteDialog', () => {
     it('the option hint under the command is per-runtime, never a Claude flag on Codex', async () => {
       useFetch(mockFetch({}, rec));
       renderDialog({ initialStep: 'agent' });
+      await userEvent.click(await screen.findByRole('radio', { name: /harness/i }));
       const hint = (): string =>
         screen.getByText(/sets the working folder/i).textContent ?? '';
       await waitFor(() => expect(hint()).toContain('--model sonnet'));
@@ -551,9 +598,9 @@ describe('InviteDialog', () => {
       useFetch(f);
       renderDialog({ initialStep: 'agent' });
       await waitFor(() => expect(terminalText()).toContain(INVITE_URL));
-      await userEvent.click(screen.getByRole('radio', { name: /inline/i }));
-      await waitFor(() => expect(terminalText()).toContain(INVITE_URL));
       await userEvent.click(screen.getByRole('radio', { name: /harness/i }));
+      await waitFor(() => expect(terminalText()).toContain(INVITE_URL));
+      await userEvent.click(screen.getByRole('radio', { name: /inline/i }));
       await waitFor(() => expect(terminalText()).toContain(INVITE_URL));
       expect(invitesMinted(f)).toBe(1);
     });

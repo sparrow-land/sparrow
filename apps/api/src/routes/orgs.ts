@@ -25,6 +25,7 @@ import {
 import type { AppContext } from '../context.js';
 import { agents, humans, orgs, orgMemberships } from '../db/schema.js';
 import { agentEmailAddress } from '../agent-helpers.js';
+import { outboundWebhookUrl } from '../email/addresses.js';
 import { parse } from '../validate.js';
 import { conflict, forbidden, notFound } from '../errors.js';
 import {
@@ -228,10 +229,12 @@ export function registerOrgRoutes(app: FastifyInstance, ctx: AppContext): void {
     const inviteUrl = `${origin}/invite/${token}`;
 
     // Best-effort invitation email (never fails the request). Sent only when an
-    // email webhook is configured; `emailSent` reflects the hook result.
+    // email webhook is configured; `emailSent` reflects the hook result. The
+    // predicate is SHARED with `GET /capabilities` (`emailOutbound`), which is
+    // what the UI gates its by-email form on — the offer and the send must agree.
     let emailSent = false;
-    const webhookUrl = String(ctx.configStore.get('email.webhookUrl') ?? '');
-    if (webhookUrl.trim()) {
+    const webhookUrl = outboundWebhookUrl(ctx);
+    if (webhookUrl) {
       const { subject, text, html } = renderInviteEmail({
         inviterName: caller.displayName,
         orgName: org.name,

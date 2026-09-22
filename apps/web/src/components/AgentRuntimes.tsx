@@ -11,9 +11,18 @@ import type { ReactNode } from 'react';
  *
  * There are two lists because the two loop modes really do differ:
  *  - HARNESS: sparrow's CLI spawns the runner, so anything it can exec belongs
- *    (Claude Code, Codex, Gemini, or your own command).
+ *    (Claude Code, Codex, Gemini, or your own command). The question is REAL:
+ *    `sparrow harness` reads its runner off the flags with `claude -p` as a
+ *    hard-coded default and probes nothing about the environment (`resolveRunner`
+ *    in apps/cli harness/command.ts), so an unflagged harness spawns `claude`
+ *    whatever else is installed. Both invite surfaces ask it.
  *  - INLINE: the agent holds its own loop and the sparrow SKILL is what keeps it
- *    honest — so the list is exactly the providers the skill installs for.
+ *    honest — so the list is exactly the providers the skill installs for. Only
+ *    the invite LANDING PAGE asks this one: its reader is the person sitting in
+ *    front of Codex, who needs the trust steps below. The in-app panel (invite
+ *    dialog + first-run wizard) deliberately asks NO runner question in inline
+ *    mode — the paste is identical everywhere and the onboarding doc the agent
+ *    fetches carries the rest (Jake, 2026-09-22).
  */
 
 /** Which runner the harness spawns; only changes one flag on the command. */
@@ -59,8 +68,9 @@ function C({ children }: { children: ReactNode }) {
 }
 
 /**
- * What an inline agent on CODEX has to do after it enrols — the same four steps
- * on every surface that offers the Codex inline path.
+ * What an inline agent on CODEX has to do after it enrols — the steps the invite
+ * LANDING PAGE shows when its reader picks Codex (the only surface that offers
+ * the Codex inline path now).
  *
  * Steps 2 and 3 are the whole reason this component exists. Live-verified
  * against codex-cli 0.153.3: a project's `.codex/` files are SILENTLY ignored

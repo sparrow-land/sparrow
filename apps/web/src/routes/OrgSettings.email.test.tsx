@@ -20,6 +20,7 @@ import { OrgSettings } from './OrgSettings.js';
 
 const CAPS_ON: CapabilitiesResponse = {
   email: true,
+  emailOutbound: false,
   emailReviewer: false,
   voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,

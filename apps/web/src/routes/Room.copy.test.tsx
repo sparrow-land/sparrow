@@ -15,6 +15,7 @@ const NOW = Date.parse('2026-08-20T17:10:00Z');
 
 const CAPS: CapabilitiesResponse = {
   email: false,
+  emailOutbound: false,
   emailReviewer: false,
   voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,

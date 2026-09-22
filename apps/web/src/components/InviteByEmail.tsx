@@ -3,6 +3,7 @@ import { Check } from 'lucide-react';
 import type { AddOrgMemberResponse, OrgRole } from '@sparrow-land/sdk/types';
 import { ApiError } from '@sparrow-land/sdk';
 import { api } from '../lib/client.js';
+import { useCapabilities } from '../lib/capabilities.js';
 import { Terminal } from './Terminal.js';
 
 const inputClass =
@@ -21,6 +22,11 @@ const primaryBtn =
  * On success it confirms the outcome (emailed vs. link-only), shows the copyable
  * link, and offers an "Invite another" reset so several people can be added
  * back-to-back. `onInvited` lets a host refresh a roster after each add.
+ *
+ * The blurb follows `capabilities.emailOutbound`: where this instance can send,
+ * it says so plainly; where it cannot (org admin still offers the form there —
+ * adding the member and handing back a link is the point) it keeps the hedge
+ * rather than promising mail that will not go out.
  */
 export function InviteByEmail({
   orgId,
@@ -37,6 +43,7 @@ export function InviteByEmail({
     null,
   );
   const emailRef = useRef<HTMLInputElement>(null);
+  const canSendMail = useCapabilities().emailOutbound;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -82,8 +89,8 @@ export function InviteByEmail({
         Invite by email
       </label>
       <p className="mt-1 text-xs text-[var(--sparrow-faint)]">
-        They&rsquo;re added right away. We&rsquo;ll email them an invitation if email is set up, and
-        you always get a link to share.
+        They&rsquo;re added right away. We&rsquo;ll email them an invitation
+        {canSendMail ? '' : ' if email is set up'}, and you always get a link to share.
       </p>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <input

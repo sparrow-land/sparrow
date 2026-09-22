@@ -69,6 +69,7 @@ const PROJECT_ROOM: RoomResource = { ...DM_ROOM, id: 'room_dm', name: 'general',
 
 const CAPS: CapabilitiesResponse = {
   email: true,
+  emailOutbound: false,
   emailReviewer: false,
   voice: { stt: false, tts: false, sttStreaming: false },
   orgHostSuffix: null,

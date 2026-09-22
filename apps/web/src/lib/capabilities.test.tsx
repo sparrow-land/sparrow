@@ -162,6 +162,7 @@ describe('CapabilitiesProvider', () => {
       <CapabilitiesProvider
         initial={{
           email: false,
+          emailOutbound: false,
           emailReviewer: false,
           voice: { stt: true, tts: true, sttStreaming: true },
           orgHostSuffix: null,

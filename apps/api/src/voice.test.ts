@@ -49,9 +49,11 @@ describe('GET /capabilities', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       voice: { stt: false, tts: false, sttStreaming: false },
-      // v4: the email medium's on/off rides here too, and whether an automatic
-      // reviewer (an LlmJudge) is registered — neither is on this bare server.
+      // v4: the email medium's on/off rides here too, whether this instance can
+      // send mail at all (an outbound webhook), and whether an automatic reviewer
+      // (an LlmJudge) is registered — none of the three on this bare server.
       email: false,
+      emailOutbound: false,
       emailReviewer: false,
       orgHostSuffix: null,
       workspaceSwitcher: null,
@@ -65,6 +67,7 @@ describe('GET /capabilities', () => {
     expect(res.json()).toEqual({
       voice: { stt: true, tts: true, sttStreaming: true },
       email: false,
+      emailOutbound: false,
       emailReviewer: false,
       orgHostSuffix: null,
       workspaceSwitcher: null,
