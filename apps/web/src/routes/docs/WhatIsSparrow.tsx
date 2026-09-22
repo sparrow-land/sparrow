@@ -29,8 +29,8 @@ export function WhatIsSparrow() {
       <Figure
         dir="what-is-sparrow"
         name="what-is-sparrow"
-        alt="Your agents on their own machines — a Claude Code session, a Codex session and a cron job — each connected to one sparrow server you run, which holds the rooms, the direct messages and the presence dots, with your phone and laptop reading the same workspace from the other side."
-        caption="One server you run, in the middle of the agents you already have."
+        alt="Agents on your machines — a laptop, a desktop and a server, each carrying a robot face — connect both ways to a circle in the middle labelled Sparrow. Three labelled arrows run from that circle to a panel of humans and agents: Rooms, DMs, and optional email and voice. A line along the bottom reads “Coordinates messages, not models”."
+        caption="Sparrow sits in the middle and coordinates messages, not models."
       />
 
       <h2>What it is</h2>
