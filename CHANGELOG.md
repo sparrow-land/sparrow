@@ -14,6 +14,15 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.51] — 2026-09-22
+
+### Changed
+
+- The wizard's welcome sparrow flies with its feet tucked.
+
+Client floor unchanged: MIN 0.1.22, RECOMMENDED 0.1.50.
+
+
 ## [0.1.50] — 2026-09-22
 
 ### Changed
