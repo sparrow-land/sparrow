@@ -1,6 +1,11 @@
 import { DEFAULT_PORT } from '@sparrow-land/sdk/types';
 import { BANNER_IMAGE_PNG_BASE64 } from './banner-image.js';
-import { type ProbeOptions, type ProbeStdin, probeKittyGraphics } from './banner-probe.js';
+import {
+  IMAGE_TERMINAL_ALLOWLIST,
+  type ProbeOptions,
+  type ProbeStdin,
+  probeKittyGraphics,
+} from './banner-probe.js';
 import { stripTrailingSlash } from './public-homes.js';
 
 /**
@@ -176,7 +181,15 @@ const ST = '\x1b\\';
  * ourselves with plain newlines, which is the one cursor behaviour every
  * terminal agrees on. The base64 payload is split into `KITTY_CHUNK_LIMIT`
  * pieces carrying `m=1` ("more coming") until the last, which carries `m=0`;
- * control keys ride the first chunk only, as the protocol requires.
+ * control keys ride the first chunk only, as the protocol requires, and `q=2`
+ * rides every one of them.
+ *
+ * `q=2` is "say nothing back, not even on failure". We never read a reply to a
+ * transmission, so any reply is by definition noise — and on a terminal that
+ * accepted the feature query but cannot finish the transfer it is worse than
+ * noise: iTerm2 3.5 printed `ENOENT:Image not found after transmission` across
+ * the operator's screen (2026-09-21). Quiet is the only setting that cannot
+ * leave garbage under the banner.
  */
 export function renderKittyImage(
   base64: string,
@@ -191,7 +204,8 @@ export function renderKittyImage(
   return chunks
     .map((payload, i) => {
       const more = i === chunks.length - 1 ? 0 : 1;
-      const keys = i === 0 ? `f=100,a=T,C=1,c=${cols},r=${rows},m=${more}` : `m=${more}`;
+      const keys =
+        i === 0 ? `f=100,a=T,C=1,c=${cols},r=${rows},q=2,m=${more}` : `q=2,m=${more}`;
       return `${APC}${keys};${payload}${ST}`;
     })
     .join('');
@@ -322,15 +336,24 @@ function isIterm2(env: NodeJS.ProcessEnv): boolean {
   );
 }
 
-/** A terminal that names itself in the environment as one we trust. */
+/**
+ * A terminal that names itself in the environment as one we trust.
+ *
+ * The roster is {@link IMAGE_TERMINAL_ALLOWLIST}, shared with the probe: the
+ * env half of the decision recognises these three by their own variables, the
+ * runtime half recognises the same three by their XTVERSION name, and neither
+ * list can drift without the other.
+ */
 function onImageAllowlist(env: NodeJS.ProcessEnv): boolean {
   const term = termName(env);
   const program = termProgram(env);
-  const kitty = term === 'xterm-kitty' || envPresent(env.KITTY_WINDOW_ID);
-  const ghostty =
-    program === 'ghostty' || term === 'xterm-ghostty' || envPresent(env.GHOSTTY_RESOURCES_DIR);
-  const wezterm = program === 'wezterm';
-  return kitty || ghostty || wezterm;
+  const byEnv: Record<(typeof IMAGE_TERMINAL_ALLOWLIST)[number], boolean> = {
+    kitty: term === 'xterm-kitty' || envPresent(env.KITTY_WINDOW_ID),
+    ghostty:
+      program === 'ghostty' || term === 'xterm-ghostty' || envPresent(env.GHOSTTY_RESOURCES_DIR),
+    wezterm: program === 'wezterm',
+  };
+  return IMAGE_TERMINAL_ALLOWLIST.some((name) => byEnv[name]);
 }
 
 /**
@@ -412,15 +435,17 @@ export interface ResolveBannerModeOptions {
  *  6. The env allowlist (kitty, Ghostty, WezTerm) — image, no probe needed.
  *  7. Otherwise, ask: {@link probeKittyGraphics} decides.
  *
- * Why step 7 is safe without an allowlist entry. The query is `a=q`, a pure
- * feature question: a terminal that implements the kitty graphics protocol
- * answers `OK` and draws nothing, and none of the terminals that answer `OK`
- * prompt before drawing — the prompting one, iTerm2, is already excluded above
- * by env and is exactly the kind of terminal the allowlist exists to keep out.
- * A terminal that does NOT implement the protocol ignores the APC frame
- * entirely and only answers DA1, which we read as "no". So a positive probe
- * satisfies the original rule — supported AND will not prompt — for terminals
- * the environment cannot name. That is precisely the `docker run -it` case: a
+ * Why step 7 is safe without an allowlist entry. The probe asks TWO questions:
+ * the `a=q` feature query, which a terminal that implements the protocol
+ * answers `OK` to while drawing nothing, and XTVERSION, which makes it say what
+ * it is called. It reports yes only when the `OK` comes from one of the same
+ * three terminals the env allowlist names. `OK` alone would not do: iTerm2 3.5
+ * answers the query `OK`, then fails the actual transmission
+ * (`ENOENT:Image not found after transmission`) and leaves a blank hole —
+ * inside a container `TERM_PROGRAM` is invisible, so step 5 cannot catch it and
+ * the name is the only thing that can. So a positive probe still satisfies the
+ * original rule — renders it, and will not prompt — for terminals the
+ * environment cannot name. That is precisely the `docker run -it` case: a
  * Ghostty user whose container sees `TERM=xterm` now gets the illustration.
  *
  * `SPARROW_BANNER_PROBE=0` opts out of step 7 alone, leaving 1-6 intact.

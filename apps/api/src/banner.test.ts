@@ -286,10 +286,19 @@ describe('renderKittyImage', () => {
     expect(first.c).toBe(String(IMAGE_CELL_COLS));
     expect(first.r).toBe(String(IMAGE_CELL_ROWS));
     expect(first.C).toBe('1'); // do not move the cursor; we place the text ourselves
-    // Control keys ride the FIRST chunk only; the rest carry continuation alone.
+    // Control keys ride the FIRST chunk only; the rest carry continuation and
+    // the quiet flag alone.
     for (const chunk of chunks.slice(1)) {
-      expect(Object.keys(keyMap(chunk.keys))).toEqual(['m']);
+      expect(Object.keys(keyMap(chunk.keys)).sort()).toEqual(['m', 'q']);
     }
+  });
+
+  it('is quiet: every transmission chunk carries q=2, so a failure prints nothing', () => {
+    // iTerm2 answered our feature query with OK and then failed the
+    // transmission, printing `ENOENT:Image not found after transmission` on
+    // the user's screen. q=2 suppresses both the OK and the error for these
+    // commands — we never read them, and nobody should ever see them.
+    for (const chunk of chunks) expect(keyMap(chunk.keys).q).toBe('2');
   });
 
   it('chunks the payload with m=1 and closes with m=0', () => {
