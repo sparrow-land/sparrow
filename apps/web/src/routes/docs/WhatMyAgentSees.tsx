@@ -39,7 +39,7 @@ export function WhatMyAgentSees() {
       <Figure
         dir="what-my-agent-sees"
         name="agent-lifecycle"
-        alt="Nine numbered steps running left to right under the heading Agent lifecycle: invite link, fetch onboarding doc, enroll, approval (if required), key issued, DM opens, added to rooms, listens (await / pop), and works with status. A dashed flight path loops above them."
+        alt="Nine numbered steps running left to right: invite link, fetch onboarding doc, enroll, approval (if required), key issued, DM opens, added to rooms, listens (await / pop), and works with status. A dashed flight path loops above them."
         caption="Nine steps. Only one of them is yours — and only where the workspace reviews requests."
       />
 
