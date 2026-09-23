@@ -11,6 +11,9 @@ function renderPage() {
 function text(container: HTMLElement) {
   return (container.textContent ?? '').replace(/\s+/g, ' ');
 }
+function wordCount(container: HTMLElement) {
+  return text(container).trim().split(/\s+/).filter(Boolean).length;
+}
 function commands(container: HTMLElement) {
   return [...container.querySelectorAll('.terminal code')].map((c) => c.textContent ?? '');
 }
@@ -44,6 +47,7 @@ describe('Getting started', () => {
     expect(copy).toMatch(/workspace name is optional/i);
     expect(copy).toMatch(/first account owns the workspace/i);
     expect(copy).toContain('sign in with your existing account');
+    expect(copy).toMatch(/Skip jumps past the invite steps/);
     expect(copy).toContain('Humans are welcome too.');
     expect(copy).toContain('Finish');
     expect(copy).toContain('Skip');
@@ -69,7 +73,7 @@ describe('Getting started', () => {
     expect(steps[2]).toContain('Approve');
     expect(steps[3]).toContain('Click your agent under AGENTS');
     expect(steps[3]).toContain('press Enter');
-    expect(text(container)).toContain('demo simplifies the interface and skips approval');
+    expect(text(container)).toContain('demo trims the interface and skips approval');
     expect(text(container)).toContain('Opening the URL alone does not enroll anyone');
   });
 
@@ -101,6 +105,34 @@ describe('Getting started', () => {
     for (const href of ['/docs/cli', '/docs/concepts', '/docs/what-my-agent-sees', '/docs/api',
       '/docs/sdk', '/docs/mcp', '/docs/self-hosting', '/docs/self-hosting#lock-it-down']) {
       expect(container.querySelector(`a[href="${href}"]`)).toBeTruthy();
+    }
+  });
+});
+
+/**
+ * The page walks a first run, so a lot of it is UI labels and commands that have
+ * to stay verbatim. It was 797 rendered words after the wizard/demo rewrite and
+ * is ~659 after the 2026-09 tone pass, with every fact, label and link kept.
+ * This budget is the line; cutting further means cutting facts.
+ */
+describe('Getting started — reads like a human wrote it', () => {
+  it('stays inside its word budget', () => {
+    const { container } = renderPage();
+    expect(wordCount(container)).toBeLessThanOrEqual(665);
+  });
+
+  it('avoids the AI-prose tells', () => {
+    const { container } = renderPage();
+    const copy = text(container);
+    expect(copy).not.toMatch(/if you like/i);
+    expect(copy).not.toMatch(/Once your agent/i);
+    expect(copy).not.toMatch(/follow these steps/i);
+    expect(copy).not.toMatch(/simplifies the interface/i);
+    // At most one em dash per sentence: no em-dash chains in the prose.
+    for (const p of container.querySelectorAll('p, li')) {
+      for (const sentence of (p.textContent ?? '').split(/(?<=[.:!?])\s+/)) {
+        expect((sentence.match(/—/g) ?? []).length).toBeLessThanOrEqual(1);
+      }
     }
   });
 });
