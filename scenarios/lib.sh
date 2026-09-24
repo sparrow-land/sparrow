@@ -130,7 +130,7 @@ assert_json() {
 # --- image / container lifecycle ------------------------------------------
 
 _ac_free_port() {
-  node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(p))})'
+  node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>process.stdout.write(String(p)+"\n"))})'
 }
 
 # Build the scenario image from the repo-root Dockerfile (which owns apps/api's

@@ -14,6 +14,7 @@ import {
   prepareAwaitGeneration,
   readAwaitOwner,
 } from './await-owner.js';
+import { readOwnerSnapshot } from '@sparrow/skill';
 import { CliError } from './util.js';
 
 /* ==================================================================
@@ -820,4 +821,35 @@ describe('the helper itself (it IS the critical section)', () => {
     const said = JSON.parse(runArmPublishHelper('not-base64-json'));
     expect(said.result).toBe('error');
   });
+});
+
+/* ONE MEANING OF "a valid owner record". The CLI's reader and the skill's
+ * snapshot (what `sparrow skill status` and the hooks' helpers read) share the
+ * nonce and harnessPid rules, so they can never disagree about whether a
+ * listener owns the state dir or whose session it wakes. */
+describe('readAwaitOwner agrees with @sparrow/skill readOwnerSnapshot', () => {
+  const cases: Array<[string, unknown]> = [
+    ['full', { version: 1, nonce: 'abc', pid: 9, harnessPid: 42, ppid: 7 }],
+    ['whitespace-only nonce', { version: 1, nonce: '   ', pid: 9, harnessPid: 42 }],
+    ['empty nonce', { version: 1, nonce: '', pid: 9 }],
+    ['non-string nonce', { version: 1, nonce: 12, pid: 9 }],
+    ['no nonce', { version: 1, pid: 9, harnessPid: 42 }],
+    ['bad harnessPid', { version: 1, nonce: 'abc', harnessPid: -1 }],
+    ['fractional harnessPid', { version: 1, nonce: 'abc', harnessPid: 1.5 }],
+    ['not an object', 'just a string'],
+  ];
+  for (const [name, record] of cases) {
+    it(name, () => {
+      fs.writeFileSync(awaitOwnerPath(env()), JSON.stringify(record));
+      const cli = readAwaitOwner(env());
+      const skill = readOwnerSnapshot(stateDir);
+      // Valid for the CLI exactly when the snapshot names a nonce…
+      expect(cli === undefined, name).toBe(skill?.nonce === undefined);
+      // …and, when valid, both read the same nonce and harnessPid.
+      if (cli) {
+        expect(cli.nonce).toBe(skill!.nonce);
+        expect(cli.harnessPid).toBe(skill!.harnessPid);
+      }
+    });
+  }
 });

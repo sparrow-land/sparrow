@@ -78,6 +78,7 @@ import type {
 import {
   awaitCommand,
   detectTurnBasedRuntime,
+  pidAlive,
   sparrowCommand,
   PROVIDER_LABEL,
   type ListenerScope,
@@ -134,10 +135,12 @@ import {
 } from './loop-state.js';
 import {
   UNOWNED_EXIT_CODE,
+  PENDING_UNKNOWN_CAP,
+  cappedNotice,
+  createHarnessWatch,
   detectHarness,
-  isAlive,
-  isAncestor,
-  orphanedNotice,
+  notRunningRefusal,
+  standDownNotice,
   unownedRefusal,
   type HarnessOwner,
 } from './harness-owner.js';
@@ -4418,11 +4421,31 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
    * throw. Idempotent: it clears the slot before calling, and never throws.
    */
   const awaitSignals: { disarm?: () => void } = {};
-  /** The orphan watch's timer, taken down by the same single `finally`. */
-  const awaitOrphanWatch: { stop?: () => void } = {};
+  /**
+   * The orphan watch, as the run leaves it: its timer (taken down by the same
+   * single `finally`) and, once the run has been ORPHANED, the stand-down that
+   * finishes it (see `finishOrphaned`).
+   */
+  const awaitOrphanWatch: { stop?: () => void; standDown?: () => Promise<void> } = {};
   const runAwait = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
     try {
-      await runAwaitArmed(opts);
+      /* ORPHANED IS A TERMINAL STATE (see `runIsOver`), finished at ONE point:
+       * here, after the run has unwound however it did — a return, a timeout
+       * line suppressed, a hand-off refused, or an error thrown by something
+       * already in flight (a 426, a failed read). It outranks all of those
+       * but a refused claim, which `runAwaitArmed` reports by throwing it and
+       * which never sets `standDown`. */
+      try {
+        await runAwaitArmed(opts);
+      } catch (e) {
+        if (awaitOrphanWatch.standDown === undefined) throw e;
+        // Outranked, not hidden: said the way listener plumbing is said — a
+        // `-j` frame always, a human line under -v.
+        const message = String((e as Error)?.message ?? e);
+        if (ctx.json) io.err(`${JSON.stringify({ type: 'await.error', message })}\n`);
+        else if (opts.verbose === true) io.err(`[await] error after standing down: ${message}\n`);
+      }
+      await awaitOrphanWatch.standDown?.();
     } finally {
       const disarm = awaitSignals.disarm;
       awaitSignals.disarm = undefined;
@@ -4435,6 +4458,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       awaitCandidate.retire = undefined;
       awaitOrphanWatch.stop?.();
       awaitOrphanWatch.stop = undefined;
+      awaitOrphanWatch.standDown = undefined;
     }
   };
   const runAwaitArmed = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
@@ -4472,27 +4496,33 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      * So, BEFORE any side effect: a live harness that is demonstrably NOT an
      * ancestor refuses the arm (exit 5). `unknown` never refuses, and a harness
      * pid we cannot see at all is not judged either (it may live in another pid
-     * namespace — a sandbox — where nothing here can be proven). Only a harness
-     * PROVEN to be our ancestor is then watched on every tick (see
-     * `checkOrphaned`). A Codex run wakes through the bridge, not by exiting,
-     * so it is never judged. See harness-owner.ts.
+     * namespace — a sandbox — where nothing here can be proven); both are
+     * re-tried on every tick, and only a PROVEN ancestor is recorded
+     * (`harnessPid`) and watched. A Codex run wakes through the bridge, not by
+     * exiting, so it is never judged. The rules live in `createHarnessWatch`
+     * (harness-owner.ts).
      * ---------------------------------------------------------------------- */
     const harness: HarnessOwner | null = codexThread ? null : detectHarness(env);
-    const allowUnowned = opts.allowUnowned === true;
-    let watchedHarness: HarnessOwner | undefined;
-    if (harness && !allowUnowned && isAlive(harness.pid)) {
-      const ancestry = isAncestor(harness.pid, process.pid);
-      if (ancestry === 'no') {
-        io.err(
-          ctx.json
-            ? `${JSON.stringify({ type: 'await.unowned', harnessPid: harness.pid })}\n`
-            : `${unownedRefusal(harness.pid)}\n`,
-        );
-        ctx.exitCode = UNOWNED_EXIT_CODE;
-        return;
-      }
-      if (ancestry === 'yes') watchedHarness = harness;
+    const orphanCheckMs = Math.max(
+      10,
+      Number.parseInt(env.SPARROW_ORPHAN_CHECK_MS ?? '', 10) || ORPHAN_CHECK_MS_DEFAULT,
+    );
+    const harnessWatch = createHarnessWatch(harness, {
+      allowUnowned: opts.allowUnowned === true,
+      checkMs: orphanCheckMs,
+    });
+    const armed = harnessWatch.arm();
+    if (armed !== 'ok') {
+      const pid = harness?.pid ?? 0;
+      io.err(
+        ctx.json
+          ? `${JSON.stringify({ type: 'await.unowned', reason: armed, harnessPid: pid })}\n`
+          : `${armed === 'not-running' ? notRunningRefusal(pid) : unownedRefusal(pid)}\n`,
+      );
+      ctx.exitCode = UNOWNED_EXIT_CODE;
+      return;
     }
+    const provenHarness = harnessWatch.armOwner();
 
     /* ------------------------ CODEX ARMING PREFLIGHT ------------------------
      * BEFORE the network and before anything is written to the state dir: a
@@ -4551,7 +4581,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       profile: activeProfileName(opts, env),
       ...(codexThread ? { thread: codexThread } : {}),
       ppid: process.ppid,
-      ...(harness ? { harnessPid: harness.pid } : {}),
+      // ONLY an ancestor PROVEN NOW: `harnessPid` tells `skill status` whose
+      // session this listener's exit wakes. Never with --allow-unowned, and
+      // never amended later (a harness proven on a tick is only watched).
+      ...(provenHarness ? { harnessPid: provenHarness.pid } : {}),
       err: (s) => io.err(s),
     });
     awaitCandidate.retire = () => generation.clearCandidate();
@@ -4578,15 +4611,15 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     let orphaned = false;
 
     /**
-     * IS THIS RUN OVER? A claim that was refused, or a signal — the two states
-     * from which nothing further may be attempted on anyone's behalf: no
-     * republish, no wake line, no bridge, no stamp. Checked FIRST in every
+     * IS THIS RUN OVER? A claim that was refused, a signal, or an ORPHAN — the
+     * three states from which nothing further may be attempted on anyone's
+     * behalf: no republish, no wake line, no bridge, no hand-off, no stamp. Checked FIRST in every
      * continuation, including the ones that resume into an ERROR: a rejected
      * inbox read is still an answer arriving after the end, and the upgrade
      * path in particular would otherwise try to claim the state dir a second
      * time, long after this command reported that it could not.
      */
-    const runIsOver = (): boolean => publishFailure !== undefined || interrupted();
+    const runIsOver = (): boolean => publishFailure !== undefined || interrupted() || orphaned;
 
     /** Keep a late rejection from surfacing as an unhandled one after we return. */
     const track = (p: Promise<void>): Promise<void> => {
@@ -4869,10 +4902,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     /** Aborted only when this listener is orphaned — ends a hand-off's nap too. */
     const orphanAbort = new AbortController();
     /** What ends a deferred hand-off's nap: an interrupt, or (when watched) orphaning. */
-    const handoffNapSignal =
-      watchedHarness === undefined
-        ? interrupt.signal
-        : AbortSignal.any([interrupt.signal, orphanAbort.signal]);
+    const handoffNapSignal = harnessWatch.needsTimer()
+      ? AbortSignal.any([interrupt.signal, orphanAbort.signal])
+      : interrupt.signal;
     // The heartbeat is deliberately NOT touched here: this process is still a
     // candidate until the stream opens (see the publish-late rule above), and a
     // candidate must not write over the state dir a healthy listener owns —
@@ -5065,15 +5097,16 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       reason: 'work' | 'gap',
       opts: { afterBlock?: boolean } = {},
     ): Promise<boolean> => {
-      if (interrupted()) return false;
+      if (runIsOver()) return false;
       if (blockedSinceAsking()) return false;
       await markTurn();
       /* EVERY AWAIT IN HERE IS A PLACE AN INTERRUPT CAN LAND, and the turn mark
        * is a round trip — not the nap, so nothing else here is watching the
        * interrupt seam. The order after it is fixed: INTERRUPT first (it
        * outranks every other reason to go on), then the marker, then the
-       * deadline, and only then the bridge. */
-      if (interrupted()) return false;
+       * deadline, and only then the bridge. (An orphan declared mid-POST is
+       * the same kind of end: `runIsOver`.) */
+      if (runIsOver()) return false;
       // The presence POST is a round trip of its own, and under Claude Code the
       // bridge below is a no-op — so this is the check that catches a marker
       // written while the turn mark was being planted.
@@ -5102,8 +5135,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         // tree down) is not waiting for a usage window to reopen. Nothing is
         // handed off and no bridge is rung; the item stays unread and the
         // signal handler's `stopped:`/`killed:` stamp stands.
-        if (interrupted()) return false;
-        if (orphaned) return false; // exit 5: there is no session left to hand off to
+        if (runIsOver()) return false; // a signal, or an orphan (exit 5)
         if (!owned()) return false; // superseded: exit 4, never a bare 0
         /* THE DEADLINE IS READ FIRST, before the marker. Waking up to find both
          * "the limit lifted" and "my time is up" is not ambiguous: this
@@ -5144,8 +5176,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         }
         await enterStandby(blocked);
         if (!owned()) return; // exit 4 — the successor is the wake path now
+        // Ends at the FIRST abort of `controller` (the default signal): a
+        // timeout, a stand-down, or an orphan (declareOrphaned aborts it too).
         await abortableNap(blockedPollMs);
-        if (controller.signal.aborted) return; // --timeout (exit 2) or stand-down
+        if (controller.signal.aborted) return; // --timeout (exit 2), stand-down, or orphaned (exit 5)
       }
     };
 
@@ -5186,30 +5220,50 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      * stamps nothing and leaves through its own exit-4 path. The goodbye — idle
      * statuses, presence — happens at the tail (`finishOrphaned`).
      * ================================================================= */
-    const orphanCheckMs = Math.max(
-      10,
-      Number.parseInt(env.SPARROW_ORPHAN_CHECK_MS ?? '', 10) || ORPHAN_CHECK_MS_DEFAULT,
-    );
-    let lastOrphanCheck = 0;
-    const checkOrphaned = (): boolean => {
-      if (orphaned) return true;
-      if (watchedHarness === undefined || runIsOver()) return false;
-      const now = Date.now();
-      if (now - lastOrphanCheck < orphanCheckMs) return false;
-      lastOrphanCheck = now;
-      const gone =
-        !isAlive(watchedHarness.pid) || isAncestor(watchedHarness.pid, process.pid) === 'no';
-      if (!gone) return false;
+    /** The harness is gone: stamp (owner only), then end every wait. */
+    const declareOrphaned = (): boolean => {
       if (!owned()) return false; // superseded: the successor's state dir, and exit 4
       orphaned = true;
+      awaitOrphanWatch.standDown = finishOrphaned; // finished once, by `runAwait`
       if (generation.published()) markHeartbeatOrphaned(env, generation.nonce());
       stopPoll();
       orphanAbort.abort();
       controller.abort();
       return true;
     };
-    if (watchedHarness !== undefined) {
-      const orphanTimer = setInterval(checkOrphaned, orphanCheckMs);
+    /**
+     * THE TIMER PATH — unthrottled (the interval IS the cadence), full ancestry
+     * walk. Also where a harness that was `unknown` at arm time is settled
+     * later: `yes` starts the watch — in memory only, the owner record is
+     * written at arm time and never amended, so it carries no `harnessPid` —
+     * and `no` means this listener could never wake it: the arm would have
+     * refused, so it stands down exactly like an orphan.
+     */
+    const orphanTick = (): void => {
+      if (runIsOver()) return;
+      const t = harnessWatch.tick();
+      if (t === 'orphaned' || t === 'unowned') declareOrphaned();
+      else if (t === 'capped') {
+        // Once: the ancestry could not be proven in time; liveness only now.
+        const pid = harness?.pid ?? 0;
+        io.err(
+          ctx.json
+            ? `${JSON.stringify({ type: 'await.harness_unproven', harnessPid: pid, tries: PENDING_UNKNOWN_CAP })}\n`
+            : `${cappedNotice(pid)}\n`,
+        );
+      }
+    };
+    /**
+     * THE STREAM-ACTIVITY PATH — throttled, and liveness only: the ancestry walk
+     * (a `ps` spawn off Linux) stays off the SSE read path. True = orphaned.
+     */
+    const checkOrphaned = (): boolean => {
+      if (orphaned) return true;
+      if (runIsOver()) return false;
+      return harnessWatch.activity() !== 'none' && declareOrphaned();
+    };
+    if (harnessWatch.needsTimer()) {
+      const orphanTimer = setInterval(orphanTick, orphanCheckMs);
       (orphanTimer as { unref?: () => void }).unref?.();
       awaitOrphanWatch.stop = () => clearInterval(orphanTimer);
     }
@@ -5226,6 +5280,18 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         // A candidate that never claimed the state dir speaks for nobody: the
         // statuses and presence are the incumbent's, if there is one.
         if (!generation.published() || !owned()) return;
+        /* TWO GATES on the idle fan-out — presence only when either holds:
+         *  - THE BLOCKED GATE, as the hook has it: while a usage-limit marker
+         *    stands, the rooms carry a sticky `blocked — usage limit` note the
+         *    human needs, and an idle post would erase it.
+         *  - THE SESSION IS STILL ALIVE: an `unowned` ending, or an ancestry
+         *    `no`, happens while Claude Code runs — mid-turn, with the
+         *    `working` or `blocked — needs your input` note its hooks just
+         *    posted. Those are the live session's, not ours to clear. */
+        if (blockedSinceAsking() || (harness !== null && pidAlive(harness.pid))) {
+          await dropPresenceMark();
+          return;
+        }
         try {
           const rooms = await client.meRooms();
           const live = rooms.filter((r) => !r.room.archivedAt).slice(0, ORPHAN_IDLE_ROOMS_MAX);
@@ -5243,11 +5309,16 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         }),
       ]);
       if (budget !== undefined) clearTimeout(budget);
-      const pid = watchedHarness?.pid ?? 0;
+      const pid = harness?.pid ?? 0;
       io.err(
         ctx.json
-          ? `${JSON.stringify({ type: 'await.orphaned', harnessPid: pid })}\n`
-          : `${orphanedNotice(pid)}\n`,
+          ? `${JSON.stringify({
+              type: 'await.orphaned',
+              // How the watch ENDED — its own record, whichever path reached it.
+              reason: harnessWatch.ending() === 'unowned' ? 'never-owned' : 'gone',
+              harnessPid: pid,
+            })}\n`
+          : `${standDownNotice(harnessWatch.ending(), pid)}\n`,
       );
       ctx.exitCode = UNOWNED_EXIT_CODE;
     };
@@ -5258,10 +5329,6 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      * otherwise holds here, with no stream, no poll and no presence, until the
      * hook clears the marker. */
     await standbyGate();
-    if (orphaned) {
-      await finishOrphaned();
-      return;
-    }
 
     // A restarting turn-based agent must never block on a stream while its mail
     // sits unread — so ask the queue BEFORE opening anything.
@@ -5277,7 +5344,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     } catch (e) {
       // A 426 on the very first request is still a hand-off (it queues a repair
       // turn), so this candidate claims the state dir before acting on it.
-      if (isUpgradeRequired(e)) {
+      // …unless the run is already over (an orphan declared during this very
+      // read): no claim, no repair turn, for a session that is gone.
+      if (!runIsOver() && isUpgradeRequired(e)) {
         generation.publish();
         await queueCodexWake('upgrade');
         // Superseded while reporting the floor: stand down silently rather than
@@ -5289,6 +5358,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       }
       throw e;
     }
+    // ORPHANED DURING THAT ROUND TRIP (or during standby, before it): publish
+    // nothing — a publish here would read as superseded, exit 4 — and leave;
+    // `runAwait` finishes the stand-down.
+    if (orphaned) return;
     // RECHECK POINT 1 — the pre-stream look. A marker written while the queue was
     // answering means this listener must stand by instead of handing off; the
     // gate below (the runner's `beforeOpen`) is where that happens.
@@ -5308,11 +5381,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       if (await handoffAfterBlock('work')) return;
       // Ctrl-C while waiting out the limit: exit 0 silently, as an interrupted
       // listener always has. Nothing was handed off; the item is untouched.
-      if (interrupted()) return;
-      if (orphaned) {
-        await finishOrphaned(); // exit 5: nobody is left to hand off to
-        return;
-      }
+      // …and an orphan returns here too; `runAwait` finishes it (exit 5).
+      if (runIsOver()) return;
       if (!owned()) {
         reportSuperseded(); // exit 4 — never a 0 over a suppressed bridge
         return;
@@ -5533,6 +5603,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
             generation.publish();
           } catch (e) {
             publishFailure = e;
+            awaitOrphanWatch.standDown = undefined; // a refused claim outranks an orphan
             controller.abort(); // end the stream AND the reconnect loop
             onOpen();
             return;
@@ -5696,11 +5767,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     /* ORPHANED OUTRANKS EVERYTHING BELOW but a refused claim: a wake line, a
      * timeout line, a hand-off — each is addressed to a session that no longer
      * exists. `wake()` is already shut, so an inbox read still in flight can
-     * print nothing; it is not awaited. */
-    if (orphaned) {
-      await finishOrphaned();
-      return;
-    }
+     * print nothing; it is not awaited. `runAwait` finishes the stand-down. */
+    if (orphaned) return;
 
     // Let an inbox check that was in flight when the stream ended finish, so a
     // wake that had already been decided still wins over the timeout.
@@ -5725,11 +5793,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       const reason = emittedReason === 'replay.gap' ? 'gap' : 'work';
       if (await completeHandoff(reason)) return;
       if (await handoffAfterBlock(reason)) return;
-      if (interrupted()) return; // Ctrl-C, not a timeout: say nothing, exit 0
-      if (orphaned) {
-        await finishOrphaned(); // exit 5: the session this hand-off was for is gone
-        return;
-      }
+      // Ctrl-C, not a timeout: say nothing, exit 0. An orphan: `runAwait`
+      // finishes it (exit 5).
+      if (runIsOver()) return;
       if (!owned()) {
         reportSuperseded();
         return;

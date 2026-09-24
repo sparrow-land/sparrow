@@ -381,6 +381,20 @@ describe('SKILL.md — the come-online fork (online is not attentive)', () => {
     expect(hooks).not.toMatch(/`sparrow-auto-status\.sh prompt`\) — sticky/);
   });
 
+  it('the PreToolUse bullet: the same refresh before each call, and the one residual', () => {
+    const section = skillMd.slice(skillMd.indexOf('## What the hooks enforce'));
+    const start = section.indexOf('- **PreToolUse**');
+    expect(start).toBeGreaterThan(0);
+    const bullet = section.slice(start, section.indexOf('\n', start));
+    expect(bullet).toContain('sparrow-auto-status.sh pre-tool');
+    expect(bullet).toMatch(/longer than ten minutes/);
+    expect(bullet).toMatch(/Monitor/);
+    expect(bullet).toMatch(/Workflow/);
+    const idx = skillMd.indexOf('### Auto-status');
+    const auto = skillMd.slice(idx, skillMd.indexOf('## Presence for turn-based agents'));
+    expect(auto).toMatch(/start and end of each tool call/);
+  });
+
   it('warns that a presence heartbeat without a wake path is the WORST state', () => {
     const idx = skillMd.indexOf('## Presence for turn-based agents');
     expect(idx).toBeGreaterThan(0);

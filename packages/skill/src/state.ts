@@ -66,8 +66,8 @@ const DEAD_REASONS: readonly string[] = ['killed', 'stopped'];
  */
 export interface HeartbeatState {
   /**
-   * `orphaned` is written by the CLI (`markHeartbeatOrphaned`), not by this
-   * package: `sparrow await` stood down because the Claude Code session that
+   * `orphaned` is written by `markHeartbeatOrphaned` (below), which only
+   * `sparrow await` calls: it stood down because the Claude Code session that
    * armed it is gone, or was never its ancestor. Terminal, like a dead reason,
    * but it names no signal.
    */
@@ -288,10 +288,51 @@ export function markHeartbeatDead(
   generation?: string,
   now: number = Date.now(),
 ): void {
+  markHeartbeatWord(stateDir, signal ? `${reason}:${signal}` : reason, generation, now);
+}
+
+/**
+ * Stamp the heartbeat `orphaned` — an `await` whose Claude Code session is gone
+ * (or that turned out never to descend from it), so it could wake nobody and
+ * stood down (exit 5). Not `killed:<something>`: nothing killed it — it noticed
+ * it had been abandoned and left. Read back by {@link readHeartbeatState}.
+ */
+export function markHeartbeatOrphaned(stateDir: string, generation?: string, now: number = Date.now()): void {
+  markHeartbeatWord(stateDir, 'orphaned', generation, now);
+}
+
+/**
+ * Stamp the heartbeat `blocked:<reason>` — the listener is ALIVE and
+ * deliberately not listening, because the agent behind it cannot take a turn (a
+ * Claude Code usage limit). Not a death: it comes back by itself. A reader that
+ * does not know the word treats it as UNJUDGEABLE, never as a live listener.
+ */
+export function markHeartbeatBlocked(
+  stateDir: string,
+  reason = 'blocked',
+  generation?: string,
+  now: number = Date.now(),
+): void {
+  markHeartbeatWord(stateDir, `blocked:${reason}`, generation, now);
+}
+
+/**
+ * THE ONE HEARTBEAT WRITER for every non-live word (`killed:<sig>`,
+ * `stopped:<sig>`, `blocked:<reason>`, `orphaned`): `<word> [generation]` and a
+ * fresh mtime, BYPASSING the touch throttle. Content is what disqualifies the
+ * heartbeat, never age. Best-effort and synchronous (safe from a signal
+ * handler): never throws, whatever the filesystem does.
+ */
+export function markHeartbeatWord(
+  stateDir: string,
+  word: string,
+  /** The writer's `await` generation nonce, appended as a second token. */
+  generation?: string,
+  now: number = Date.now(),
+): void {
   try {
     fs.mkdirSync(stateDir, { recursive: true });
     const file = heartbeatPath(stateDir);
-    const word = signal ? `${reason}:${signal}` : reason;
     fs.writeFileSync(file, generation ? `${word} ${generation}\n` : `${word}\n`);
     try {
       const when = new Date(now);
@@ -300,7 +341,7 @@ export function markHeartbeatDead(
       // leave the OS-assigned mtime
     }
   } catch {
-    // best-effort — dying is not the moment to throw
+    // best-effort — a listener must never crash (or die noisily) over a heartbeat
   }
 }
 
@@ -323,14 +364,13 @@ export function readHeartbeatState(stateDir: string): HeartbeatState | undefined
         ? { state: head as ListenerKind, generation }
         : { state: head as ListenerKind };
     }
-    if (head === 'orphaned') {
-      return generation ? { state: 'orphaned', generation } : { state: 'orphaned' };
-    }
+    // ONE GRAMMAR for every terminal word, `word[:detail]`, exactly as the
+    // shell readers parse it: `orphaned` and `orphaned:<detail>` alike.
     const [word, ...rest] = head.split(':');
-    if (word !== undefined && DEAD_REASONS.includes(word)) {
+    if (word !== undefined && (DEAD_REASONS.includes(word) || word === 'orphaned')) {
       const signal = rest.join(':').trim();
       return {
-        state: word as DeadReason,
+        state: word as DeadReason | 'orphaned',
         ...(signal ? { signal } : {}),
         ...(generation ? { generation } : {}),
       };
@@ -373,4 +413,19 @@ export function formatAge(seconds: number): string {
 /** Test-only: reset the in-process throttle clock. */
 export function __resetHeartbeatThrottle(): void {
   lastTouch = 0;
+}
+
+/**
+ * One small JSON record (a marker, the owner record, a failure record), read
+ * FAIL-OPEN: missing, unreadable, malformed, or not an object all read as
+ * `undefined`, never a throw. Every reader of the state dir's small records
+ * goes through this, so they cannot disagree about what "unreadable" means.
+ */
+export function readJsonRecord(file: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
 }

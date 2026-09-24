@@ -59,8 +59,19 @@ import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { resolveStateDir } from '@sparrow/skill';
-import { CliError } from './util.js';
+/* Liveness is `@sparrow/skill`'s `pidAlive` — the Stop hook's rule, exactly:
+ * the call succeeding or EPERM is ALIVE (proof); ESRCH, anything else, or no
+ * pid is not proof, and only proof may block an arm. `PidSignal` is its
+ * injectable `kill(pid, 0)`, the test seam used below. */
+import {
+  isPid,
+  pidAlive,
+  readJsonRecord,
+  ownerSnapshotOf,
+  resolveStateDir,
+  type PidSignal,
+} from '@sparrow/skill';
+import { CliError, envSwitchedOn } from './util.js';
 
 type Env = Record<string, string | undefined>;
 
@@ -105,28 +116,6 @@ export interface AwaitOwnerRecord {
   harnessPid?: number;
 }
 
-/** `process.kill(pid, 0)`, injectable so the three answers are testable. */
-export type PidSignal = (pid: number, signal: 0) => void;
-
-/**
- * Is this pid demonstrably ALIVE? The Stop hook's rule, exactly:
- *
- *   - the call succeeds        → alive
- *   - it throws EPERM          → alive (it exists; it is simply not ours)
- *   - it throws ESRCH          → absent
- *   - anything else, or no pid → UNKNOWN, which is not proof of either
- *
- * Only the first two are proof, and only proof may block an arm.
- */
-function pidDemonstrablyAlive(pid: number, kill: PidSignal = process.kill): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException)?.code === 'EPERM';
-  }
-}
 
 /** The refusal — it names the pid so a hung incumbent is one command away. */
 export const differentThreadRefusal = (thread: string, pid: number): string =>
@@ -169,7 +158,7 @@ export function assertMayArm(env: Env, thread: string | undefined, kill?: PidSig
   if (takingOver(env)) return;
   const owner = readAwaitOwner(env);
   if (owner?.thread === undefined || owner.thread === thread) return;
-  if (!pidDemonstrablyAlive(owner.pid, kill)) return;
+  if (!pidAlive(owner.pid, kill)) return;
   throw new CliError(differentThreadRefusal(owner.thread, owner.pid));
 }
 
@@ -263,8 +252,7 @@ export const AWAIT_CANDIDATE_TTL_SECONDS = 120;
 function clearAwaitCandidate(env: Env, nonce: string): void {
   try {
     const file = awaitCandidatePath(env);
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<AwaitCandidateRecord>;
-    if (raw?.nonce !== nonce) return; // someone else's announcement — hands off
+    if (readJsonRecord(file)?.nonce !== nonce) return; // someone else's — or none: hands off
     fs.unlinkSync(file);
   } catch {
     /* absent, unreadable, already gone: nothing to retire */
@@ -304,34 +292,38 @@ function writeAwaitCandidate(env: Env, nonce: string, lock?: ArmLockMechanism): 
   }
 }
 
-const positivePid = (v: unknown): v is number => Number.isInteger(v) && (v as number) > 0;
-
 /** The optional diagnostic pids, spread into a record only when present. */
 const diagnosticPids = (p: { ppid?: number; harnessPid?: number }): Partial<AwaitOwnerRecord> => ({
-  ...(positivePid(p.ppid) ? { ppid: p.ppid } : {}),
-  ...(positivePid(p.harnessPid) ? { harnessPid: p.harnessPid } : {}),
+  ...(isPid(p.ppid) ? { ppid: p.ppid } : {}),
+  ...(isPid(p.harnessPid) ? { harnessPid: p.harnessPid } : {}),
 });
 
-/** The published generation, or undefined when absent, unreadable, or malformed. */
+/**
+ * The published generation, or undefined when absent, unreadable, or malformed.
+ *
+ * ONE read, ONE parse. The fields both readers need — the nonce and
+ * `harnessPid` — come from `@sparrow/skill`'s `ownerSnapshotOf`, the same
+ * derivation `sparrow skill status` uses, so the two can never disagree on
+ * what a valid record is (a whitespace-only nonce is none). Only the CLI's own
+ * fields are parsed here.
+ */
 export function readAwaitOwner(env: Env): AwaitOwnerRecord | undefined {
-  try {
-    const raw = JSON.parse(fs.readFileSync(awaitOwnerPath(env), 'utf8')) as Partial<AwaitOwnerRecord>;
-    if (typeof raw?.nonce !== 'string' || !raw.nonce) return undefined;
-    return {
-      version: 1,
-      nonce: raw.nonce,
-      pid: Number.isInteger(raw.pid) ? (raw.pid as number) : 0,
-      startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
-      kind: typeof raw.kind === 'string' ? raw.kind : 'await',
-      ...(typeof raw.profile === 'string' ? { profile: raw.profile } : {}),
-      ...(typeof raw.thread === 'string' && raw.thread ? { thread: raw.thread } : {}),
-      ...(raw.lock === 'flock' || raw.lock === 'advisory' ? { lock: raw.lock } : {}),
-      ...(positivePid(raw.ppid) ? { ppid: raw.ppid } : {}),
-      ...(positivePid(raw.harnessPid) ? { harnessPid: raw.harnessPid } : {}),
-    };
-  } catch {
-    return undefined;
-  }
+  const raw = readJsonRecord(awaitOwnerPath(env)) as Partial<Record<keyof AwaitOwnerRecord, unknown>> | undefined;
+  if (!raw) return undefined;
+  const { nonce, harnessPid } = ownerSnapshotOf(raw);
+  if (nonce === undefined) return undefined;
+  return {
+    version: 1,
+    nonce,
+    pid: Number.isInteger(raw.pid) ? (raw.pid as number) : 0,
+    startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
+    kind: typeof raw.kind === 'string' ? raw.kind : 'await',
+    ...(typeof raw.profile === 'string' ? { profile: raw.profile } : {}),
+    ...(typeof raw.thread === 'string' && raw.thread ? { thread: raw.thread } : {}),
+    ...(raw.lock === 'flock' || raw.lock === 'advisory' ? { lock: raw.lock } : {}),
+    ...(isPid(raw.ppid) ? { ppid: raw.ppid } : {}),
+    ...(harnessPid !== undefined ? { harnessPid } : {}),
+  };
 }
 
 /* ==================================================================
@@ -611,7 +603,7 @@ export function runArmPublishHelper(payload: string): string {
     // hook a listener is live when nothing is listening. (`flock` FORKS before
     // exec — measured: our ppid is flock's, not the listener's — so the listener
     // is identified by the pid we were given, not by `process.ppid`.)
-    if (!pidDemonstrablyAlive(p.listenerPid)) {
+    if (!pidAlive(p.listenerPid)) {
       return say({ result: 'aborted', reason: 'listener gone' });
     }
     assertMayArm(env, p.thread);
@@ -801,8 +793,7 @@ function stateDirWritable(env: Env): boolean {
 
 /** Has an operator set the take-over escape? (Read once, passed to the helper.) */
 function takingOver(env: Env): boolean {
-  const v = env.SPARROW_AWAIT_TAKE_OVER?.trim().toLowerCase();
-  return v !== undefined && v !== '' && v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
+  return envSwitchedOn(env.SPARROW_AWAIT_TAKE_OVER);
 }
 
 /**

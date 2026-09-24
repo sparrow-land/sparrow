@@ -77,18 +77,18 @@ describe('readFiredStamp', () => {
 describe('hooksVerifiedForThread', () => {
   it('verifies on a runtime stamp naming this thread, and lists the events', () => {
     stamp('Stop', 'runtime abc-123');
-    stamp('PostToolUse', 'runtime abc-123');
+    stamp('UserPromptSubmit', 'runtime abc-123');
     const v = hooksVerifiedForThread(stateDir, 'abc-123');
     expect(v.verified).toBe(true);
     if (v.verified) {
       expect(v.legacy).toBe(false);
-      expect(v.events.sort()).toEqual(['PostToolUse', 'Stop']);
+      expect(v.events.sort()).toEqual(['Stop', 'UserPromptSubmit']);
     }
   });
 
   it('lists ONLY the events that named this thread', () => {
     stamp('Stop', 'runtime abc-123');
-    stamp('PostToolUse', 'runtime other-thread');
+    stamp('UserPromptSubmit', 'runtime other-thread');
     const v = hooksVerifiedForThread(stateDir, 'abc-123');
     expect(v.verified).toBe(true);
     if (v.verified) expect(v.events).toEqual(['Stop']);
@@ -125,12 +125,12 @@ describe('hooksVerifiedForThread', () => {
 
   it('reports manual-only when the only proof is a hand-run script check', () => {
     stamp('Stop', 'manual abc-123');
-    stamp('PostToolUse', 'manual');
+    stamp('SessionStart', 'manual');
     const v = hooksVerifiedForThread(stateDir, 'abc-123');
     expect(v.verified).toBe(false);
     if (!v.verified) {
       expect(v.reason).toBe('manual-only');
-      expect(v.events.sort()).toEqual(['PostToolUse', 'Stop']);
+      expect(v.events.sort()).toEqual(['SessionStart', 'Stop']);
     }
   });
 
@@ -147,20 +147,41 @@ describe('hooksVerifiedForThread', () => {
 
   it('calls a mix of manual and other-thread stamps other-thread (the stronger fact)', () => {
     stamp('Stop', 'runtime older-session');
-    stamp('PostToolUse', 'manual');
+    stamp('SessionStart', 'manual');
     const v = hooksVerifiedForThread(stateDir, 'abc-123');
     expect(v.verified).toBe(false);
     if (!v.verified) expect(v.reason).toBe('other-thread');
   });
 
-  it('looks at the four wired events and nothing else', () => {
+  it('looks at the thread-bearing events and nothing else', () => {
     stamp('SomeOtherEvent', 'runtime abc-123');
     expect(hooksVerifiedForThread(stateDir, 'abc-123').verified).toBe(false);
-    for (const e of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop']) {
+    for (const e of ['SessionStart', 'UserPromptSubmit', 'Stop']) {
       fs.rmSync(path.join(stateDir, 'hooks-fired'), { recursive: true, force: true });
       stamp(e, 'runtime abc-123');
       expect(hooksVerifiedForThread(stateDir, 'abc-123').verified).toBe(true);
     }
+  });
+
+  /**
+   * The tool events stamp a bare `<kind>` (the wrapper skips the payload parse
+   * for them: they fire on every tool call and nothing downstream reads their
+   * thread). A bare stamp would otherwise count as LEGACY proof for ANY thread,
+   * so they are not thread evidence at all -- whatever an older wrapper wrote.
+   */
+  it.each(['PreToolUse', 'PostToolUse'])('ignores %s stamps for the thread question', (event) => {
+    stamp(event, 'runtime');
+    expect(hooksVerifiedForThread(stateDir, 'abc-123')).toEqual({
+      verified: false,
+      events: [],
+      reason: 'no-stamps',
+    });
+    stamp(event, 'runtime abc-123'); // an older wrapper's threaded stamp
+    expect(hooksVerifiedForThread(stateDir, 'abc-123').verified).toBe(false);
+    stamp('Stop', 'runtime older-session');
+    const v = hooksVerifiedForThread(stateDir, 'abc-123');
+    expect(v.verified).toBe(false);
+    if (!v.verified) expect(v.reason).toBe('other-thread');
   });
 
   it('matches a caller passing the RAW thread id, sanitised the wrapper way', () => {

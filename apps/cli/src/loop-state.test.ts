@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readHeartbeatKind, __resetHeartbeatThrottle } from '@sparrow/skill';
-import { touchHeartbeat } from './loop-state.js';
+import { markHeartbeatBlocked, markHeartbeatOrphaned, touchHeartbeat } from './loop-state.js';
 
 let stateDir: string;
 
@@ -36,5 +36,20 @@ describe('touchHeartbeat (CLI bridge)', () => {
     touchHeartbeat(env());
     expect(fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8')).toBe('');
     expect(readHeartbeatKind(stateDir)).toBeUndefined();
+  });
+});
+
+/* The CLI's adapters: env → state dir, then `@sparrow/skill`'s one writer
+ * (whose own tests pin the shape, mtime and failure behaviour). */
+describe('markHeartbeatBlocked / markHeartbeatOrphaned (CLI bridge)', () => {
+  const read = (): string => fs.readFileSync(path.join(stateDir, 'heartbeat'), 'utf8');
+
+  it('write into the state dir the env resolves', () => {
+    markHeartbeatBlocked(env(), 'usage-limit', 'n1');
+    expect(read()).toBe('blocked:usage-limit n1\n');
+    markHeartbeatOrphaned(env(), 'n2');
+    expect(read()).toBe('orphaned n2\n');
+    markHeartbeatOrphaned(env());
+    expect(read()).toBe('orphaned\n');
   });
 });

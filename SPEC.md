@@ -2098,7 +2098,11 @@ deliberately writes the shared assets dir `.claude/skills/sparrow` and the commi
 both files point at the same skill dir, an install REFUSES when the other file at that scope
 already registers our hooks (naming it and the flag that matches), and an uninstall keeps the
 skill dir while the other file still references those scripts. Events: `Stop` (the loop-drift / online-but-deaf block), `UserPromptSubmit`,
-`PostToolUse`, `Notification`. The settings `env` block also gets
+`PreToolUse` (the same throttled `working` refresh as `PostToolUse`, run before each
+tool call so one long call cannot let the 10-minute status lapse; matcher `*`),
+`PostToolUse`, `Notification`, `StopFailure` (the usage-limit standby marker and
+`blocked` note when a turn ends on an API error), `SubagentStart` and `SubagentStop`
+(the subagent indicator in the working note). The settings `env` block also gets
 `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, without which Claude Code's
 memory-pressure reaper kills the background `sparrow await` during exactly the idle
 stretch in which it is the agent's only wake path.
@@ -2119,7 +2123,10 @@ stretch in which it is the agent's only wake path.
   `stop_hook_active`, so the mechanical guarantee survives), `SessionStart` (whose
   `hookSpecificOutput.additionalContext` injects the come-online protocol — Codex has no
   per-turn system channel), `UserPromptSubmit` (plain stdout is injected, as on Claude
-  Code) and `PostToolUse`. Codex has **no `Notification` event**, so nothing sets
+  Code), `PreToolUse` (the same silent `working` refresh as `PostToolUse`, before each
+  tool call; it prints nothing, as PreToolUse's strict output allowlist requires) and
+  `PostToolUse` — five hooks, which `sparrow skill verify` counts. Codex has **no
+  `Notification` event**, so nothing sets
   *blocked — needs your input*; the playbook says so instead of pretending. Payloads are
   snake_case with PascalCase event values — byte-identical to what the shared shell hooks
   already parse, so those scripts are reused unmodified.
@@ -4026,23 +4033,69 @@ sparrow await [--timeout S] [--stale-seconds S] [--max-stream-age S] [--poll-sec
           # untouched): the wake is this process EXITING, which reaches the
           # session only from a DESCENDANT of the harness. Before any side
           # effect, a live harness pid that is demonstrably not an ancestor
-          # (parent chain walked via /proc, else `ps`; init never counts)
-          # refuses the arm: one stderr line, exit 5, nothing written. An
-          # ancestry that cannot be determined, or a harness pid that is not
-          # visible at all, never refuses. A harness PROVEN an ancestor is
-          # re-checked every 15s and on stream activity; once it is dead or no
+          # (parent chain walked via /proc, else ONE `ps -axo pid=,ppid=`
+          # snapshot per walk resolved in memory; reaching init ends the
+          # walk) refuses the arm: one stderr line, exit 5, nothing written. A
+          # session running as pid 1 (a container entrypoint) cannot be told
+          # apart from init — every process descends from it — so it is
+          # neither refused nor watched, and never recorded. Inside a detected
+          # pid namespace only a proven ancestor counts: Claude Code running in
+          # a container (its `CLAUDE_PID` really is our ancestor there) is
+          # watched and recorded exactly as outside, while a `no` or an
+          # undetermined answer — possibly a sandbox-local pid that merely
+          # shares the host `CLAUDE_PID`'s number, as in a sandboxed shell — is
+          # unjudgeable: no refusal, no record, no retries. OUTSIDE a pid
+          # namespace, a `CLAUDE_PID` that names no running process can only be
+          # a session that is gone, so the arm refuses it too: one stderr line
+          # ("the Claude Code session named by CLAUDE_PID (pid N) is not
+          # running: this listener could never wake it …"), exit 5, nothing
+          # written. A live harness whose ancestry cannot be determined never
+          # refuses: the listener arms and retries the proof on every tick. A later `yes` starts watching (in memory only); a later `no`
+          # means the arm should have refused, so the listener stands down
+          # exactly as an orphan does (below), with its own stderr line
+          # (arming could not prove ancestry, a later check shows this
+          # listener does not descend from the Claude Code session (pid N), so
+          # it cannot wake it; re-arm as a tracked background task). A harness
+          # still pending (seen alive at arm, ancestry unreadable) that then
+          # exits is orphaned too — it is gone. The retries are CAPPED: after
+          # 8 consecutive undetermined answers (two minutes) the ancestry walk
+          # stops for good (off Linux each walk is a blocking `ps` spawn), and
+          # one stderr line says so ("could not prove this listener descends
+          # from the Claude Code session (pid N) after 8 tries; watching only
+          # whether that session is still running"; `{ type:
+          # "await.harness_unproven", harnessPid, tries }` under -j). The
+          # harness then keeps a liveness-only check (kill 0) for the rest of
+          # the listener's life, so its exit still stands the listener down as
+          # an orphan. An error thrown after the stand-down (say, a 426 already
+          # in flight) never changes exit 5; it is reported as `{ type:
+          # "await.error", message }` under -j and as one line under -v.
+          # `harnessPid` is written to the owner record only when the
+          # listener is proven a descendant AT ARM TIME; the record is never
+          # amended, so a harness proven on a later tick is watched but not
+          # recorded. A watched harness is re-checked
+          # every 15s — liveness every time; ancestry every time where /proc
+          # exists, else once a minute (one `ps` spawn) — and on stream
+          # activity (liveness only, the cheap probe); once it is dead or no
           # longer an ancestor the listener stamps the heartbeat `orphaned
           # <nonce>` (owner-only, like the signal stamps), posts `idle` status to
-          # up to 10 of its unarchived rooms and clears its presence mark
-          # (best-effort, 5s budget), prints one stderr line and exits 5.
-          # `--allow-unowned` skips both checks.
+          # up to 10 of its unarchived rooms — only when the session is really
+          # gone: skipped while a usage-limit marker stands (the sticky
+          # `blocked — usage limit` note survives) and while the session is
+          # still alive (an ancestry `no`, or never a descendant: its own
+          # `working`/`blocked` note is not ours to clear) — and clears its
+          # presence mark
+          # (best-effort, 5s budget), prints one stderr line (`{ type:
+          # "await.orphaned", reason: "gone" | "never-owned", harnessPid }`
+          # under -j) and exits 5.
+          # `--allow-unowned` turns all of it off: no refusal, no watch, and
+          # no `harnessPid`, ever — even when the harness is an ancestor.
           # EXIT CODES ARE THE CONTRACT: 0 = work waiting, drain now; 2 =
           # --timeout elapsed with nothing waiting (line `{ type:
           # "await.timeout" }` — re-arm); 4 = superseded by a newer listener on
           # this state dir (stderr only, `{ type: "await.superseded", by }`
           # under -j; not an error); 5 = this process cannot wake the Claude
           # Code session (refused at arm time, or orphaned while waiting;
-          # `{ type: "await.unowned" | "await.orphaned", harnessPid }` under
+          # `{ type: "await.unowned" | "await.orphaned", … }` under
           # -j) — re-arm as a tracked background task; 143/129 = killed by
           # SIGTERM/SIGHUP (heartbeat stamped `killed:<signal>`); 1 = a real
           # failure. Diagnostics

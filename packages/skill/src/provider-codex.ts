@@ -20,7 +20,8 @@
  *             `stop_hook_active` — live-verified), SessionStart (its
  *             `hookSpecificOutput.additionalContext` reaches the model —
  *             live-verified), UserPromptSubmit (plain stdout is injected, same
- *             as Claude Code — live-verified) and PostToolUse. There is NO
+ *             as Claude Code — live-verified), PreToolUse (documented; silent
+ *             refresh only) and PostToolUse. There is NO
  *             `Notification` event in Codex, so nothing sets "blocked — needs
  *             your input"; the playbook says so rather than pretending.
  * Payloads  → snake_case (`hook_event_name`, `session_id`, `cwd`, `turn_id`,
@@ -65,13 +66,28 @@ const WRAPPER = 'sparrow-codex-hook.sh';
 export const CODEX_EVENTS: ReadonlyArray<string> = [
   'SessionStart',
   'UserPromptSubmit',
+  'PreToolUse',
   'PostToolUse',
   'Stop',
 ];
 
+/**
+ * The events whose firing stamp carries the Codex THREAD, and so can answer
+ * {@link hooksVerifiedForThread}. The tool events are wired too but stamp a bare
+ * `<kind>`: the wrapper skips the payload parse for them (they run on every tool
+ * call, and nothing downstream reads their thread), and a bare stamp must not
+ * pass as legacy proof for any thread.
+ */
+export const CODEX_THREAD_EVENTS: ReadonlyArray<string> = ['SessionStart', 'UserPromptSubmit', 'Stop'];
+
 const HOOKS: ReadonlyArray<{ event: string; script: string; mode?: string; timeout: number }> = [
   { event: 'SessionStart', script: 'sparrow-session-start.sh', timeout: 10 },
   { event: 'UserPromptSubmit', script: 'sparrow-auto-status.sh', mode: 'prompt', timeout: 20 },
+  // The working status is TTL'd at 600s and refreshed by tool calls; the same
+  // throttled refresh runs BEFORE each call so one long shell call cannot let
+  // it lapse. It prints nothing, which PreToolUse's strict output allowlist
+  // requires anyway.
+  { event: 'PreToolUse', script: 'sparrow-auto-status.sh', mode: 'pre-tool', timeout: 20 },
   { event: 'PostToolUse', script: 'sparrow-auto-status.sh', mode: 'post-tool', timeout: 20 },
   { event: 'Stop', script: 'sparrow-stop-check.sh', timeout: 30 },
 ];
@@ -184,7 +200,7 @@ function isOurs(command: unknown): boolean {
  *
  * The user's `hooks.json` is very likely to hold hooks of their own — possibly
  * in the same group as ours — so this filters at ENTRY level and only discards a
- * group once it is genuinely empty. Sweeping ALL events (not just the four we
+ * group once it is genuinely empty. Sweeping ALL events (not just the ones we
  * write) is what lets a future version move a hook to a different event without
  * leaving the old registration firing forever.
  */
@@ -207,7 +223,7 @@ function stripOurs(file: CodexHooksFile): void {
 }
 
 /**
- * Write our four registrations into `file`, preserving everything foreign.
+ * Write our registrations into `file`, preserving everything foreign.
  *
  * Ours go in their OWN group rather than joining an existing one: Codex runs the
  * entries of a group together, and putting a hook of ours beside somebody else's
@@ -477,7 +493,7 @@ export function hooksVerifiedForThread(stateDir: string, thread: string): HookVe
   const want = sanitizeThread(thread);
 
   const seen: Array<{ event: string; stamp: FiredStamp }> = [];
-  for (const event of CODEX_EVENTS) {
+  for (const event of CODEX_THREAD_EVENTS) {
     const stamp = readStampFile(dir, event, now);
     if (stamp) seen.push({ event, stamp });
   }
@@ -638,24 +654,39 @@ export const CODEX_ADAPTER: ProviderAdapter = {
   statusLines(r: Resolved): CheckLine[] {
     const lines: CheckLine[] = [];
     const hp = hooksJsonPath(r);
+    // ONE parse of hooks.json, used for validation and for what it registers.
+    const raw: CodexHooksFile = fs.existsSync(hp) ? readHooksFile(hp) : {};
     if (!fs.existsSync(hp)) {
       lines.push({ level: 'fail', text: `hooks.json: missing (${hp})` });
     } else {
-      const problems = validateCodexHooks(readHooksFile(hp));
+      const problems = validateCodexHooks(raw);
       lines.push(
         problems.length === 0
           ? { level: 'ok', text: `hooks.json: valid against the codex ${CODEX_MIN_VERSION} schema (${hp})` }
           : { level: 'fail', text: `hooks.json: INVALID — ${problems[0]}` },
       );
     }
-    const fired = CODEX_EVENTS.filter((e) => hookFiredAge(r, e) !== undefined);
+    // TRUST IS JUDGED ONLY OVER THE EVENTS hooks.json ACTUALLY REGISTERS. An
+    // event we wire that the file lacks (an install from before it was wired,
+    // e.g. PreToolUse) can never fire, and that is a re-install away, not a
+    // project-trust problem -- so it is named as such and kept out of the count.
+    const registered = CODEX_EVENTS.filter((e) => registeredCommand(raw, e) !== undefined);
+    const missing = CODEX_EVENTS.filter((e) => !registered.includes(e));
+    if (missing.length > 0 && registered.length > 0) {
+      lines.push({
+        level: 'warn',
+        text: `hooks:      not registered: ${missing.join(', ')} — run 'sparrow skill install --codex'`,
+      });
+    }
+    const judged = registered.length > 0 ? registered : CODEX_EVENTS;
+    const fired = judged.filter((e) => hookFiredAge(r, e) !== undefined);
     lines.push(
-      fired.length === CODEX_EVENTS.length
+      fired.length === judged.length
         ? { level: 'ok', text: 'trust:      OK — every wired hook has been observed firing' }
         : {
             level: 'warn',
             text:
-              `trust:      UNVERIFIED — ${fired.length}/${CODEX_EVENTS.length} hooks observed firing. ` +
+              `trust:      UNVERIFIED — ${fired.length}/${judged.length} hooks observed firing. ` +
               `Codex silently ignores project .codex/ files in an untrusted project, and untrusted ` +
               `hooks never run. Run 'sparrow skill verify --codex'.`,
           },
@@ -741,7 +772,7 @@ export const CODEX_ADAPTER: ProviderAdapter = {
    * The BLANKET never-fired report.
    *
    * Field case (2026-09-10): an agent installed the hooks, did both trust steps,
-   * ran turns — and all four events still read never-fired. At that point
+   * ran turns — and all wired events still read never-fired. At that point
    * repeating the trust instructions is the one answer that cannot help. So this
    * replaces them with a diagnostic step to TRY (offered as a suggestion,
    * because whether Codex loads newly written hook files into a session that is

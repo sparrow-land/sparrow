@@ -34,6 +34,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { readJsonRecord } from './state.js';
 
 /** Markers older than this are crash leftovers, not subagents. */
 export const SUBAGENT_STALE_SECONDS = 12 * 3600;
@@ -69,9 +70,8 @@ export function readSubagents(stateDir: string, now = Date.now()): Subagent[] {
     try {
       const ageSeconds = (now - fs.statSync(file).mtimeMs) / 1000;
       if (ageSeconds >= SUBAGENT_STALE_SECONDS) continue;
-      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (!parsed || typeof parsed !== 'object') continue;
-      const rec = parsed as Record<string, unknown>;
+      const rec = readJsonRecord(file);
+      if (!rec) continue;
       out.push({
         agent: str(rec.agent) ?? name.replace(/\.json$/, ''),
         type: str(rec.type) ?? 'unknown',

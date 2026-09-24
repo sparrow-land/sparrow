@@ -78,6 +78,17 @@ input=$(cat 2>/dev/null || true)
 # that big blows the per-string exec limit -- node then fails to launch, its
 # stderr is swallowed here, and the stamp quietly loses its thread (measured at
 # 150 KB in review, 2026-09-16).
+#
+# NOT FOR THE TOOL EVENTS. PreToolUse and PostToolUse wrap every tool call, and
+# neither of their inner hooks reads SPARROW_CODEX_THREAD (only the Stop hook
+# does), so they skip the parse -- and its node spawn -- entirely and stamp a
+# bare `<kind>`. `hooksVerifiedForThread` does not count their stamps as thread
+# evidence (a bare stamp would otherwise pass as legacy proof for ANY thread);
+# SessionStart, UserPromptSubmit and Stop answer that question.
+thread=""
+case "$event" in
+  PreToolUse | PostToolUse) ;;
+  *)
 if command -v node >/dev/null 2>&1; then
   thread=$(printf '%s' "$input" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(j&&typeof j==="object"&&typeof j.session_id==="string")process.stdout.write(j.session_id)}catch(e){}})' 2>/dev/null || true)
 else
@@ -86,6 +97,8 @@ else
     | sed -n 's/^[[:space:]]*{[^{}]*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1)
 fi
+    ;;
+esac
 # Sanitise whatever came back: a stamp filename's neighbour is still a file we
 # write, and a thread id is compared, printed and logged downstream.
 thread=$(printf '%s' "$thread" | tr -cd 'A-Za-z0-9_-' | cut -c1-128)

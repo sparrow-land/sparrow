@@ -418,9 +418,56 @@ describe('sparrow-codex-hook.sh — the thread on the stamp', () => {
     expect(() => run(WRAPPER, ['Stop', innerHook('exit 3')], { stdin: payload() })).toThrow();
   });
 
+  /* ---------------- tool events pay no node, and claim no thread ------------- *
+   * Only the Stop hook reads SPARROW_CODEX_THREAD, and with PreToolUse wired
+   * every Codex tool call runs this wrapper twice. So the tool events skip the
+   * payload parse entirely (no node spawn) and stamp a bare `<kind>`, which
+   * `hooksVerifiedForThread` does not count as thread evidence. The thread
+   * question is answered by SessionStart, UserPromptSubmit and Stop.
+   * -------------------------------------------------------------------------- */
+  describe('tool events skip the thread parse', () => {
+    const nodeLog = () => path.join(tmp, 'node.log');
+    const shimDir = () => path.join(tmp, 'shim');
+    const withShim = (event: string, stdin: string, inner: string): string => {
+      fs.mkdirSync(shimDir(), { recursive: true });
+      const shim = path.join(shimDir(), 'node');
+      fs.writeFileSync(shim, `#!/bin/sh\necho "$*" >> "${nodeLog()}"\nexec "${process.execPath}" "$@"\n`);
+      fs.chmodSync(shim, 0o755);
+      return execFileSync('sh', [WRAPPER, event, inner], {
+        input: stdin,
+        encoding: 'utf8',
+        env: { PATH: `${shimDir()}:${process.env.PATH ?? ''}`, HOME: home, SPARROW_STATE_DIR: stateDir },
+      });
+    };
+    const nodeCalls = (): number =>
+      fs.existsSync(nodeLog()) ? fs.readFileSync(nodeLog(), 'utf8').split('\n').filter(Boolean).length : 0;
+
+    it.each(['PreToolUse', 'PostToolUse'])('%s spawns no node, stamps a bare kind, exports no thread', (event) => {
+      const out = withShim(
+        event,
+        '{"session_id":"abc-123","hook_event_name":"x"}',
+        innerHook('printf "%s|%s" "${SPARROW_CODEX_THREAD:-none}" "${SPARROW_HOOK_RUNTIME:-}"'),
+      );
+      expect(nodeCalls()).toBe(0);
+      expect(read(event)).toBe('runtime');
+      expect(out).toBe('none|codex');
+    });
+
+    it('Stop still lifts the thread (with node) and hands it to the hook', () => {
+      const out = withShim(
+        'Stop',
+        '{"session_id":"abc-123","hook_event_name":"Stop"}',
+        innerHook('printf "%s" "${SPARROW_CODEX_THREAD:-none}"'),
+      );
+      expect(nodeCalls()).toBeGreaterThan(0);
+      expect(read('Stop')).toBe('runtime abc-123');
+      expect(out).toBe('abc-123');
+    });
+  });
+
   it('survives a payload that is not JSON at all', () => {
-    run(WRAPPER, ['PostToolUse', innerHook('exit 0')], { stdin: 'not json{{' });
-    expect(read('PostToolUse')).toBe('runtime');
+    run(WRAPPER, ['Stop', innerHook('exit 0')], { stdin: 'not json{{' });
+    expect(read('Stop')).toBe('runtime');
   });
 
   /* ------------------ the thread is a TOP-LEVEL field, only ------------------ *
@@ -431,36 +478,36 @@ describe('sparrow-codex-hook.sh — the thread on the stamp', () => {
    * worse than answering "unverified", because it answers confidently.
    * -------------------------------------------------------------------------- */
   it('takes the TOP-LEVEL session_id when a nested object repeats the key', () => {
-    run(WRAPPER, ['PostToolUse', innerHook('exit 0')], {
+    run(WRAPPER, ['Stop', innerHook('exit 0')], {
       stdin: '{"session_id":"real-thread","tool_response":{"session_id":"other-session"}}',
     });
-    expect(read('PostToolUse')).toBe('runtime real-thread');
+    expect(read('Stop')).toBe('runtime real-thread');
   });
 
   it('takes it even when the nested object comes FIRST', () => {
-    run(WRAPPER, ['PostToolUse', innerHook('exit 0')], {
+    run(WRAPPER, ['Stop', innerHook('exit 0')], {
       stdin: '{"tool_response":{"session_id":"other-session"},"session_id":"real-thread"}',
     });
-    expect(read('PostToolUse')).toBe('runtime real-thread');
+    expect(read('Stop')).toBe('runtime real-thread');
   });
 
   it('claims NO thread when session_id exists only nested', () => {
-    run(WRAPPER, ['PostToolUse', innerHook('exit 0')], {
+    run(WRAPPER, ['Stop', innerHook('exit 0')], {
       stdin: '{"hook_event_name":"PostToolUse","tool_response":{"session_id":"other-session"}}',
     });
-    expect(read('PostToolUse')).toBe('runtime');
+    expect(read('Stop')).toBe('runtime');
   });
 
   it('claims no thread for a non-string top-level session_id', () => {
-    run(WRAPPER, ['PostToolUse', innerHook('exit 0')], { stdin: '{"session_id":42}' });
-    expect(read('PostToolUse')).toBe('runtime');
+    run(WRAPPER, ['Stop', innerHook('exit 0')], { stdin: '{"session_id":42}' });
+    expect(read('Stop')).toBe('runtime');
   });
 
   it('claims no thread for malformed JSON, and still runs the child on the raw stdin', () => {
     const inner = innerHook('cat');
     const broken = '{"session_id": broken';
-    expect(run(WRAPPER, ['PostToolUse', inner], { stdin: broken })).toBe(broken);
-    expect(read('PostToolUse')).toBe('runtime');
+    expect(run(WRAPPER, ['Stop', inner], { stdin: broken })).toBe(broken);
+    expect(read('Stop')).toBe('runtime');
   });
 
   it('claims no thread for empty stdin, and stamps anyway', () => {
@@ -493,8 +540,8 @@ describe('sparrow-codex-hook.sh — the thread on the stamp', () => {
       tool_response: 'x'.repeat(150_000),
     });
     expect(big.length).toBeGreaterThan(128 * 1024);
-    const bytes = run(WRAPPER, ['PostToolUse', innerHook('wc -c')], { stdin: big }).trim();
-    expect(read('PostToolUse')).toBe('runtime abc-123');
+    const bytes = run(WRAPPER, ['Stop', innerHook('wc -c')], { stdin: big }).trim();
+    expect(read('Stop')).toBe('runtime abc-123');
     expect(Number(bytes)).toBe(Buffer.byteLength(big));
   });
 
@@ -516,7 +563,7 @@ describe('sparrow-codex-hook.sh — the thread on the stamp', () => {
     });
     afterEach(() => fs.rmSync(nodeless, { recursive: true, force: true }));
 
-    const runBare = (stdin: string, event = 'PostToolUse'): void => {
+    const runBare = (stdin: string, event = 'Stop'): void => {
       execFileSync('sh', [WRAPPER, event, innerHook('exit 0')], {
         input: stdin,
         encoding: 'utf8',
@@ -526,29 +573,29 @@ describe('sparrow-codex-hook.sh — the thread on the stamp', () => {
 
     it('still reads a plain top-level session_id', () => {
       runBare('{"hook_event_name":"PostToolUse","session_id":"abc-123","turn_id":"t1"}');
-      expect(read('PostToolUse')).toBe('runtime abc-123');
+      expect(read('Stop')).toBe('runtime abc-123');
     });
 
     it('still refuses to take a nested one', () => {
       runBare('{"hook_event_name":"PostToolUse","tool_response":{"session_id":"other-session"}}');
-      expect(read('PostToolUse')).toBe('runtime');
+      expect(read('Stop')).toBe('runtime');
     });
 
     it('takes the top-level key when a nested object repeats it AFTERWARDS', () => {
       runBare('{"session_id":"real-thread","tool_response":{"session_id":"other-session"}}');
-      expect(read('PostToolUse')).toBe('runtime real-thread');
+      expect(read('Stop')).toBe('runtime real-thread');
     });
 
     it('gives up rather than guess when the top-level key follows a nested object', () => {
       // The documented limit of the fallback: the first top-level key BEFORE any
       // nested object, else no thread.
       runBare('{"tool_response":{"session_id":"other-session"},"session_id":"real-thread"}');
-      expect(read('PostToolUse')).toBe('runtime');
+      expect(read('Stop')).toBe('runtime');
     });
 
     it('stamps, and stays silent, on junk', () => {
       runBare('not json{{');
-      expect(read('PostToolUse')).toBe('runtime');
+      expect(read('Stop')).toBe('runtime');
     });
   });
 });

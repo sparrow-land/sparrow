@@ -20,6 +20,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { readJsonRecord } from './state.js';
 
 export interface BlockedMarker {
   /** Absolute path of the marker file — what a clear deletes, by name. */
@@ -55,9 +56,8 @@ export function readBlockedMarkers(stateDir: string): BlockedMarker[] {
   for (const name of names) {
     const file = path.join(dir, name);
     try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (!parsed || typeof parsed !== 'object') continue;
-      const rec = parsed as Record<string, unknown>;
+      const rec = readJsonRecord(file);
+      if (!rec) continue;
       out.push({
         file,
         reason: str(rec.reason) ?? 'unknown',

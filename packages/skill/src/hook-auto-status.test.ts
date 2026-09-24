@@ -3872,7 +3872,7 @@ describe('sparrow-auto-status.sh — a bounded working status', () => {
     expect(statusPosts().length).toBe(afterPrompt);
 
     // Later in the same turn: the throttle has elapsed and the note is ageing.
-    ageNoteStamp(60);
+    ageNoteStamp(320); // past half the TTL: due for a re-post
     ageThrottle(60);
     runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
     const refresh = statusPosts().slice(afterPrompt);
@@ -3903,13 +3903,21 @@ describe('sparrow-auto-status.sh — a bounded working status', () => {
     expect(statusPosts()).toHaveLength(0);
   });
 
-  it('subagent-start is sticky; the last subagent-stop goes back to the TTL', () => {
+  /* A subagent's note is TTL'd like any other `working`: the parent's
+   * PreToolUse/PostToolUse fire for the subagent's own tool calls (observed on
+   * this machine: the throttle stamp kept moving while only subagents ran), so
+   * the refresh keeps it alive -- and a marker orphaned by a missed SubagentStop
+   * can no longer hold a sticky `working (1 subagent: …)` for 12 hours. */
+  it('subagent-start posts a TTL note, and so does the last subagent-stop', () => {
     writeLoopState('engaged');
     stubCurl();
     runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
     const start = statusPosts();
     expect(start.length).toBeGreaterThan(0);
-    for (const p of start) expect(isSticky(p.body)).toBe(true);
+    for (const p of start) {
+      expect(p.body).toContain('"note":"working (1 subagent: explore)"');
+      expect(isTtl(p.body)).toBe(true);
+    }
 
     runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_1', 'explore'));
     const stop = statusPosts().slice(start.length);
@@ -3920,7 +3928,7 @@ describe('sparrow-auto-status.sh — a bounded working status', () => {
     }
   });
 
-  it('a subagent-stop that leaves others running keeps the summary sticky', () => {
+  it('a subagent-stop that leaves others running posts the summary with the TTL', () => {
     writeLoopState('engaged');
     writeSubagent('ag_2', 'code-review');
     stubCurl();
@@ -3931,21 +3939,24 @@ describe('sparrow-auto-status.sh — a bounded working status', () => {
     expect(stop.length).toBeGreaterThan(0);
     for (const p of stop) {
       expect(p.body).toContain('"note":"working (1 subagent: code-review)"');
-      expect(isSticky(p.body)).toBe(true);
+      expect(isTtl(p.body)).toBe(true);
     }
   });
 
-  it('the post-tool refresh of a subagent note stays sticky', () => {
+  it('the tool-call refresh keeps a subagent note alive with the TTL, text unchanged', () => {
     writeLoopState('engaged');
     stubCurl();
     runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
     const before = statusPosts().length;
-    ageNoteStamp(60);
+    ageNoteStamp(320);
     ageThrottle(60);
     runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
     const refresh = statusPosts().slice(before);
     expect(refresh.length).toBeGreaterThan(0);
-    for (const p of refresh) expect(isSticky(p.body)).toBe(true);
+    for (const p of refresh) {
+      expect(p.body).toContain('"note":"working (1 subagent: explore)"');
+      expect(isTtl(p.body)).toBe(true);
+    }
   });
 
   it('a blocked ask stays sticky', () => {
@@ -3978,5 +3989,425 @@ describe('sparrow-auto-status.sh — a bounded working status', () => {
     const idle = statusPosts().slice(before);
     expect(idle).toHaveLength(2);
     for (const p of idle) expect(p.body).toBe('{"state":"idle"}');
+  });
+});
+
+/* ===================== PRE-TOOL: the refresh at the START ================== *
+ * One tool call longer than ten minutes (a 600s Bash call, a Monitor wait, a
+ * long build) used to let the 600s TTL lapse mid-turn: the only refresh ran
+ * AFTER the call. PreToolUse runs the same throttled refresh before it, so the
+ * status now lapses only inside a single call longer than ten minutes. It
+ * shares post-tool's throttle, never rewrites the note, and never speaks.
+ * =========================================================================== */
+describe('sparrow-auto-status.sh — pre-tool refresh', () => {
+  const PRE = '{"hook_event_name":"PreToolUse","tool_name":"Bash"}';
+  const age = (file: string, seconds: number): void => {
+    if (!fs.existsSync(file)) return;
+    const when = new Date(Date.now() - seconds * 1000);
+    fs.utimesSync(file, when, when);
+  };
+  const THROTTLE = () => path.join(stateDir, 'auto-status-post');
+  // Old enough (>= 300s, half the TTL) that a tool call re-posts it.
+  const stampWorking = (note = 'working', ageSeconds = 320): void => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(NOTE_STAMP(), note);
+    age(NOTE_STAMP(), ageSeconds);
+  };
+
+  it('re-posts the current note with the TTL and refreshes presence, silently', () => {
+    writeLoopState('engaged');
+    stampWorking();
+    stubCurl();
+    const r = runHook('pre-tool', PRE);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe('');
+    const posts = statusPosts();
+    expect(posts).toHaveLength(2);
+    for (const p of posts) {
+      expect(p.body).toBe('{"state":"working","note":"working","ttlSeconds":600}');
+    }
+    expect(presencePosts()).toHaveLength(1);
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working');
+  });
+
+  it('outside the window refreshes presence every time, but the NOTE only once it is half its TTL old', () => {
+    // A 600s note needs no re-post every 20s: in 10 rooms that is a room listing
+    // plus 10 POSTs per window. Presence keeps the 20s cadence; the note is
+    // re-posted from 300s of age (and the near-expiry rule at 560s backs it up).
+    writeLoopState('engaged');
+    stubCurl();
+    stampWorking('working', 100);
+    runHook('pre-tool', PRE);
+    expect(presencePosts()).toHaveLength(1);
+    expect(statusPosts()).toHaveLength(0);
+    stampWorking('working', 320);
+    age(THROTTLE(), 60);
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(presencePosts()).toHaveLength(2);
+    expect(statusPosts()).toHaveLength(2);
+  });
+
+  it('keeps the exact note text (sinceAt survives), even one the composer would not produce', () => {
+    writeLoopState('engaged');
+    stampWorking('refactoring the parser');
+    stubCurl();
+    runHook('pre-tool', PRE);
+    expect(statusPosts()).toHaveLength(2);
+    for (const p of statusPosts()) expect(p.body).toContain('"note":"refactoring the parser"');
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('refactoring the parser');
+  });
+
+  it('is inferred from the PreToolUse event when no mode is passed', () => {
+    writeLoopState('engaged');
+    stampWorking();
+    stubCurl();
+    runHook('', PRE);
+    expect(statusPosts()).toHaveLength(2);
+  });
+
+  it('shares the post-tool throttle: nothing more inside the window, from either hook', () => {
+    writeLoopState('engaged');
+    stampWorking();
+    stubCurl();
+    runHook('pre-tool', PRE);
+    const after = log().length;
+    age(NOTE_STAMP(), 320); // the note is old again; only the throttle holds it
+    runHook('pre-tool', PRE);
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(log().length).toBe(after);
+    // Past the window it refreshes again.
+    age(THROTTLE(), 60);
+    runHook('pre-tool', PRE);
+    expect(statusPosts()).toHaveLength(4);
+  });
+
+  it('refreshes presence only when the note itself was posted moments ago', () => {
+    writeLoopState('engaged');
+    stampWorking('working', 1);
+    stubCurl();
+    runHook('pre-tool', PRE);
+    expect(statusPosts()).toHaveLength(0);
+    expect(presencePosts()).toHaveLength(1);
+  });
+
+  it('is silent about status when idle: no stamp, an idle stamp, or idle owed', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('pre-tool', PRE); // nothing ever posted here
+    expect(statusPosts()).toHaveLength(0);
+
+    stampWorking('idle');
+    age(THROTTLE(), 60);
+    runHook('pre-tool', PRE);
+    expect(statusPosts()).toHaveLength(0);
+
+    stampWorking('working');
+    fs.writeFileSync(IDLE_OWED(), '');
+    age(THROTTLE(), 60);
+    runHook('pre-tool', PRE);
+    expect(statusPosts()).toHaveLength(0);
+  });
+
+  it('runs the resume handshake when the idle marker stands (a long FIRST call is not idle)', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('stop');
+    const before = statusPosts().length;
+    runHook('pre-tool', PRE);
+    const working = statusPosts().slice(before);
+    expect(working).toHaveLength(2);
+    for (const p of working) expect(p.body).toBe('{"state":"working","note":"working","ttlSeconds":600}');
+    expect(fs.existsSync(path.join(stateDir, 'auto-status-idle'))).toBe(false);
+    expect(fs.existsSync(IDLE_OWED())).toBe(false);
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working');
+    // Idempotent with post-tool: the marker is gone, so the call's own
+    // post-tool posts nothing more.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts().length).toBe(before + 2);
+  });
+
+  /* The throttled path must be CHEAP: it runs in front of every tool call. A
+   * logging `node` shim proves the credential lookup (a node spawn) is never
+   * reached when the throttle window still holds. */
+  describe('the throttled path never resolves credentials', () => {
+    const nodeLog = () => path.join(stubBin, 'node.log');
+    const shimNode = (): void => {
+      const p = path.join(stubBin, 'node');
+      fs.writeFileSync(p, `#!/bin/sh\necho "$*" >> "${nodeLog()}"\nexec "${process.execPath}" "$@"\n`);
+      fs.chmodSync(p, 0o755);
+    };
+    const credsEnv = (): Record<string, string> => {
+      const xdg = path.join(home, 'xdg');
+      fs.mkdirSync(path.join(xdg, 'sparrow'), { recursive: true });
+      fs.writeFileSync(
+        path.join(xdg, 'sparrow', 'credentials.json'),
+        JSON.stringify({ defaultProfile: 'p', profiles: { p: { server: 'https://example.test', token: 'agk_x' } } }),
+      );
+      return { XDG_CONFIG_HOME: xdg, SPARROW_SERVER: '', SPARROW_TOKEN: '' };
+    };
+    const nodeCalls = (): string[] =>
+      fs.existsSync(nodeLog()) ? fs.readFileSync(nodeLog(), 'utf8').split('\n').filter(Boolean) : [];
+
+    it('pre-tool inside the window: exit 0, no node, no curl', () => {
+      writeLoopState('engaged');
+      stampWorking();
+      stubCurl();
+      shimNode();
+      const env = credsEnv();
+      runHook('pre-tool', PRE, env); // opens the window (and does resolve creds)
+      expect(nodeCalls().length).toBeGreaterThan(0); // the shim is on the path
+      fs.rmSync(nodeLog(), { force: true });
+      fs.rmSync(curlLog, { force: true });
+      // A stale pending marker the sweep WOULD coalesce, and a legacy token the
+      // migration WOULD convert: a throttled call must touch neither.
+      stampPending('0000000001-old');
+      const stale = path.join(PENDING_DIR(), '0000000001-old');
+      const longAgo = new Date(Date.now() - 2 * 3600 * 1000);
+      fs.utimesSync(stale, longAgo, longAgo);
+      fs.writeFileSync(PENDING_LEGACY(), 'legacy');
+      const namesBefore = pendingNames();
+      const mtimeBefore = fs.statSync(stale).mtimeMs;
+      const r = runHook('pre-tool', PRE, env);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toBe('');
+      expect(nodeCalls()).toEqual([]);
+      expect(log()).toEqual([]);
+      expect(pendingNames()).toEqual(namesBefore);
+      expect(fs.statSync(stale).mtimeMs).toBe(mtimeBefore);
+      expect(fs.readFileSync(PENDING_LEGACY(), 'utf8')).toBe('legacy');
+    });
+
+    /* One drift test, two callers: the cheap exit leaves only when the backstop
+     * would have nothing to repair. Same inputs, inside the throttle window:
+     * where the backstop posts, the cheap exit must NOT have left early, and
+     * where it does not, the call must have spawned nothing at all. */
+    it.each([
+      ['no stamp', null, false, false],
+      ['an idle stamp', 'idle', false, false],
+      ['a stamp equal to the composition', 'working', false, false],
+      ['a stamp the composition has moved past', 'working', true, true],
+      ['an idle stamp with a subagent running', 'idle', true, false],
+    ])('cheap exit and backstop agree: %s', (_label, stamp, subagent, drifted) => {
+      writeLoopState('engaged');
+      stubCurl();
+      shimNode();
+      const env = credsEnv();
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(path.join(stateDir, 'auto-status-post'), ''); // window holds
+      if (stamp !== null) fs.writeFileSync(NOTE_STAMP(), stamp);
+      if (subagent) writeSubagent('ag_1', 'explore');
+      const r = runHook('post-tool', '{"hook_event_name":"PostToolUse"}', env);
+      expect(r.code).toBe(0);
+      if (drifted) {
+        expect(statusPosts().length).toBeGreaterThan(0);
+      } else {
+        expect(nodeCalls()).toEqual([]);
+        expect(log()).toEqual([]);
+      }
+    });
+
+    it('post-tool\'s throttled tail: exit 0, no node, no curl', () => {
+      writeLoopState('engaged');
+      stampWorking();
+      stubCurl();
+      shimNode();
+      const env = credsEnv();
+      runHook('post-tool', '{"hook_event_name":"PostToolUse"}', env);
+      fs.rmSync(nodeLog(), { force: true });
+      fs.rmSync(curlLog, { force: true });
+      const r = runHook('post-tool', '{"hook_event_name":"PostToolUse"}', env);
+      expect(r.code).toBe(0);
+      expect(nodeCalls()).toEqual([]);
+      expect(log()).toEqual([]);
+    });
+
+    it.each(['pre-tool', 'post-tool'])('%s exits 0 even when the shell aborts (unbound variable)', (mode) => {
+      // PreToolUse turns a non-zero exit into a DENIED tool call, and dash's
+      // `set -u` abort exits 2 -- so exit 0 is enforced by an EXIT trap, not by
+      // care. Proved on a COPY of the shipped script with one faulty line
+      // inserted right after its preamble (trap, then set -u, then MODE), so
+      // the asset itself carries no test hook.
+      const src = fs.readFileSync(SCRIPT, 'utf8');
+      const anchor = 'MODE="${1:-}"\n';
+      const trapAt = src.search(/^trap 'exit 0' EXIT$/m);
+      expect(trapAt).toBeGreaterThan(0);
+      expect(trapAt).toBeLessThan(src.search(/^set -u$/m));
+      expect(src).toContain(anchor);
+      const faulty = path.join(stubBin, 'faulty-auto-status.sh');
+      fs.writeFileSync(faulty, src.replace(anchor, `${anchor}: "$SPARROW_NEVER_SET_PROBE"\necho reached-after-fault\n`));
+      writeLoopState('engaged');
+      stubCurl();
+      for (const shell of ['sh', 'bash']) {
+        const r = spawnSync(shell, [faulty, mode], {
+          input: '{}',
+          env: {
+            PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+            HOME: home,
+            SPARROW_STATE_DIR: stateDir,
+            CURL_LOG: curlLog,
+            ROOMS_JSON,
+          },
+          encoding: 'utf8',
+        });
+        expect({ shell, code: r.status }).toEqual({ shell, code: 0 });
+        expect(r.stdout).toBe(''); // the fault fired: nothing after it ran
+        expect(r.stderr).toMatch(/SPARROW_NEVER_SET_PROBE/); // and it really was an abort
+      }
+      expect(log()).toEqual([]);
+    });
+
+    it('ships no test-only fault hook in the asset', () => {
+      expect(fs.readFileSync(SCRIPT, 'utf8')).not.toContain('SPARROW_TEST_FAULT');
+    });
+
+    it('post-tool repairs owed markers inside the window, even when pre-tool keeps restamping it', () => {
+      // On HEAD the repair ran on post-tool's ~20s refresh. Once pre-tool began
+      // stamping the same throttle, a turn of quick calls never reached it until
+      // Stop. The repair is owed debt, so it must not wait for the window.
+      writeLoopState('engaged');
+      stampWorking();
+      stubCurl();
+      runHook('pre-tool', PRE); // opens the window
+      runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+      const before = statusPosts().length;
+      // Both kinds of debt: a mutation nobody acknowledged, and a fan-out that
+      // reached only some rooms (which forces a re-post of the same body).
+      stampPending('0000000009-owed');
+      fs.writeFileSync(path.join(stateDir, 'auto-status-diverged'), '');
+      runHook('pre-tool', PRE); // inside the window: nothing
+      expect(statusPosts().length).toBe(before);
+      runHook('post-tool', '{"hook_event_name":"PostToolUse"}'); // inside the window: repairs
+      expect(statusPosts().length).toBeGreaterThan(before);
+      expect(pendingCount()).toBe(0);
+      expect(fs.existsSync(path.join(stateDir, 'auto-status-diverged'))).toBe(false);
+    });
+
+    it('a drifted post-tool computes the drift once, whether or not the cheap exit looked first', () => {
+      // Every drift test stats each subagent marker; the backstop reuses the
+      // cheap exit's answer instead of paying for it twice. Counted with a
+      // logging `stat` shim: the same work inside the window as outside it.
+      const statLog = path.join(stubBin, 'stat.log');
+      const realStat = spawnSync('sh', ['-c', 'command -v stat'], { encoding: 'utf8' }).stdout.trim();
+      fs.writeFileSync(
+        path.join(stubBin, 'stat'),
+        `#!/bin/sh\necho "$*" >> "${statLog}"\nexec "${realStat}" "$@"\n`,
+      );
+      fs.chmodSync(path.join(stubBin, 'stat'), 0o755);
+      const markerStats = (): number =>
+        fs.existsSync(statLog)
+          ? fs.readFileSync(statLog, 'utf8').split('\n').filter((l) => l.includes('subagents/ag_1.json')).length
+          : 0;
+      const drifted = (inWindow: boolean): number => {
+        writeLoopState('engaged');
+        stubCurl();
+        fs.writeFileSync(NOTE_STAMP(), 'working');
+        writeSubagent('ag_1', 'explore'); // the composition moved past the stamp
+        const throttle = path.join(stateDir, 'auto-status-post');
+        if (inWindow) fs.writeFileSync(throttle, '');
+        else fs.rmSync(throttle, { force: true });
+        fs.rmSync(statLog, { force: true });
+        const before = statusPosts().length;
+        runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+        expect(statusPosts().length).toBeGreaterThan(before); // the backstop posted
+        return markerStats();
+      };
+      const outside = drifted(false);
+      const inside = drifted(true);
+      expect(outside).toBeGreaterThan(0);
+      expect(inside).toBe(outside);
+    });
+
+    it('pre-tool refreshes INSIDE the window when the note is close to expiring', () => {
+      // A call that starts inside the window and runs ~580s would otherwise
+      // outlive a note last posted ~590s before it ends. Past 560s of age the
+      // throttle no longer holds pre-tool back.
+      writeLoopState('engaged');
+      stubCurl();
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(THROTTLE(), ''); // the window holds
+      stampWorking('working', 500); // not yet close: nothing
+      runHook('pre-tool', PRE);
+      expect(statusPosts()).toHaveLength(0);
+      stampWorking('working', 570); // close to the 600s TTL: refresh anyway
+      runHook('pre-tool', PRE);
+      const posts = statusPosts();
+      expect(posts).toHaveLength(2);
+      for (const p of posts) expect(p.body).toBe('{"state":"working","note":"working","ttlSeconds":600}');
+    });
+
+    it('the near-expiry bypass is itself rate-limited: a failing server costs one attempt per window', () => {
+      // The note stamp only moves on a SUCCESSFUL post, so during an outage it
+      // stays past the near-expiry age -- and an unlimited bypass would run the
+      // full credential/lock/fan-out path in front of EVERY tool call.
+      writeLoopState('engaged');
+      const failing = path.join(stubBin, 'curl');
+      fs.writeFileSync(failing, `#!/bin/sh\nprintf 'X\\n' >> "$CURL_LOG"\nexit 22\n`);
+      fs.chmodSync(failing, 0o755);
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(THROTTLE(), '');
+      stampWorking('working', 570);
+      const calls = (): number => (fs.existsSync(curlLog) ? fs.readFileSync(curlLog, 'utf8').split('\n').filter(Boolean).length : 0);
+      runHook('pre-tool', PRE);
+      const first = calls();
+      expect(first).toBeGreaterThan(0); // it tried
+      runHook('pre-tool', PRE); // inside the same window: no second attempt
+      runHook('pre-tool', PRE);
+      expect(calls()).toBe(first);
+    });
+
+    it('never bypasses the window for an idle stamp', () => {
+      writeLoopState('engaged');
+      stubCurl();
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(THROTTLE(), '');
+      stampWorking('idle', 570);
+      runHook('pre-tool', PRE);
+      runHook('pre-tool', PRE);
+      expect(log()).toEqual([]);
+    });
+
+    it('a huge throttle override cannot make every note "near expiry"', () => {
+      // 600 - 600 - 20 would be negative: every note, even a fresh one, would
+      // bypass. The age is clamped to a positive floor.
+      writeLoopState('engaged');
+      stubCurl();
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(THROTTLE(), '');
+      stampWorking('working', 1);
+      runHook('pre-tool', PRE, { SPARROW_STATUS_POST_THROTTLE: '600' });
+      expect(log()).toEqual([]);
+    });
+
+    it('post-tool still repairs a drifted note inside the window (the backstop is not throttled)', () => {
+      writeLoopState('engaged');
+      stampWorking();
+      stubCurl();
+      runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+      const before = statusPosts().length;
+      writeSubagent('ag_1', 'explore'); // a marker appearing without its hook
+      runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+      expect(statusPosts().length).toBeGreaterThan(before);
+    });
+
+    it('pre-tool inside the window still runs the handshake when the idle marker stands', () => {
+      writeLoopState('engaged');
+      stampWorking();
+      stubCurl();
+      runHook('pre-tool', PRE); // opens the window
+      fs.writeFileSync(path.join(stateDir, 'auto-status-idle'), '');
+      fs.writeFileSync(NOTE_STAMP(), 'idle');
+      const before = statusPosts().length;
+      runHook('pre-tool', PRE);
+      expect(statusPosts().length).toBe(before + 2);
+      expect(fs.existsSync(path.join(stateDir, 'auto-status-idle'))).toBe(false);
+    });
+  });
+
+  it('writes nothing while paused', () => {
+    writeLoopState('paused');
+    stampWorking();
+    stubCurl();
+    runHook('pre-tool', PRE);
+    expect(log()).toHaveLength(0);
   });
 });

@@ -24,6 +24,18 @@ export class CliError extends Error {}
  * `sparrow-cli/0.1.0+20260831.abc1234`. Passed as `clientIdent` on every client
  * the CLI builds so the server can advertise upgrades and enforce a minimum.
  */
+/** An explicit OFF word (`0`/`false`/`no`/`off`, any case). Unset or empty is NOT off. */
+export function envSwitchedOff(value: string | undefined): boolean {
+  const v = value?.trim().toLowerCase();
+  return v === '0' || v === 'false' || v === 'no' || v === 'off';
+}
+
+/** Set, non-empty, and not an explicit off word — the ONE reading of an on-switch. */
+export function envSwitchedOn(value: string | undefined): boolean {
+  const v = value?.trim().toLowerCase();
+  return v !== undefined && v !== '' && !envSwitchedOff(v);
+}
+
 export const CLI_CLIENT_IDENT = `sparrow-cli/${clientBuildVersion()}`;
 
 const CONTENT_TYPES: Record<string, string> = {

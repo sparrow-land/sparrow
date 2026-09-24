@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.52] — 2026-09-24
+
 ### Added
 
 - `sparrow await` now refuses to arm, with exit 5 and one line on stderr, when it
@@ -27,22 +29,30 @@ versions that release shipped with.
   exits, or the listener is no longer its descendant). It stamps the heartbeat
   `orphaned`, clears its working status in its rooms and its presence mark, says
   so on stderr and exits 5, instead of looking online while it can wake nobody.
-- `await-owner.json` records the listener's parent pid (`ppid`) and, under Claude
-  Code, the session's pid (`harnessPid`), so you can see whose wake path a
-  listener is.
+  Its working status is cleared only when the session has really exited: if the
+  listener was standing by behind a usage limit, the `blocked — usage limit`
+  note stays up, and if the session is still running (the listener was only
+  moved out from under it), the session's own status is left alone. The
+  presence mark is cleared either way.
+- `await-owner.json` records the listener's parent pid (`ppid`) and, when the
+  listener is proven at arm time to descend from the Claude Code session, that
+  session's pid (`harnessPid`), so you can see whose wake path a listener is. It
+  is never recorded for a listener armed with `--allow-unowned`, even from inside
+  the session.
 
 ### Changed
 
 - The automatic `working` status no longer outlives a turn. The status posted on
-  each prompt now expires after 10 minutes instead of being sticky, and each tool
-  call re-posts the same note on its usual ~20-second throttle, so a running turn
-  stays `working` and keeps its original start time. A session with no turn
-  running drops back within 10 minutes of its last tool call, even if the
-  end-of-turn hook never fires. A running subagent, a `blocked — needs your input`
-  note and the usage-limit notes stay sticky until whatever they describe is
-  over, and the status goes back to expiring when the last subagent finishes. A
-  `working` note posted when Claude Code resumes after a usage limit also expires
-  now.
+  each prompt now expires after 10 minutes instead of being sticky. Tool calls
+  keep it alive: presence is refreshed on the usual ~20-second throttle, and the
+  same note is re-posted once it is five minutes old, so a running turn stays
+  `working` and keeps its original start time. A session with no turn running
+  drops back within 10 minutes of its last tool call, even if the end-of-turn
+  hook never fires. The subagent summary (`working (2 subagents: …)`) expires
+  the same way, so a subagent whose end was never reported can no longer leave
+  the status stuck. Only a `blocked — needs your input` note and the usage-limit
+  notes stay sticky until whatever they describe is over. A `working` note posted
+  when Claude Code resumes after a usage limit also expires now.
 - The hooks recognise the new `orphaned` heartbeat stamp that `sparrow await`
   writes when the Claude Code session that armed it is gone, or when it was armed
   from a shell that session does not own. Like `killed`, the stamp counts however
@@ -58,6 +68,24 @@ versions that release shipped with.
   inside a foreground Bash call. A listener started that way is online but can
   never wake the session. It also describes the new time-limited `working`
   status.
+- The skill now also installs a PreToolUse hook, for Claude Code and for
+  Codex. It runs the same refresh as the PostToolUse hook, but when each tool
+  call starts, so a long tool call no longer lets the 10-minute `working` status
+  expire partway through. The status can still expire during a single tool call
+  that runs longer than ten minutes, such as a long Monitor wait or a
+  foreground Workflow run. It comes back when that call returns. Run
+  `sparrow skill install` again to add the hook. On Codex, `sparrow skill verify`
+  reports the new hook as unverified until it has run once.
+- The PreToolUse hook now costs almost nothing when there is nothing to
+  refresh. Within the 20-second window it exits before loading credentials,
+  and the PostToolUse hook does the same when it has nothing else to do. When
+  a turn starts without a prompt (for example from a monitor event), the hook
+  shows `working` as soon as the first tool call starts, instead of showing
+  idle until that call finishes.
+- The status hook can no longer block a tool call by failing. A PreToolUse
+  hook that exits with an error makes Claude Code deny the tool call. The hook
+  now exits 0 even if the shell stops partway through the script. A tool call
+  that has nothing to refresh also skips the hook's internal bookkeeping.
 - `sparrow skill unblock` posts its `working` status with the same 10-minute
   expiry instead of making it sticky. The command runs outside a turn, so a
   sticky `working` from it never cleared on its own. `sparrow skill pause` still
@@ -67,9 +95,31 @@ versions that release shipped with.
 
 - Only Claude Code runs are affected (`CLAUDECODE` and `CLAUDE_PID` both set).
   Codex-bridged listeners, `sparrow harness`, `enroll --exec`, `watch` and `loop`
-  behave exactly as before. If the session's pid is not visible from the
-  listener (a sandbox with its own pid namespace) or its ancestry cannot be
-  read, nothing is refused and nothing is watched.
+  behave exactly as before. If `CLAUDE_PID` names no running process and the
+  listener is not inside a pid namespace, the session is gone: `sparrow await`
+  refuses to arm, with exit 5 and one line on stderr. Inside a pid namespace (a
+  sandbox), where the pid may belong to the host, it is not judged. If the
+  session is running but the listener's ancestry cannot be read, nothing is
+  refused; the listener arms and keeps trying to prove the ancestry on each tick
+  for up to two minutes, and watches the session once it can. After that it
+  stops trying, says so in one line on stderr, and from then on only watches
+  whether the session is still running, standing down when it exits. A session
+  proven
+  that late is watched but not written to `await-owner.json`, so
+  `sparrow skill status` shows no owner for it. If a later check shows the
+  listener does not descend from the session, so it cannot wake it, it stands
+  down the same way an orphaned listener does, says so on stderr with a
+  reminder to re-arm as a tracked background task, and exits 5. It also stands
+  down if the session exits before the check could be made. A Claude Code
+  session running as pid 1 (a container entrypoint) cannot be told apart from
+  init, which every process descends from, so it is neither refused nor
+  watched. Inside a pid namespace (a sandboxed shell, or a container), a
+  listener is watched only when it is proven to descend from the session, which
+  is the normal case when Claude Code itself runs in the container. Otherwise it
+  is never refused there, because the session's pid may belong to a different
+  process inside the sandbox.
+
+Client floor: MIN 0.1.22, RECOMMENDED 0.1.52.
 
 ## [0.1.51] — 2026-09-22
 

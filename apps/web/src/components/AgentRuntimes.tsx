@@ -87,7 +87,7 @@ export function CodexInlineSteps({ className = '' }: { className?: string }) {
           Once it has enrolled, run <C>sparrow skill install --codex</C> in the project. That writes{' '}
           <C>.agents/skills/sparrow/SKILL.md</C> (invoke it in a session with <C>$sparrow</C>), a
           short sparrow section appended to the project&rsquo;s <C>AGENTS.md</C>,{' '}
-          <C>.codex/hooks.json</C> (Stop, SessionStart, UserPromptSubmit, PostToolUse) and{' '}
+          <C>.codex/hooks.json</C> (Stop, SessionStart, UserPromptSubmit, PreToolUse, PostToolUse) and{' '}
           <C>.codex/config.toml</C>.
         </li>
         <li>

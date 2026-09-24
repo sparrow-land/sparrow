@@ -82,7 +82,14 @@ export {
 } from './blocked.js';
 
 /** Why the current listener generation died, when it recorded a reason. */
-export { readAwaitFailure, type AwaitFailure } from './await-failure.js';
+export { isPid, pidAlive, type PidSignal } from './pid.js';
+export {
+  ownerSnapshotOf,
+  readAwaitFailure,
+  readOwnerSnapshot,
+  type AwaitFailure,
+  type OwnerSnapshot,
+} from './owner-snapshot.js';
 
 /** Sandbox detection — a listener armed inside a PID namespace is already dead. */
 export { detectPidNamespace, type PidNamespaceProbe, type PidNamespaceReport } from './sandbox.js';
@@ -107,6 +114,10 @@ export {
   readHeartbeatKind,
   readHeartbeatState,
   markHeartbeatDead,
+  markHeartbeatOrphaned,
+  markHeartbeatBlocked,
+  markHeartbeatWord,
+  readJsonRecord,
   loopStatePath,
   heartbeatPath,
   formatAge,

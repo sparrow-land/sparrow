@@ -1,8 +1,8 @@
 #!/bin/sh
 # Sparrow auto-status hook (Claude Code) — makes working/idle status automatic.
 #
-# One script, four modes (the mode is the first arg in the settings command; if
-# absent it is inferred from the hook event in stdin JSON):
+# One script, several modes (the mode is the first arg in the settings command;
+# if absent it is inferred from the hook event in stdin JSON):
 #   prompt        (UserPromptSubmit) → "working" across every room, TTL'd at
 #                 600s and NOT sticky (see A BOUNDED `working` below), + a
 #                 presence heartbeat. Note is the generic "working" unless
@@ -17,9 +17,11 @@
 #                 background listener was killed (a Claude Code interrupt kills
 #                 the process tree) ever finds out.
 #   post-tool     (PostToolUse) → throttled (~20s) presence refresh, and on the
-#                 same throttle a RE-POST of the note every room was last told
-#                 (the stamp's text, unchanged, so its sinceAt keeps reflecting
-#                 when the work actually STARTED) with the 600s TTL: a live turn
+#                 same throttle -- once the note is half its TTL old (300s),
+#                 never more often -- a RE-POST of the note every room was last
+#                 told (the stamp's text, unchanged, so its sinceAt keeps
+#                 reflecting when the work actually STARTED) with the 600s TTL:
+#                 a live turn
 #                 keeps its `working` alive this way, and a session with no turn
 #                 running loses it within 600s of the last tool call. PLUS the
 #                 idle→working resume handshake: if the last event was a stop
@@ -29,6 +31,19 @@
 #                 run entirely under the previous stop's idle. It never
 #                 rewrites the note TEXT except to repair a drifted composition
 #                 (the backstop below).
+#   pre-tool      (PreToolUse) → the SAME resume handshake and throttled
+#                 refresh (presence + re-post of the stamp's note with the 600s
+#                 TTL) as post-tool, sharing its throttle stamp, at the START of
+#                 every tool call. Without it a single call longer than the TTL
+#                 let `working` lapse mid-turn until the call returned, and a
+#                 monitor-triggered turn whose first call was long read as idle
+#                 throughout. Nothing else: no backstop, no repair step, no
+#                 stdout. Inside the throttle window it exits before resolving
+#                 credentials (see THE CHEAP EXIT), because it sits in front of
+#                 every tool call -- unless the note is within a window (plus a
+#                 margin) of its TTL (NOTE_REFRESH_AGE), when it refreshes
+#                 anyway, so a call that starts inside the window still cannot
+#                 outlive the note unless it runs longer than the TTL itself.
 #   notification  (Notification) → switches on the event's `notification_type`,
 #                 because Claude Code fires ONE Notification event for every
 #                 notification it raises:
@@ -114,14 +129,15 @@
 #
 #   subagent-start / subagent-stop (SubagentStart / SubagentStop) → the SUBAGENT
 #                 INDICATOR. One marker file per running subagent under
-#                 <state dir>/subagents/, named by `agent_id`, and the sticky
-#                 note grows a summary of what is running: `working (2 subagents:
-#                 code-review, explore)`. Both post that note themselves, because
-#                 a FOREGROUND subagent blocks its parent -- no tool call fires
-#                 while it runs, which is exactly when someone is watching. For
-#                 the same reason the note is STICKY while any subagent runs
-#                 (nothing could refresh a TTL), and the stop that leaves none
-#                 re-posts the plain note with the 600s TTL.
+#                 <state dir>/subagents/, named by `agent_id`, and the note
+#                 grows a summary of what is running: `working (2 subagents:
+#                 code-review, explore)`. Both post that note themselves, so the
+#                 summary appears and disappears at the boundary. It carries the
+#                 600s TTL like any other `working`: the parent's PreToolUse and
+#                 PostToolUse fire for the subagent's own tool calls (observed:
+#                 the throttle stamp kept moving while only subagents ran), so
+#                 the ordinary refresh keeps it alive, and a marker orphaned by
+#                 a missed SubagentStop cannot hold it for 12 hours.
 #                 Output is discarded for both, so they write nothing to stdout.
 #
 # A BOUNDED `working` (2026-09-24). Observed on a real host: the Stop hook
@@ -130,14 +146,19 @@
 # idle agent. Whatever the trigger, the defence is independent of it: the
 # ordinary `working` (prompt, the resume handshake, a resumed quota) carries
 # `"ttlSeconds":600` (the server's STATUS_TTL_MAX) and lives only while the
-# post-tool refresh keeps re-posting it. STICKY is kept exactly where nothing
-# could refresh a TTL or where a human must see the note: a running subagent,
-# `blocked — needs your input`, and the usage-limit notes. Those are cleared by
-# the events that end them (the last subagent-stop, the next prompt, a stop).
+# tool-call refresh keeps re-posting it -- the subagent summary included. STICKY
+# is kept only where a human must see the note: `blocked — needs your input` and
+# the usage-limit notes, cleared by the events that end them (the next prompt,
+# a stop).
 # `post_note` derives the lifetime from the same state the note was composed
 # from, so a body and its lifetime always agree. Net effect: outside a turn,
-# `working` lasts at most 600s after the last tool call unless a subagent or a
-# blocked note is legitimately outstanding.
+# `working` lasts at most 600s after the last tool call unless a blocked note is
+# legitimately outstanding. Inside a turn the refresh runs at
+# both ends of every tool call (pre-tool and post-tool), so the status lapses
+# only inside ONE call that itself runs longer than 600s. The Bash tool cannot
+# (its maximum timeout is 600s); NAMED RESIDUAL: a long Monitor wait or a
+# foreground Workflow run can, and `working` then disappears until that call
+# returns and the post-tool refresh puts it back.
 #
 # PAYLOAD FIELDS THIS HOOK READS, and nothing else. StopFailure: `error_type`
 # (falling back to `error`), `session_id`, `prompt_id`, `transcript_path`,
@@ -172,6 +193,16 @@
 # Code injects as context. It ALWAYS exits 0 — any failure is a silent no-op so
 # it can never wedge a session. It honors the loop switch: paused/absent = no
 # writes and no nudge.
+#
+# "ALWAYS EXITS 0" IS ENFORCED, NOT HOPED FOR. Under PreToolUse a non-zero exit
+# DENIES the tool call (exit 2 is a blocking error whose stderr goes to the
+# model), and `set -u` aborts dash with status 2 on any unbound variable. An
+# EXIT trap that itself calls `exit 0` overrides whatever status the shell was
+# leaving with -- an explicit `exit N`, a `set -u` abort, anything -- in dash
+# and bash alike. Only the shell's own abort message still reaches stderr.
+# (Not in sparrow-stop-check.sh: its stdout is a decision channel and its paths
+# already exit 0 on their own.)
+trap 'exit 0' EXIT
 set -u
 
 MODE="${1:-}"
@@ -196,6 +227,9 @@ SUBAGENT_DIR="$STATE_DIR/subagents"
 # changed" test compares against this, so a change in the PARENT's condition
 # counts as much as a subagent appearing.
 NOTE_STAMP="$STATE_DIR/auto-status-note"
+# What the stamp holds after an `idle` publication. A later publisher that finds
+# it -- with nothing owed -- knows the turn ENDED and must not resurrect it.
+IDLE_STAMP='idle'
 # ONE FILE PER MUTATION, never reused, acknowledged only from a snapshot of
 # names (see THE PENDING RECORD).
 PENDING_DIR="$STATE_DIR/auto-status-pending.d"
@@ -273,6 +307,20 @@ PRESENCE_TTL="${SPARROW_PRESENCE_TTL:-300}"
 # (apps/api), the longest a status may live without a refresh. See A BOUNDED
 # `working` in the header.
 WORKING_TTL=600
+# The age from which a tool call re-posts the note (presence is refreshed every
+# throttle window regardless): half the TTL.
+NOTE_REPOST_AGE=$((WORKING_TTL / 2))
+# Past this age the note is close enough to lapsing that `pre-tool` refreshes it
+# even inside the throttle window: the TTL, less one window, less a margin. A
+# call that starts inside the window can run almost a full TTL, and without
+# this the note it started under could lapse before it returns.
+case "$POST_THROTTLE" in
+  '' | *[!0-9]*) NOTE_REFRESH_AGE=560 ;;   # a non-numeric override must not abort the hook
+  *) NOTE_REFRESH_AGE=$((WORKING_TTL - POST_THROTTLE - 20)) ;;
+esac
+# A huge throttle override (>= 580) would make that zero or negative, and then
+# EVERY note, however fresh, would count as near expiry. Clamp to a floor.
+[ "$NOTE_REFRESH_AGE" -ge 60 ] 2>/dev/null || NOTE_REFRESH_AGE=60
 
 # Read stdin once (best-effort). Needed for verbose notes and event inference.
 input=$(cat 2>/dev/null || true)
@@ -281,6 +329,7 @@ input=$(cat 2>/dev/null || true)
 if [ -z "$MODE" ]; then
   case "$input" in
     *'"hook_event_name":"UserPromptSubmit"'* | *'"hook_event_name": "UserPromptSubmit"'*) MODE=prompt ;;
+    *'"hook_event_name":"PreToolUse"'* | *'"hook_event_name": "PreToolUse"'*) MODE=pre-tool ;;
     *'"hook_event_name":"PostToolUse"'* | *'"hook_event_name": "PostToolUse"'*) MODE=post-tool ;;
     *'"hook_event_name":"Notification"'* | *'"hook_event_name": "Notification"'*) MODE=notification ;;
     *'"hook_event_name":"StopFailure"'* | *'"hook_event_name": "StopFailure"'*) MODE=stop-failure ;;
@@ -733,10 +782,104 @@ fi
 state=$(tr -d ' \t\r\n' < "$LOOP_STATE_FILE" 2>/dev/null || echo "")
 [ "$state" = "engaged" ] || exit 0
 
+# THE CHEAP EXIT FOR A TOOL CALL THAT HAS NOTHING TO DO. Only the loop switch
+# precedes it -- not even the pending-record bookkeeping below, which costs a
+# `date` + `stat` per marker and has nothing to do on a call that posts nothing.
+# `pre-tool` runs in front
+# of EVERY tool call and `post-tool` after it, and inside the throttle window
+# their usual answer is "nothing". Everything below -- the credential ladder (a
+# `node` spawn over credentials.json), the blocked-marker listing, the lock --
+# costs real time on that path. So the window is checked FIRST, with nothing but
+# `stat`, and a call that will do nothing leaves here. It never stamps the
+# throttle (only `throttled` does, once a refresh is really going to happen).
+#
+# It stands aside whenever the mode has more to do than the refresh:
+#   * the idle marker stands -> the resume handshake (both modes);
+#   * post-tool only: a usage-limit marker stands (its clearing reads the
+#     transcript, before the credential gate); the note the backstop would
+#     compose differs from the stamp (the backstop is deliberately unthrottled);
+#     or a REPAIR is owed (pending markers, a divergent fan-out). The repair is
+#     debt, not a refresh: pre-tool restamps the same throttle in front of every
+#     call, so a repair gated on the window would wait for the Stop in a turn of
+#     quick calls. Pre-tool never repairs; the post-tool that follows does.
+# THE ONE THROTTLE PREDICATE: is <stamp> due, i.e. absent, unreadable, dated in
+# the future, or at least <window> seconds old? `throttled`, `within_throttle`
+# and the near-expiry rate limit all ask exactly this; only `throttle_stamp`
+# writes.
+throttle_due() {
+  _td=$(file_age "$1")
+  if [ -n "$_td" ] && [ "$_td" -lt "$2" ] 2>/dev/null; then return 1; fi
+  return 0
+}
+throttle_stamp() {
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  : > "$1" 2>/dev/null || true
+}
+within_throttle() { ! throttle_due "$POST_STAMP" "$POST_THROTTLE"; }
+# Is the last note publication close to its TTL? (One more `stat`.) Pre-tool
+# refreshes such a note even inside the window -- see NOTE_REFRESH_AGE.
+#
+# THE BYPASS IS ITSELF RATE-LIMITED. The note stamp only moves on a SUCCESSFUL
+# post, so during a server outage it stays past this age -- and an unlimited
+# bypass would then run the whole credential/lock/fan-out path (seconds) in front
+# of EVERY tool call. So each bypass stamps $NEAR_EXPIRY_STAMP whatever its
+# outcome, and another may fire only a full throttle window later. And an `idle`
+# stamp is never "near expiry": idle carries no TTL, and a refresh would only
+# stand down (publish_refresh) after paying for the whole path.
+NEAR_EXPIRY_STAMP="$STATE_DIR/auto-status-near-expiry"
+note_near_expiry() {
+  _ne=$(file_age "$NOTE_STAMP")
+  [ -n "$_ne" ] && [ "$_ne" -ge "$NOTE_REFRESH_AGE" ] 2>/dev/null || return 1
+  [ "$(cat "$NOTE_STAMP" 2>/dev/null || printf '')" != "$IDLE_STAMP" ] || return 1
+  throttle_due "$NEAR_EXPIRY_STAMP" "$POST_THROTTLE"
+}
+# THE DRIFT TEST, one copy for its two callers (this cheap exit and post-tool's
+# backstop): does the status we WOULD post differ from the one every room was
+# last told? An ABSENT stamp is not a drift (nothing has ever been posted here,
+# and a tool call must not start rewriting the status); an `idle` stamp means
+# the turn ended and the resume handshake owns the comeback. It compares the
+# FULL body, so a change in the parent's condition counts as much as a subagent
+# appearing.
+note_drifted() {
+  _nd_body=$(compose_note "$(status_base)")
+  _nd_prev=$(cat "$NOTE_STAMP" 2>/dev/null || printf '')
+  [ -n "$_nd_prev" ] && [ "$_nd_prev" != "$IDLE_STAMP" ] && [ "$_nd_body" != "$_nd_prev" ]
+}
+# The answer, computed at most ONCE per post-tool run: each drift test composes
+# the note, which stats every subagent marker. The cheap exit records what it
+# found (and has already swept); the backstop reuses it, and asks afresh only
+# when the cheap exit never looked. Nothing between the two can change the
+# composition: the only intervening steps are the pending bookkeeping and the
+# usage-limit clearing, neither of which the note is composed from.
+DRIFT_KNOWN=""
+SUBAGENTS_SWEPT=""
+drifted_once() {
+  case "$DRIFT_KNOWN" in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  if note_drifted; then DRIFT_KNOWN=yes; return 0; fi
+  DRIFT_KNOWN=no
+  return 1
+}
+case "$MODE" in
+  pre-tool)
+    if [ ! -f "$IDLE_MARKER" ] && within_throttle && ! note_near_expiry; then exit 0; fi
+    ;;
+  post-tool)
+    if [ ! -f "$IDLE_MARKER" ] && within_throttle && [ -z "$(blocked_markers | head -n 1)" ]; then
+      subagent_sweep
+      SUBAGENTS_SWEPT=1
+      if ! drifted_once && ! repair_owed && [ ! -f "$PENDING_LEGACY" ]; then exit 0; fi
+    fi
+    ;;
+esac
+
 # Once per run, before anything reads the pending record: carry a legacy token
 # across, and drop markers too old to be worth repairing. Both are local
 # bookkeeping, so they run ahead of the credential and blocked gates -- a hook
-# that cannot post must still not lose or hoard records.
+# that cannot post must still not lose or hoard records. (A call that took the
+# cheap exit above reads no pending record, so it skips this too.)
 pending_migrate
 pending_sweep
 
@@ -925,7 +1068,7 @@ case "$MODE" in
     fi
     ;;
   post-tool)
-    subagent_sweep
+    [ -n "$SUBAGENTS_SWEPT" ] || subagent_sweep
     # Snapshot the markers, then delete only the ones this run can PROVE are
     # over. A marker written after this listing has a name we never saw.
     tpath=$(payload_value transcript_path)
@@ -1172,14 +1315,15 @@ EOF
 # them. So a truncated publication returns 1, leaves the stamp alone, and (via
 # `publish_rounds`) leaves the pending markers standing for a later hook.
 #
-# STICKY ONLY WHILE NOTHING ELSE CAN KEEP IT ALIVE (see A BOUNDED `working` in
-# the header). The lifetime is a function of the same state the note was
-# composed from, so a body and its lifetime always agree: a running subagent or
-# an unanswered ask is sticky, everything else carries the TTL and lives only as
-# long as the post-tool refresh keeps re-posting it.
+# STICKY ONLY WHERE A HUMAN MUST SEE IT (see A BOUNDED `working` in the header):
+# an unanswered ask. (The usage-limit notes are posted sticky directly.) A
+# running subagent is NOT a reason: the parent's PreToolUse/PostToolUse fire for
+# the subagent's own tool calls (observed: the throttle stamp kept moving while
+# only subagents ran), so the refresh keeps its note alive -- and a marker
+# orphaned by a missed SubagentStop (a session killed mid-subagent) would
+# otherwise hold a sticky `working (1 subagent: ...)` for SUBAGENT_STALE, 12h.
 note_is_held() {
-  [ -f "$NEEDS_INPUT_FILE" ] && return 0
-  [ -n "$(subagent_types | head -n 1)" ]
+  [ -f "$NEEDS_INPUT_FILE" ]
 }
 post_note() {
   if note_is_held; then
@@ -1304,9 +1448,8 @@ post_composed_with() {
   "$_pc_publish" "$_pc_override"
 }
 
-# What the stamp holds after an `idle` publication. A later publisher that finds
-# it -- with nothing owed -- knows the turn ENDED and must not resurrect it.
-IDLE_STAMP='idle'
+# (IDLE_STAMP, what the stamp holds after an `idle` publication, is defined with
+# the other state paths near the top: the cheap tool-call exit reads it too.)
 
 # `idle` goes through the same ordered path as every other publication. It is
 # trivially composed (idle supersedes any note), but ORDERING IS NOT OPTIONAL:
@@ -1480,20 +1623,58 @@ publish_stop() {
   publish_rounds "$@"
 }
 
+# THE IDLE→WORKING RESUME HANDSHAKE, shared by `pre-tool` and `post-tool`: a
+# turn started by a monitor event or task notification has NO UserPromptSubmit,
+# so without this the whole autonomous turn runs under the last stop's `idle`
+# and the agent reads as doing nothing while it works. The stop mode leaves a
+# marker; the FIRST hook of the next turn's first tool call restores `working`,
+# consumes it, and exits. Without the marker it returns and the caller goes on.
+resume_handshake() {
+  [ -f "$IDLE_MARKER" ] || return 0
+  # Same reasoning as the prompt mode: the turn has resumed, so idle is no
+  # longer owed, and that has to be true BEFORE `publish_rounds` looks.
+  rm -f "$IDLE_MARKER" "$IDLE_OWED" 2>/dev/null || true
+  refresh_presence
+  # NOT a clearing point: a tool call is not evidence the parent's ask was
+  # answered (a child doing tool calls while the parent waits is the case).
+  post_composed
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  : > "$POST_STAMP" 2>/dev/null || true
+  wait 2>/dev/null || true
+  exit 0
+}
+
+# THE TOOL-CALL REFRESH, shared by `pre-tool` and `post-tool` (and one throttle
+# stamp, so the pair costs one refresh per window, not two). Presence, plus the
+# TTL refresh of the note: the SAME text re-posted (so `sinceAt` is kept), and
+# only once the last publication is itself at least a throttle window old -- a
+# note the prompt posted a second ago needs no help yet. `publish_refresh` stands
+# down when the stamp is absent or idle, or idle is owed.
+tool_refresh() {
+  # Pre-tool does not wait out the window for a note close to its TTL.
+  if [ "$MODE" = pre-tool ] && note_near_expiry; then
+    throttle_stamp "$POST_STAMP"
+    throttle_stamp "$NEAR_EXPIRY_STAMP"   # one bypass per window, whatever happens next
+  else
+    throttled "$POST_STAMP" "$POST_THROTTLE" || exit 0
+  fi
+  refresh_presence
+  # PRESENCE KEEPS THE 20s CADENCE; THE NOTE DOES NOT NEED IT. A 600s note
+  # re-posted every window cost a room listing plus one POST per room (ten
+  # rooms: eleven requests per 20s). It is re-posted from half its TTL, and the
+  # near-expiry rule above is the backstop for a call that starts just short
+  # of that.
+  _nage=$(file_age "$NOTE_STAMP")
+  if [ -n "$_nage" ] && [ "$_nage" -ge "$NOTE_REPOST_AGE" ] 2>/dev/null; then
+    post_composed_with publish_refresh
+  fi
+}
+
 # Throttle a mode via a state-dir stamp file: succeed (and re-stamp) at most once
 # per $2 seconds. Returns 0 to proceed, 1 to skip.
 throttled() {
-  stamp="$1"; window="$2"
-  now=$(date +%s 2>/dev/null || echo 0)
-  if [ -f "$stamp" ] && [ "$now" -gt 0 ] 2>/dev/null; then
-    last=$(stat -c %Y "$stamp" 2>/dev/null || stat -f %m "$stamp" 2>/dev/null || echo 0)
-    if [ -n "$last" ] && [ "$last" -gt 0 ] 2>/dev/null; then
-      age=$((now - last))
-      [ "$age" -ge 0 ] && [ "$age" -lt "$window" ] && return 1
-    fi
-  fi
-  mkdir -p "$STATE_DIR" 2>/dev/null || true
-  : > "$stamp" 2>/dev/null || true
+  throttle_due "$1" "$2" || return 1
+  throttle_stamp "$1"
   return 0
 }
 
@@ -1534,8 +1715,11 @@ esac
 # THE PUBLICATION BUDGET, measured against the TIGHTEST harness that runs this
 # script, not the loosest:
 #   * CODEX registers these same modes with EXPLICIT per-hook timeouts
-#     (packages/skill/src/provider-codex.ts): UserPromptSubmit 20s, PostToolUse
-#     20s, Stop 30s. 20 SECONDS IS THE BINDING LIMIT.
+#     (packages/skill/src/provider-codex.ts): UserPromptSubmit 20s, PreToolUse
+#     20s, PostToolUse 20s, Stop 30s. 20 SECONDS IS THE BINDING LIMIT, and
+#     PreToolUse is the tightest path under it: it blocks the tool from even
+#     starting, which is why it also waits at most 2s for the lock and why its
+#     throttled case exits before any of this (see THE CHEAP EXIT).
 #   * Claude Code sets none, and its default for a command hook is 600s
 #     (`e.timeout ? e.timeout*1000 : 600000`, read out of the 2.1.272 bundle).
 # So the whole publication path -- waiting for the lock, the room fan-out, and
@@ -1561,7 +1745,9 @@ NOTE_BUDGET="${SPARROW_NOTE_BUDGET:-8}"
 # repair step at the end SHARE it, so a slow hook cannot spend the budget twice.
 NOTE_DEADLINE=$(( $(date +%s 2>/dev/null || echo 0) + NOTE_BUDGET ))
 case "$MODE" in
-  prompt) NOTE_LOCK_WAIT=2 ;;
+  # Both sit in a critical path: a human waiting for an answer, a tool call
+  # waiting to start.
+  prompt | pre-tool) NOTE_LOCK_WAIT=2 ;;
   *) NOTE_LOCK_WAIT=5 ;;
 esac
 
@@ -1595,9 +1781,8 @@ case "$MODE" in
     post_composed "$note"
     ;;
   subagent-start | subagent-stop)
-    # POST THE NOTE HERE, not only at turn boundaries: a FOREGROUND subagent
-    # blocks its parent, so no tool call happens while it runs -- which is
-    # exactly when someone is watching and wondering. The cost is the `sinceAt`
+    # POST THE NOTE HERE, not only at turn boundaries, so the summary changes at
+    # the boundary rather than at the next refresh. The cost is the `sinceAt`
     # reset named above.
     refresh_presence
     post_composed
@@ -1688,37 +1873,15 @@ case "$MODE" in
     esac
     ;;
   post-tool)
-    # The idle→working resume handshake: a turn started by a monitor event or
-    # task notification has NO UserPromptSubmit, so without this the whole
-    # autonomous turn runs under the last stop's `idle` and the agent reads as
-    # doing nothing while it works. The stop mode leaves a marker; the FIRST
-    # tool call of the next turn restores `working` and consumes it.
-    if [ -f "$IDLE_MARKER" ]; then
-      # Same reasoning as the prompt mode: the turn has resumed, so idle is no
-      # longer owed, and that has to be true BEFORE `publish_rounds` looks.
-      rm -f "$IDLE_MARKER" "$IDLE_OWED" 2>/dev/null || true
-      refresh_presence
-      # NOT a clearing point: a tool call is not evidence the parent's ask was
-      # answered (a child doing tool calls while the parent waits is the case).
-      post_composed
-      mkdir -p "$STATE_DIR" 2>/dev/null || true
-      : > "$POST_STAMP" 2>/dev/null || true
-      wait 2>/dev/null || true
-      exit 0
-    fi
+    resume_handshake
     # THE BACKSTOP. If the status we WOULD post differs from the one last
     # posted -- a subagent hook that failed, an install predating them, a marker
     # swept for age, or the parent becoming blocked -- put the truth back.
     # Deliberately NOT throttled: it fires only on a real change, and the
-    # comparison is local and free. It compares the FULL body, so a change in the
-    # parent's condition counts as much as a subagent appearing; comparing only
-    # the subagent part could not see an unanswered permission prompt.
-    _body=$(compose_note "$(status_base)")
-    _prev=$(cat "$NOTE_STAMP" 2>/dev/null || printf '')
-    # An ABSENT stamp is not a drift (nothing has ever been posted here, and a
-    # tool call must not start rewriting the status); an `idle` stamp means the
-    # turn ended and the resume handshake above owns the comeback.
-    if [ -n "$_prev" ] && [ "$_prev" != "$IDLE_STAMP" ] && [ "$_body" != "$_prev" ]; then
+    # comparison is local and free. `note_drifted` is the one drift test, shared
+    # with the cheap exit so the two can never disagree about what drifted, and
+    # `drifted_once` reuses the cheap exit's answer rather than paying twice.
+    if drifted_once; then
       refresh_presence
       post_composed
       mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -1726,16 +1889,24 @@ case "$MODE" in
       wait 2>/dev/null || true
       exit 0
     fi
-    # Throttled presence refresh, plus the TTL refresh of the note: the SAME
-    # text re-posted (so `sinceAt` is kept), and only once the last publication
-    # is itself at least a throttle window old -- a note the prompt posted a
-    # second ago needs no help yet.
-    throttled "$POST_STAMP" "$POST_THROTTLE" || exit 0
-    refresh_presence
-    _nage=$(file_age "$NOTE_STAMP")
-    if [ -n "$_nage" ] && [ "$_nage" -ge "$POST_THROTTLE" ] 2>/dev/null; then
-      post_composed_with publish_refresh
-    fi
+    # THE REPAIR, BEFORE THE THROTTLE. Owed debt is not a refresh: pre-tool
+    # restamps the throttle in front of every call, so a repair left behind
+    # `throttled || exit 0` would wait for the Stop in a turn of quick calls.
+    # (The repair step at the bottom still runs when the refresh did; it finds
+    # nothing owed by then.)
+    repair_owed && post_composed
+    tool_refresh
+    ;;
+  pre-tool)
+    # THE SAME HANDSHAKE AND REFRESH AT THE START OF THE CALL. With only the
+    # post-tool ones, a single tool call longer than the TTL (a 600s Bash call, a
+    # Monitor wait, a long build) let `working` lapse mid-turn until the call
+    # returned -- and a monitor-triggered turn whose FIRST call is long read as
+    # idle for the whole of it. The handshake is idempotent across the pair:
+    # whichever runs first consumes the marker. Nothing else here: no backstop,
+    # no marker clearing, no repair step, and never any stdout.
+    resume_handshake
+    tool_refresh
     ;;
   stop-failure)
     # NO PRESENCE HEARTBEAT. The CLI takes this profile off presence when it
@@ -1810,9 +1981,11 @@ esac
 #
 # Skipped where the intended state is `idle` (a stop, or the idle notification):
 # both publish through the loop themselves, and for `stop` that loop now also
-# reconciles whatever landed during its fan-out.
+# reconciles whatever landed during its fan-out. Skipped for `pre-tool` too: it
+# runs in front of every tool call, so it stays a cheap refresh, and the
+# post-tool that follows the same call does the repair.
 case "$MODE" in
-  stop) ;;
+  stop | pre-tool) ;;
   notification)
     case "$ntype" in
       idle_prompt) ;;

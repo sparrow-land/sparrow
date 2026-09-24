@@ -21,9 +21,13 @@ import {
   heartbeatPath,
   homeStateDir,
   resolveStateDir,
+  markHeartbeatBlocked,
   markHeartbeatDead,
+  markHeartbeatOrphaned,
+  markHeartbeatWord,
   readHeartbeatKind,
   readHeartbeatState,
+  readJsonRecord,
   touchHeartbeat,
   __resetHeartbeatThrottle,
 } from './state.js';
@@ -125,6 +129,39 @@ describe('markHeartbeatDead', () => {
   });
 });
 
+/* ONE WRITER for every heartbeat word — the signal stamps, `blocked:<reason>`
+ * and `orphaned` — next to the one reader of all of them. */
+describe('markHeartbeatWord and its wrappers', () => {
+  it('writes `<word> [generation]` with the mtime it was given', () => {
+    const at = Date.parse('2026-09-01T00:00:00Z');
+    markHeartbeatWord(stateDir, 'orphaned', 'abc123', at);
+    expect(content()).toBe('orphaned abc123');
+    expect(fs.statSync(heartbeatPath(stateDir)).mtimeMs).toBe(at);
+    markHeartbeatWord(stateDir, 'orphaned');
+    expect(content()).toBe('orphaned');
+  });
+
+  it('never throws on an unusable state dir', () => {
+    const file = path.join(stateDir, 'not-a-dir');
+    fs.writeFileSync(file, '');
+    expect(() => markHeartbeatWord(path.join(file, 'sub'), 'orphaned')).not.toThrow();
+  });
+
+  it('markHeartbeatOrphaned writes a stamp readHeartbeatState reads back', () => {
+    markHeartbeatOrphaned(stateDir, 'n2');
+    expect(content()).toBe('orphaned n2');
+    expect(readHeartbeatState(stateDir)).toEqual({ state: 'orphaned', generation: 'n2' });
+    markHeartbeatOrphaned(stateDir);
+    expect(readHeartbeatState(stateDir)).toEqual({ state: 'orphaned' });
+  });
+
+  it('markHeartbeatBlocked writes blocked:<reason> (a word readers treat as unjudgeable)', () => {
+    markHeartbeatBlocked(stateDir, 'rate_limit', 'n1');
+    expect(content()).toBe('blocked:rate_limit n1');
+    expect(readHeartbeatKind(stateDir)).toBeUndefined();
+  });
+});
+
 describe('readHeartbeatState', () => {
   it('reads a live listener kind', () => {
     touchHeartbeat(stateDir, { kind: 'watch', force: true });
@@ -154,6 +191,15 @@ describe('readHeartbeatState', () => {
     expect(readHeartbeatState(stateDir)).toEqual({ state: 'orphaned' });
     // It is a corpse, not a listener: the raw kind reader keeps answering undefined.
     expect(readHeartbeatKind(stateDir)).toBeUndefined();
+  });
+
+  it('parses `orphaned` through the same word[:detail] grammar as the dead words', () => {
+    fs.writeFileSync(heartbeatPath(stateDir), 'orphaned:gone 4f2c9a01bb33cd10\n');
+    expect(readHeartbeatState(stateDir)).toEqual({
+      state: 'orphaned',
+      signal: 'gone',
+      generation: '4f2c9a01bb33cd10',
+    });
   });
 
   it('ignores a signal suffix on a listener kind (only the dead words carry one)', () => {
@@ -254,5 +300,26 @@ describe('resolveStateDir', () => {
     fs.mkdirSync(path.join(project, '.sparrow'), { recursive: true });
     fs.writeFileSync(path.join(project, '.sparrow', 'loop-state'), 'engaged\n');
     expect(homeStateDir({ HOME: home })).toBe(path.join(home, '.sparrow'));
+  });
+});
+
+describe('readJsonRecord (the one fail-open small-JSON reader)', () => {
+  it('returns the parsed object', () => {
+    const f = path.join(stateDir, 'r.json');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(f, '{"a":"b","n":1}');
+    expect(readJsonRecord(f)).toEqual({ a: 'b', n: 1 });
+  });
+
+  it('is undefined for a missing, malformed or non-object file, and never throws', () => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const f = path.join(stateDir, 'r.json');
+    expect(readJsonRecord(f)).toBeUndefined();
+    fs.writeFileSync(f, '{not json');
+    expect(readJsonRecord(f)).toBeUndefined();
+    fs.writeFileSync(f, '"a string"');
+    expect(readJsonRecord(f)).toBeUndefined();
+    fs.writeFileSync(f, 'null');
+    expect(readJsonRecord(f)).toBeUndefined();
   });
 });

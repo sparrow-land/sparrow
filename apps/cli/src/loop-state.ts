@@ -13,14 +13,14 @@
  * one heartbeat and one pause. `skillInstall` (= `runSkill`) lets a `sparrow skill …` subcommand drive
  * the exact same install/pause/resume/status logic as `npx sparrow-skill`.
  */
-import fs from 'node:fs';
 import {
-  heartbeatPath,
   resolveStateDir,
   readLoopState as readLoopStateAt,
   writeLoopState as writeLoopStateAt,
   touchHeartbeat as touchHeartbeatAt,
   markHeartbeatDead as markHeartbeatDeadAt,
+  markHeartbeatBlocked as markHeartbeatBlockedAt,
+  markHeartbeatOrphaned as markHeartbeatOrphanedAt,
   runSkill,
   type DeadReason,
   type ListenerKind,
@@ -76,78 +76,29 @@ export function markHeartbeatDead(
 }
 
 /**
- * Stamp the heartbeat `blocked:<reason>` — the listener is alive and DELIBERATELY
- * not listening, because the agent behind it cannot take a turn (a Claude Code
- * usage limit; see await-blocked.ts).
- *
- * A THIRD WORD next to `killed`/`stopped`, and deliberately not one of them: the
- * process is fine, the stream is closed on purpose, and it will come back by
- * itself. Readers that know the word can say so; the skill's heartbeat reader
- * treats any word it does not know as UNJUDGEABLE, which is the correct answer
- * for an older reader meeting a newer listener — never "there is a listener".
- *
- * Written here rather than through `@sparrow/skill`'s `markHeartbeatDead`
- * because that one's vocabulary is the two DEAD reasons, and standby is not a
- * death. Same file, same shape (`<word> [generation]`), same fresh mtime:
- * content is what disqualifies a heartbeat, never age.
+ * Stamp the heartbeat `blocked:<reason>` — the listener is alive and
+ * DELIBERATELY not listening (a Claude Code usage limit; see await-blocked.ts).
+ * The writer is `@sparrow/skill`'s, next to the reader of every heartbeat word.
  */
 export function markHeartbeatBlocked(
   env: Env = process.env,
   reason = 'blocked',
   /** The `await` generation nonce, so a superseded listener's stamp is discardable. */
   generation?: string,
-  now: number = Date.now(),
 ): void {
-  try {
-    const dir = resolveStateDir(env);
-    fs.mkdirSync(dir, { recursive: true });
-    const file = heartbeatPath(dir);
-    const word = `blocked:${reason}`;
-    fs.writeFileSync(file, generation ? `${word} ${generation}\n` : `${word}\n`);
-    try {
-      const when = new Date(now);
-      fs.utimesSync(file, when, when);
-    } catch {
-      // leave the OS-assigned mtime (still "fresh")
-    }
-  } catch {
-    // best-effort: a listener must never crash over a heartbeat
-  }
+  markHeartbeatBlockedAt(resolveStateDir(env), reason, generation);
 }
 
 /**
  * Stamp the heartbeat `orphaned` — an `await` whose Claude Code session is gone
- * (the harness pid died, or it is no longer this process's ancestor), so the
- * listener could never wake anyone and is standing down (exit 5).
- *
- * A FOURTH WORD, next to `killed`/`stopped`/`blocked`, and deliberately not
- * `killed:<something>`: nothing killed this process — it noticed it had been
- * abandoned and left. Written here for the same reason as
- * {@link markHeartbeatBlocked}: `@sparrow/skill`'s `markHeartbeatDead` speaks
- * only the two signal reasons, and a reader that does not know this word treats
- * it as UNJUDGEABLE — never as a live listener. Same file, same shape
- * (`orphaned [generation]`), same fresh mtime.
+ * (or that turned out never to descend from it) is standing down (exit 5).
  */
 export function markHeartbeatOrphaned(
   env: Env = process.env,
   /** The `await` generation nonce, so a superseded listener's stamp is discardable. */
   generation?: string,
-  now: number = Date.now(),
 ): void {
-  try {
-    const dir = resolveStateDir(env);
-    fs.mkdirSync(dir, { recursive: true });
-    const file = heartbeatPath(dir);
-    fs.writeFileSync(file, generation ? `orphaned ${generation}\n` : 'orphaned\n');
-    try {
-      const when = new Date(now);
-      fs.utimesSync(file, when, when);
-    } catch {
-      // leave the OS-assigned mtime (still "fresh")
-    }
-  } catch {
-    // best-effort: a listener must never crash over a heartbeat
-  }
+  markHeartbeatOrphanedAt(resolveStateDir(env), generation);
 }
 
 /** Read the loop switch (`engaged` | `paused` | `undefined`). */

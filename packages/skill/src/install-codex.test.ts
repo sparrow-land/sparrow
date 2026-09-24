@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runSkill } from './install.js';
 import { managedToml, validateCodexHooks, type CodexHooksFile } from './provider-codex.js';
 import { readLoopState } from './state.js';
@@ -66,7 +66,7 @@ const readHooks = (p: string): CodexHooksFile =>
 const commandsFor = (f: CodexHooksFile, event: string): string[] =>
   (f.hooks?.[event] ?? []).flatMap((g) => g.hooks.map((h) => h.command));
 
-const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'];
+const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'];
 
 /* ------------------------------- the playbook ------------------------------- */
 
@@ -127,6 +127,9 @@ describe('install --codex — hooks.json', () => {
     expect(commandsFor(f, 'SessionStart')[0]).toMatch(/ SessionStart ".*sparrow-session-start\.sh"$/);
     expect(commandsFor(f, 'UserPromptSubmit')[0]).toMatch(/ UserPromptSubmit ".*sparrow-auto-status\.sh" prompt$/);
     expect(commandsFor(f, 'PostToolUse')[0]).toMatch(/ PostToolUse ".*sparrow-auto-status\.sh" post-tool$/);
+    // The working TTL is refreshed at the START of a call too (Codex documents
+    // PreToolUse), so one long shell call cannot let it lapse.
+    expect(commandsFor(f, 'PreToolUse')[0]).toMatch(/ PreToolUse ".*sparrow-auto-status\.sh" pre-tool$/);
   });
 
   /**
@@ -138,7 +141,7 @@ describe('install --codex — hooks.json', () => {
     await run(['install', '--codex', '--profile', 'acme']);
     const f = readHooks(cwd);
     const all = EVENTS.flatMap((e) => commandsFor(f, e));
-    expect(all).toHaveLength(4);
+    expect(all).toHaveLength(EVENTS.length);
     for (const c of all) {
       expect(c).not.toContain('$CLAUDE_PROJECT_DIR');
       expect(c).toContain(`SPARROW_STATE_DIR="${stateDir}"`);
@@ -172,7 +175,9 @@ describe('install --codex — hooks.json', () => {
     await run(['install', '--codex']);
     const f = readHooks(cwd);
     expect(f.description).toBe('my own hooks'); // never clobbered
-    expect(commandsFor(f, 'PreToolUse')).toEqual(['echo their-pre']);
+    // Theirs survives, first; ours sits beside it.
+    expect(commandsFor(f, 'PreToolUse')[0]).toBe('echo their-pre');
+    expect(commandsFor(f, 'PreToolUse').filter((c) => c.includes('sparrow-auto-status.sh'))).toHaveLength(1);
     expect(commandsFor(f, 'Stop')).toContain('echo their-stop');
     expect(commandsFor(f, 'Stop').some((c) => c.includes('sparrow-stop-check.sh'))).toBe(true);
   });
@@ -444,7 +449,54 @@ describe('status --codex', () => {
     expect(out).toMatch(/skill: +installed/);
     expect(out).toMatch(/hooks\.json: valid/);
     expect(out).toMatch(/trust: +UNVERIFIED/);
-    expect(out).toMatch(/0\/4 hooks observed firing/);
+    expect(out).toMatch(new RegExp(`0/${EVENTS.length} hooks observed firing`));
+  });
+
+  /* An install that predates PreToolUse has four events registered, not five.
+   * Its missing hook is not a TRUST problem (the event is simply not wired until
+   * a re-install), so status says so instead of blaming project trust. */
+  const fire = (event: string): void => {
+    fs.mkdirSync(path.join(stateDir, 'hooks-fired'), { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'hooks-fired', event), 'runtime\n');
+  };
+
+  it('an event we wire but hooks.json lacks reads "not registered", not a trust failure', async () => {
+    await run(['install', '--codex']);
+    const f = readHooks(cwd);
+    delete f.hooks!.PreToolUse; // an install from before PreToolUse was wired
+    fs.writeFileSync(hooksJson(cwd), JSON.stringify(f));
+    for (const e of EVENTS.filter((x) => x !== 'PreToolUse')) fire(e);
+    logs.length = 0;
+    await run(['status', '--codex']);
+    const out = logs.join('\n');
+    expect(out).toMatch(/not registered: PreToolUse/);
+    expect(out).toContain("run 'sparrow skill install --codex'");
+    expect(out).toMatch(/trust: +OK/);
+    expect(out).not.toMatch(/untrusted/);
+  });
+
+  it('a registered event that never fired is still a trust question', async () => {
+    await run(['install', '--codex']);
+    for (const e of EVENTS.filter((x) => x !== 'PreToolUse')) fire(e);
+    logs.length = 0;
+    await run(['status', '--codex']);
+    const out = logs.join('\n');
+    expect(out).toMatch(new RegExp(`UNVERIFIED — ${EVENTS.length - 1}/${EVENTS.length} hooks observed firing`));
+    expect(out).toMatch(/untrusted/);
+    expect(out).not.toMatch(/not registered/);
+  });
+
+  it('reads hooks.json once per status, for validation and registration alike', async () => {
+    await run(['install', '--codex']);
+    const spy = vi.spyOn(fs, 'readFileSync');
+    try {
+      logs.length = 0;
+      await run(['status', '--codex']);
+      const reads = spy.mock.calls.filter((c) => String(c[0]) === hooksJson(cwd));
+      expect(reads).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('reports an INVALID (Claude-shaped) hooks.json rather than a happy tick', async () => {
@@ -476,7 +528,7 @@ describe('verify --codex', () => {
     for (const event of EVENTS) expect(out).toContain(`fired ${event}: NEVER — UNVERIFIED`);
     // Nothing has fired at all here, so the summary is the blanket-never-fired
     // diagnostic (below), not the generic "run one real turn" line.
-    expect(out).toMatch(/4 check\(s\) UNVERIFIED/);
+    expect(out).toMatch(new RegExp(`${EVENTS.length} check\\(s\\) UNVERIFIED`));
     expect(out).toMatch(/nothing here has been observed running/i);
   });
 
@@ -512,7 +564,7 @@ describe('verify --codex', () => {
 
   it('goes green — and exit 0 — only once EVERY wired hook has fired', async () => {
     await run(['install', '--codex']);
-    for (const event of EVENTS.slice(0, 3)) markFired(event);
+    for (const event of EVENTS.filter((e) => e !== 'Stop')) markFired(event);
     expect(await run(['verify', '--codex'])).toBe(1);
     markFired('Stop');
     logs.length = 0;
@@ -524,7 +576,7 @@ describe('verify --codex', () => {
 
   /* ------------------ blanket never-fired: a diagnostic, not a verdict ------------------
    * The field report this answers: an agent installed the hooks, did BOTH trust
-   * steps, ran turns — and all four events still read never-fired. Repeating the
+   * steps, ran turns — and every wired event still read never-fired. Repeating the
    * trust instructions at that point is the one answer that cannot help. What it
    * needs instead is a diagnostic step (offered as a suggestion, since whether
    * Codex loads new hook files into a live session is undocumented) plus the
@@ -568,7 +620,7 @@ describe('verify --codex', () => {
 
   it('keeps the generic wording when only SOME hooks are unproven', async () => {
     await run(['install', '--codex']);
-    for (const event of EVENTS.slice(0, 3)) markFired(event);
+    for (const event of EVENTS.filter((e) => e !== 'Stop')) markFired(event);
     logs.length = 0;
     expect(await run(['verify', '--codex'])).toBe(1);
     const out = logs.join('\n');

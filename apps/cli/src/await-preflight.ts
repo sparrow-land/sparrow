@@ -37,7 +37,7 @@ import {
   resolveStateDir,
   type PidNamespaceProbe,
 } from '@sparrow/skill';
-import { CliError, type Env } from './util.js';
+import { CliError, envSwitchedOff as switchedOff, envSwitchedOn as switchedOn, type Env } from './util.js';
 
 export interface CodexAwaitPreflightOpts {
   env: Env;
@@ -51,17 +51,6 @@ export interface CodexAwaitPreflightOpts {
   probe?: PidNamespaceProbe;
 }
 
-/** Off only when explicitly switched off — an operator/test escape hatch. */
-function switchedOff(value: string | undefined): boolean {
-  const v = value?.trim().toLowerCase();
-  return v === '0' || v === 'false' || v === 'no' || v === 'off';
-}
-
-/** On only when explicitly switched on. */
-function switchedOn(value: string | undefined): boolean {
-  const v = value?.trim().toLowerCase();
-  return v !== undefined && v !== '' && !switchedOff(v);
-}
 
 /**
  * THE SPAWNED SUB-AGENT (field incident, Codex 0.154, 2026-09-17).

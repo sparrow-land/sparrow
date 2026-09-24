@@ -65,7 +65,9 @@ import {
   formatAge,
   type LoopState,
 } from './state.js';
-import { pidAlive, readAwaitFailure, readAwaitHarnessPid, readAwaitOwnerNonce } from './await-failure.js';
+import { pidAlive } from './pid.js';
+import { detectPidNamespace } from './sandbox.js';
+import { readFailureFor, readOwnerSnapshot } from './owner-snapshot.js';
 import { blockedDir, clearBlockedMarkers, clockOf, currentBlock } from './blocked.js';
 import { shellStatusLine, subagentStatusLine } from './subagents.js';
 
@@ -380,13 +382,34 @@ export function status(r: Resolved): number {
   // WHO ARMED IT. `sparrow await` records the Claude Code session pid that
   // armed it; a listener whose session is gone (or that was armed from a shell
   // the session does not own) is online but can never wake anyone.
-  const harnessPid = readAwaitHarnessPid(r.stateDir);
-  const owner =
-    harnessPid === undefined
-      ? ''
-      : pidAlive(harnessPid)
-        ? ` · owned by claude pid ${harnessPid}`
-        : ` · ORPHANED (claude pid ${harnessPid} is gone)`;
+  // ONE read of the owner record: the owner line, the orphaned gate and the
+  // failure gate must all describe the same generation.
+  const ownerRecord = readOwnerSnapshot(r.stateDir);
+  const harnessPid = ownerRecord?.harnessPid;
+  // Never beside a TERMINAL stamp (`orphaned`, `killed:`, `stopped:`): it says
+  // nothing is listening, so naming an owner would read as if something were.
+  // Every other word keeps it -- including a listener standing by on a usage
+  // limit (`blocked:<reason>`), which is alive, owned, and can be orphaned.
+  const terminal = beat?.state === 'orphaned' || beat?.state === 'killed' || beat?.state === 'stopped';
+  // And only when the heartbeat is the OWNER RECORD's generation (the same gate
+  // as the orphaned line below): after a re-arm, the old listener's heartbeat
+  // must not be attributed to the new owner's session.
+  const sameGeneration =
+    !beat?.generation || !ownerRecord?.nonce || beat.generation === ownerRecord.nonce;
+  let owner = '';
+  if (harnessPid !== undefined && !terminal && sameGeneration) {
+    if (pidAlive(harnessPid)) {
+      owner = ` · owned by claude pid ${harnessPid}`;
+    } else if (detectPidNamespace().inNamespace) {
+      // AN INVISIBLE PID IS UNJUDGEABLE, the rule the CLI applies too: from a
+      // shell inside a PID namespace (a sandboxed Bash) the host session's pid
+      // does not exist, so "gone" here would call a healthy listener orphaned
+      // and prompt a needless re-arm.
+      owner = ' · owner not judged from this shell (pid namespace)';
+    } else {
+      owner = ` · ORPHANED (claude pid ${harnessPid} is gone)`;
+    }
+  }
   const hb =
     age === undefined
       ? 'no heartbeat'
@@ -425,7 +448,7 @@ export function status(r: Resolved): number {
   // An `orphaned` stamp gets the same treatment, gated the same way: the
   // listener stood down because the session that armed it is gone.
   if (beat?.state === 'orphaned') {
-    const live = readAwaitOwnerNonce(r.stateDir);
+    const live = ownerRecord?.nonce;
     if (!beat.generation || !live || beat.generation === live) {
       r.log(
         'listener died: orphaned (the Claude Code session that armed it is gone, or it was armed ' +
@@ -433,7 +456,7 @@ export function status(r: Resolved): number {
       );
     }
   }
-  const failure = readAwaitFailure(r.stateDir);
+  const failure = readFailureFor(r.stateDir, ownerRecord);
   if (failure) {
     r.log(
       `listener died: codex queue rejected for thread ${failure.thread ?? '(unknown)'} ` +

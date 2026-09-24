@@ -4,6 +4,25 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runSkill } from './install.js';
+import type { PidNamespaceReport } from './sandbox.js';
+
+/**
+ * `status` asks whether this shell is inside a PID namespace before calling a
+ * vanished owner ORPHANED. Pinned per test (default: no namespace) so the suite
+ * does not depend on where it runs.
+ */
+const ns = vi.hoisted(() => ({ report: undefined as PidNamespaceReport | undefined }));
+vi.mock('./sandbox.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./sandbox.js')>();
+  return {
+    ...real,
+    detectPidNamespace: (...args: Parameters<typeof real.detectPidNamespace>) =>
+      ns.report ?? { inNamespace: false, evidence: 'pinned by test', signal: 'none' as const },
+  };
+});
+beforeEach(() => {
+  ns.report = undefined;
+});
 import {
   readLoopState,
   writeLoopState,
@@ -84,6 +103,11 @@ describe('install (project scope)', () => {
     // PostToolUse: throttled presence refresh, matcher '*'.
     expect(s.hooks.PostToolUse[0].matcher).toBe('*');
     expect(s.hooks.PostToolUse[0].hooks[0].command).toMatch(/sparrow-auto-status\.sh post-tool$/);
+    // PreToolUse: the same throttled refresh at the START of every tool call, so
+    // the 600s working TTL cannot lapse inside one long Bash call.
+    expect(s.hooks.PreToolUse[0].matcher).toBe('*');
+    expect(s.hooks.PreToolUse[0].hooks[0].command).toMatch(/sparrow-auto-status\.sh pre-tool$/);
+    expect(s.hooks.PreToolUse[0].hooks[0].command).toContain('$CLAUDE_PROJECT_DIR');
     // Notification: blocked-input status, scoped by matcher to the notification
     // types that actually mean "a human is being asked something" plus the idle
     // prompt (which sets idle). A matcher of '' would fire for every type.
@@ -111,6 +135,16 @@ describe('install (project scope)', () => {
     expect(readLoopState(stateDir)).toBe('engaged');
   });
 
+  it('verify reports every registered event, PreToolUse included', async () => {
+    await run(['install']);
+    logs.length = 0;
+    await run(['verify']);
+    const out = logs.join('\n');
+    for (const event of ['Stop', 'StopFailure', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Notification']) {
+      expect(out).toContain(`hook ${event}: registered`);
+    }
+  });
+
   it('is idempotent — re-running does not duplicate hook entries', async () => {
     await run(['install']);
     await run(['install']);
@@ -118,6 +152,7 @@ describe('install (project scope)', () => {
     expect(commandsFor(s, 'Stop').filter((c) => c.includes('sparrow-stop-check.sh'))).toHaveLength(1);
     for (const event of [
       'UserPromptSubmit',
+      'PreToolUse',
       'PostToolUse',
       'Notification',
       'StopFailure',
@@ -185,8 +220,10 @@ describe('install (project scope)', () => {
     // Unrelated top-level keys untouched.
     expect(s.model).toBe('opus');
     expect(s.permissions.allow).toEqual(['Bash(ls:*)']);
-    // Unrelated PreToolUse hook untouched.
+    // Unrelated PreToolUse hook untouched, and ours sits beside it.
     expect(s.hooks.PreToolUse[0].hooks[0].command).toBe('echo pre');
+    expect(s.hooks.PreToolUse[0].matcher).toBe('Bash');
+    expect(commandsFor(s, 'PreToolUse').filter((c) => c.includes('sparrow-auto-status.sh pre-tool'))).toHaveLength(1);
     // Pre-existing unrelated Stop hook preserved alongside ours.
     expect(commandsFor(s, 'Stop')).toContain('echo other-stop');
     expect(commandsFor(s, 'Stop').some((c) => c.includes('sparrow-stop-check.sh'))).toBe(true);
@@ -596,6 +633,7 @@ describe('uninstall', () => {
     expect(commandsFor(s, 'Stop')).toEqual(['echo other']);
     // Our event keys were the only entries there → each pruned on uninstall.
     expect(s.hooks.UserPromptSubmit).toBeUndefined();
+    expect(s.hooks.PreToolUse).toBeUndefined();
     expect(s.hooks.PostToolUse).toBeUndefined();
     expect(s.hooks.Notification).toBeUndefined();
     expect(s.hooks.StopFailure).toBeUndefined();
@@ -622,6 +660,7 @@ describe('uninstall', () => {
     for (const event of [
       'Stop',
       'UserPromptSubmit',
+      'PreToolUse',
       'PostToolUse',
       'Notification',
       'StopFailure',
@@ -840,6 +879,38 @@ describe('pause / resume / status', () => {
     expect(await statusOut()).toContain(`heartbeat:  await, 45s ago · ORPHANED (claude pid ${gone} is gone)`);
   });
 
+  it('does not call the owner gone from inside a PID namespace (the host pid is invisible)', async () => {
+    await run(['install']);
+    writeHeartbeatFile('await f00d', 45);
+    const gone = deadPid();
+    writeHarnessOwner(gone);
+    ns.report = { inNamespace: true, evidence: 'NSpid lists 2 pids (nested PID namespace)', signal: 'nspid' };
+    const out = await statusOut();
+    expect(out).toContain('heartbeat:  await, 45s ago · owner not judged from this shell (pid namespace)');
+    expect(out).not.toContain('ORPHANED');
+  });
+
+  it('names no owner when the heartbeat is from a different generation than the owner record', async () => {
+    // A re-arm landed in between: the heartbeat is the OLD listener's, and the
+    // owner record's pid belongs to the NEW one.
+    await run(['install']);
+    writeHeartbeatFile('await b0b0', 45);
+    writeHarnessOwner(process.pid); // nonce f00d
+    const out = await statusOut();
+    expect(out).toMatch(/heartbeat: +await, 45s ago$/m);
+    expect(out).not.toMatch(/owned by|ORPHANED|not judged/);
+  });
+
+  it('names the owner of a listener standing by on a usage limit (a blocked: stamp is not terminal)', async () => {
+    await run(['install']);
+    writeHeartbeatFile('blocked:rate_limit f00d', 45);
+    writeHarnessOwner(process.pid);
+    expect(await statusOut()).toContain(`· owned by claude pid ${process.pid}`);
+    const gone = deadPid();
+    writeHarnessOwner(gone);
+    expect(await statusOut()).toContain(`· ORPHANED (claude pid ${gone} is gone)`);
+  });
+
   it('adds nothing when the owner record names no harness pid', async () => {
     await run(['install']);
     writeHeartbeatFile('await f00d', 45);
@@ -859,6 +930,35 @@ describe('pause / resume / status', () => {
       'listener died: orphaned (the Claude Code session that armed it is gone, or it was armed from a shell this session does not own) — re-arm sparrow await as a tracked background task',
     );
   });
+
+  it('reads the owner record ONCE, so every line describes one generation', async () => {
+    await run(['install']);
+    writeHeartbeatFile('await f00d', 3);
+    writeHarnessOwner(process.pid);
+    writeFailure(FAILURE); // nonce f00d: the live generation
+    const spy = vi.spyOn(fs, 'readFileSync');
+    try {
+      const out = await statusOut();
+      expect(out).toContain('owned by claude pid');
+      expect(out).toContain('listener died: codex queue rejected');
+      const ownerReads = spy.mock.calls.filter((c) => String(c[0]).endsWith('await-owner.json'));
+      expect(ownerReads).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each(['orphaned f00d', 'killed:SIGTERM f00d', 'stopped:SIGINT'])(
+    'names no owner beside a terminal stamp (%s), even with the session alive',
+    async (stamp) => {
+      await run(['install']);
+      writeHeartbeatFile(stamp, 40);
+      writeHarnessOwner(process.pid);
+      const out = await statusOut();
+      expect(out).toMatch(/heartbeat: +\S+, 40s ago$/m);
+      expect(out).not.toMatch(/owned by|ORPHANED \(/);
+    },
+  );
 
   it('says nothing about an orphaned stamp from a SUPERSEDED generation', async () => {
     await run(['install']);

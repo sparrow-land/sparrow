@@ -21,8 +21,8 @@
  * when the other one already owns the registration ({@link installRefusal}):
  * proceeding would leave two live registrations while overwriting the playbook
  * underneath them.
- * Events    → Stop, StopFailure, UserPromptSubmit, PostToolUse, Notification,
- *             SubagentStart, SubagentStop.
+ * Events    → Stop, StopFailure, UserPromptSubmit, PreToolUse, PostToolUse,
+ *             Notification, SubagentStart, SubagentStop.
  * Also      → `env.CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1`, which opts the
  *             session out of Claude Code's memory-pressure reaper so a long idle
  *             stretch cannot kill the background `sparrow await` that is a
@@ -51,7 +51,7 @@ const NOTIFICATION_MATCHER =
 
 /**
  * The Claude Code hook registrations merged into the settings file.
- * `sparrow-auto-status.sh` is a single script fanned across three events, each
+ * `sparrow-auto-status.sh` is a single script fanned across every event but `Stop`, each
  * passing its `mode` as the command arg. The `Stop` event runs only
  * `sparrow-stop-check.sh`, which itself invokes auto-status (idle) on its allow
  * paths — so a blocked stop never flickers the agent idle (no separate Stop
@@ -61,6 +61,7 @@ type HookEvent =
   | 'Stop'
   | 'StopFailure'
   | 'UserPromptSubmit'
+  | 'PreToolUse'
   | 'PostToolUse'
   | 'Notification'
   | 'SubagentStart'
@@ -81,6 +82,10 @@ const HOOKS: ReadonlyArray<{
   // no documented equivalent event, so its adapter is deliberately untouched.
   { file: 'sparrow-auto-status.sh', event: 'StopFailure', mode: 'stop-failure' },
   { file: 'sparrow-auto-status.sh', event: 'UserPromptSubmit', mode: 'prompt' },
+  // The working status is TTL'd at 600s and refreshed by tool calls. Refreshing
+  // only AFTER a call let it lapse inside one long call, so the same throttled
+  // refresh also runs BEFORE every call. Matched on tool name, so '*' = all.
+  { file: 'sparrow-auto-status.sh', event: 'PreToolUse', mode: 'pre-tool', matcher: '*' },
   { file: 'sparrow-auto-status.sh', event: 'PostToolUse', mode: 'post-tool', matcher: '*' },
   {
     file: 'sparrow-auto-status.sh',
@@ -426,7 +431,7 @@ export const CLAUDE_ADAPTER: ProviderAdapter & DualSettingsAdapter = {
     const sp = settingsPath(r);
     syncSettings(r, 'install');
     r.log(
-      `Hooks merged into ${sp} (Stop + StopFailure + UserPromptSubmit + PostToolUse + ` +
+      `Hooks merged into ${sp} (Stop + StopFailure + UserPromptSubmit + PreToolUse + PostToolUse + ` +
         `Notification + SubagentStart + SubagentStop).`,
     );
     r.log(BG_REAP_INSTALL_NOTE);
@@ -480,6 +485,7 @@ export const CLAUDE_ADAPTER: ProviderAdapter & DualSettingsAdapter = {
       'Stop',
       'StopFailure',
       'UserPromptSubmit',
+      'PreToolUse',
       'PostToolUse',
       'Notification',
       'SubagentStart',

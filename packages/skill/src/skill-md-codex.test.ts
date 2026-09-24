@@ -171,10 +171,10 @@ describe('Codex SKILL.md — what the hooks enforce', () => {
     return codex.slice(idx);
   };
 
-  it('names the real Codex file and the four events it wires', () => {
+  it('names the real Codex file and the five events it wires', () => {
     const s = section();
     expect(s).toContain('.codex/hooks.json');
-    for (const event of ['Stop', 'SessionStart', 'UserPromptSubmit', 'PostToolUse']) {
+    for (const event of ['Stop', 'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse']) {
       expect(s).toContain(`- **${event}**`);
     }
     expect(s).not.toContain('- **Notification**');
