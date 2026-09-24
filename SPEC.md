@@ -3974,7 +3974,7 @@ sparrow watch [--room R] [--no-reconnect] [--retry-max S] [-v] [--with-presence]
           # prints ONE actionable line per gap ("events were missed … drain your
           # inbox: `sparrow pop`"), not one per poll tick
 sparrow await [--timeout S] [--stale-seconds S] [--max-stream-age S] [--poll-seconds S]
-          [--turn-seconds S] [-v] [--with-presence] [--with-status]
+          [--turn-seconds S] [--allow-unowned] [-v] [--with-presence] [--with-status]
           # the WAKE primitive for TURN-BASED agents (ones that think only when
           # their harness invokes them). Holds /me/events exactly as `watch` does —
           # presence rides it, same cursor/heal/reconnect/reconcile machinery —
@@ -4006,7 +4006,8 @@ sparrow await [--timeout S] [--stale-seconds S] [--max-stream-age S] [--poll-sec
           # and never changes the exit code or the stdout line.
           # ONE LISTENER PER STATE DIR: arming publishes a generation record
           # `<state dir>/await-owner.json` ({version, nonce, pid, startedAt,
-          # kind, profile?}, temp+rename) and the NEWEST listener wins. Nothing
+          # kind, profile?, thread?, lock?, ppid?, harnessPid?}, temp+rename;
+          # `ppid`/`harnessPid` are diagnostic) and the NEWEST listener wins. Nothing
           # is signalled and no pid is probed for liveness: an older listener
           # re-reads the record before every side effect (wake line, Codex
           # queue, event cursor, heartbeat — including a late signal handler's
@@ -4020,11 +4021,31 @@ sparrow await [--timeout S] [--stale-seconds S] [--max-stream-age S] [--poll-sec
           # opened the stream or reached the preflight hand-off, so a re-arm
           # that fails never evicts a healthy listener. Re-arming blindly every
           # turn is therefore always safe.
+          # OWNED BY THE SESSION IT WAKES (Claude Code only — gated on
+          # `CLAUDECODE` + `CLAUDE_PID`; Codex, `harness`, `enroll --exec` are
+          # untouched): the wake is this process EXITING, which reaches the
+          # session only from a DESCENDANT of the harness. Before any side
+          # effect, a live harness pid that is demonstrably not an ancestor
+          # (parent chain walked via /proc, else `ps`; init never counts)
+          # refuses the arm: one stderr line, exit 5, nothing written. An
+          # ancestry that cannot be determined, or a harness pid that is not
+          # visible at all, never refuses. A harness PROVEN an ancestor is
+          # re-checked every 15s and on stream activity; once it is dead or no
+          # longer an ancestor the listener stamps the heartbeat `orphaned
+          # <nonce>` (owner-only, like the signal stamps), posts `idle` status to
+          # up to 10 of its unarchived rooms and clears its presence mark
+          # (best-effort, 5s budget), prints one stderr line and exits 5.
+          # `--allow-unowned` skips both checks.
           # EXIT CODES ARE THE CONTRACT: 0 = work waiting, drain now; 2 =
           # --timeout elapsed with nothing waiting (line `{ type:
           # "await.timeout" }` — re-arm); 4 = superseded by a newer listener on
           # this state dir (stderr only, `{ type: "await.superseded", by }`
-          # under -j; not an error); 1 = a real failure. Diagnostics
+          # under -j; not an error); 5 = this process cannot wake the Claude
+          # Code session (refused at arm time, or orphaned while waiting;
+          # `{ type: "await.unowned" | "await.orphaned", harnessPid }` under
+          # -j) — re-arm as a tracked background task; 143/129 = killed by
+          # SIGTERM/SIGHUP (heartbeat stamped `killed:<signal>`); 1 = a real
+          # failure. Diagnostics
           # (reconnects, stale, poll errors) go to stderr so stdout is exactly
           # one line. `sparrow watch --exit-on-item` is an alias for it.
 sparrow loop [--exec CMD] [--no-reconnect] [--retry-max S] [--room R] [-v]

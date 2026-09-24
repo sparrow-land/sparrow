@@ -65,7 +65,7 @@ import {
   formatAge,
   type LoopState,
 } from './state.js';
-import { readAwaitFailure } from './await-failure.js';
+import { pidAlive, readAwaitFailure, readAwaitHarnessPid, readAwaitOwnerNonce } from './await-failure.js';
 import { blockedDir, clearBlockedMarkers, clockOf, currentBlock } from './blocked.js';
 import { shellStatusLine, subagentStatusLine } from './subagents.js';
 
@@ -302,8 +302,12 @@ export function uninstall(r: Resolved): number {
   return 0;
 }
 
-/** Best-effort sticky "loop paused" status, if creds + a room are in the env. */
-async function tryStickyStatus(r: Resolved, note: string): Promise<void> {
+/**
+ * Best-effort `working` status, if creds + a room are in the env. Sticky by
+ * default (`loop paused` must stand until the human resumes); pass
+ * `ttlSeconds` for a status that must lapse on its own.
+ */
+async function tryStatus(r: Resolved, note: string, ttlSeconds?: number): Promise<void> {
   const server = r.env.SPARROW_SERVER?.trim();
   const token = r.env.SPARROW_TOKEN?.trim();
   const room = (r.env.SPARROW_ROOM ?? r.env.SPARROW_DM_ROOM)?.trim();
@@ -312,18 +316,20 @@ async function tryStickyStatus(r: Resolved, note: string): Promise<void> {
     await fetch(`${server.replace(/\/+$/, '')}/api/v1/rooms/${room}/status`, {
       method: 'POST',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ state: 'working', note, sticky: true }),
+      body: JSON.stringify(
+        ttlSeconds === undefined ? { state: 'working', note, sticky: true } : { state: 'working', note, ttlSeconds },
+      ),
       signal: AbortSignal.timeout(3000),
     });
   } catch {
-    // silent — the sticky status is a nicety, not a requirement
+    // silent — the status is a nicety, not a requirement
   }
 }
 
 /** Flip the loop switch to `paused` (the sanctioned off-switch). */
 export async function pause(r: Resolved): Promise<number> {
   writeLoopState(r.stateDir, 'paused');
-  await tryStickyStatus(r, 'loop paused');
+  await tryStatus(r, 'loop paused');
   r.log(`Sparrow loop paused (${r.stateDir}). The Stop hook will stay silent until you resume.`);
   return 0;
 }
@@ -344,7 +350,10 @@ export async function unblock(r: Resolved): Promise<number> {
     r.log(`No usage-limit markers in ${dir} — nothing to unblock.`);
     return 0;
   }
-  await tryStickyStatus(r, 'working');
+  // TTL'd, never sticky: `unblock` runs outside a turn, so no hook would ever
+  // clear a sticky `working` from here. Same 10-minute bound as the hooks'
+  // ordinary `working` (the server's STATUS_TTL_MAX).
+  await tryStatus(r, 'working', 600);
   r.log(`Cleared ${removed.length} usage-limit marker(s) in ${dir}: ${removed.join(', ')}.`);
   return 0;
 }
@@ -368,12 +377,22 @@ export function status(r: Resolved): number {
   // heartbeat that claims no kind (empty, or any older CLI) keeps the old line.
   const beat = readHeartbeatState(r.stateDir);
   const word = beat ? (beat.signal ? `${beat.state}:${beat.signal}` : beat.state) : undefined;
+  // WHO ARMED IT. `sparrow await` records the Claude Code session pid that
+  // armed it; a listener whose session is gone (or that was armed from a shell
+  // the session does not own) is online but can never wake anyone.
+  const harnessPid = readAwaitHarnessPid(r.stateDir);
+  const owner =
+    harnessPid === undefined
+      ? ''
+      : pidAlive(harnessPid)
+        ? ` · owned by claude pid ${harnessPid}`
+        : ` · ORPHANED (claude pid ${harnessPid} is gone)`;
   const hb =
     age === undefined
       ? 'no heartbeat'
       : word
-        ? `${word}, ${formatAge(age)}`
-        : `heartbeat ${age}s ago`;
+        ? `${word}, ${formatAge(age)}${owner}`
+        : `heartbeat ${age}s ago${owner}`;
   const dir = adapter.skillDir(r);
   const installed = fs.existsSync(path.join(dir, 'SKILL.md'));
   r.log(`provider:   ${adapter.label}`);
@@ -403,6 +422,17 @@ export function status(r: Resolved): number {
   // Why the CURRENT generation's listener died, when it got to say so. A
   // superseded listener's complaint is not about the one on watch now, so the
   // reader gates on the owner nonce and this prints nothing unless it matches.
+  // An `orphaned` stamp gets the same treatment, gated the same way: the
+  // listener stood down because the session that armed it is gone.
+  if (beat?.state === 'orphaned') {
+    const live = readAwaitOwnerNonce(r.stateDir);
+    if (!beat.generation || !live || beat.generation === live) {
+      r.log(
+        'listener died: orphaned (the Claude Code session that armed it is gone, or it was armed ' +
+          'from a shell this session does not own) — re-arm sparrow await as a tracked background task',
+      );
+    }
+  }
   const failure = readAwaitFailure(r.stateDir);
   if (failure) {
     r.log(

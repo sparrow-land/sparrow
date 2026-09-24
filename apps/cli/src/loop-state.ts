@@ -115,6 +115,41 @@ export function markHeartbeatBlocked(
   }
 }
 
+/**
+ * Stamp the heartbeat `orphaned` — an `await` whose Claude Code session is gone
+ * (the harness pid died, or it is no longer this process's ancestor), so the
+ * listener could never wake anyone and is standing down (exit 5).
+ *
+ * A FOURTH WORD, next to `killed`/`stopped`/`blocked`, and deliberately not
+ * `killed:<something>`: nothing killed this process — it noticed it had been
+ * abandoned and left. Written here for the same reason as
+ * {@link markHeartbeatBlocked}: `@sparrow/skill`'s `markHeartbeatDead` speaks
+ * only the two signal reasons, and a reader that does not know this word treats
+ * it as UNJUDGEABLE — never as a live listener. Same file, same shape
+ * (`orphaned [generation]`), same fresh mtime.
+ */
+export function markHeartbeatOrphaned(
+  env: Env = process.env,
+  /** The `await` generation nonce, so a superseded listener's stamp is discardable. */
+  generation?: string,
+  now: number = Date.now(),
+): void {
+  try {
+    const dir = resolveStateDir(env);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = heartbeatPath(dir);
+    fs.writeFileSync(file, generation ? `orphaned ${generation}\n` : 'orphaned\n');
+    try {
+      const when = new Date(now);
+      fs.utimesSync(file, when, when);
+    } catch {
+      // leave the OS-assigned mtime (still "fresh")
+    }
+  } catch {
+    // best-effort: a listener must never crash over a heartbeat
+  }
+}
+
 /** Read the loop switch (`engaged` | `paused` | `undefined`). */
 export function readLoopState(env: Env = process.env): LoopState | undefined {
   return readLoopStateAt(resolveStateDir(env));

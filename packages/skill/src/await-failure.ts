@@ -54,3 +54,32 @@ export function readAwaitFailure(stateDir: string): AwaitFailure | undefined {
     error,
   };
 }
+
+/**
+ * The live generation's nonce from `await-owner.json`, when it names one. Used
+ * to gate a generation-tagged heartbeat stamp exactly as the hooks do: a
+ * superseded listener's stamp says nothing about the one on watch now.
+ */
+export function readAwaitOwnerNonce(stateDir: string): string | undefined {
+  return str(readJson(path.join(stateDir, 'await-owner.json'))?.nonce);
+}
+
+/**
+ * The Claude Code session pid that armed the live listener (`harnessPid`, from
+ * `CLAUDE_PID` at arm time), or `undefined` when the record names none — an
+ * older CLI, a non-Claude harness, or no record at all.
+ */
+export function readAwaitHarnessPid(stateDir: string): number | undefined {
+  const v = readJson(path.join(stateDir, 'await-owner.json'))?.harnessPid;
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
+}
+
+/** Is `pid` running? EPERM means it exists under another user: alive. */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}

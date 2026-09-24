@@ -1,7 +1,8 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runSkill } from './install.js';
 import {
   readLoopState,
@@ -800,6 +801,72 @@ describe('pause / resume / status', () => {
     expect(await statusOut()).not.toContain('listener died:');
   });
 
+  /* ------------------------- who owns the listener ------------------------- *
+   * `sparrow await` records the Claude Code session that armed it (`harnessPid`
+   * in await-owner.json). A listener armed as a disowned `( … & )` inside a
+   * foreground Bash call is online but can never wake the session, so status
+   * names the owner and says plainly when it is gone.
+   * ------------------------------------------------------------------------ */
+  const writeHarnessOwner = (harnessPid?: number): void => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, 'await-owner.json'),
+      JSON.stringify({
+        version: 1,
+        nonce: 'f00d',
+        pid: 4242,
+        kind: 'await',
+        ...(harnessPid !== undefined ? { harnessPid, ppid: harnessPid } : {}),
+      }),
+    );
+  };
+  const deadPid = (): number => {
+    const child = spawnSync('true');
+    return child.pid ?? 999_999_999;
+  };
+
+  it('names the live Claude Code session that owns the listener', async () => {
+    await run(['install']);
+    writeHeartbeatFile('await f00d', 45);
+    writeHarnessOwner(process.pid);
+    expect(await statusOut()).toContain(`heartbeat:  await, 45s ago · owned by claude pid ${process.pid}`);
+  });
+
+  it('says ORPHANED when that session is gone', async () => {
+    await run(['install']);
+    writeHeartbeatFile('await f00d', 45);
+    const gone = deadPid();
+    writeHarnessOwner(gone);
+    expect(await statusOut()).toContain(`heartbeat:  await, 45s ago · ORPHANED (claude pid ${gone} is gone)`);
+  });
+
+  it('adds nothing when the owner record names no harness pid', async () => {
+    await run(['install']);
+    writeHeartbeatFile('await f00d', 45);
+    writeHarnessOwner();
+    const out = await statusOut();
+    expect(out).toMatch(/heartbeat: +await, 45s ago$/m);
+    expect(out).not.toMatch(/owned by|ORPHANED/);
+  });
+
+  it('prints an orphaned stamp like a dead one, and says why', async () => {
+    await run(['install']);
+    writeHeartbeatFile('orphaned f00d', 3);
+    writeHarnessOwner();
+    const out = await statusOut();
+    expect(out).toMatch(/heartbeat: +orphaned, 3s ago$/m);
+    expect(out).toContain(
+      'listener died: orphaned (the Claude Code session that armed it is gone, or it was armed from a shell this session does not own) — re-arm sparrow await as a tracked background task',
+    );
+  });
+
+  it('says nothing about an orphaned stamp from a SUPERSEDED generation', async () => {
+    await run(['install']);
+    writeHeartbeatFile('orphaned b0b0', 3);
+    writeHarnessOwner();
+    expect(await statusOut()).not.toContain('listener died:');
+  });
+
   /* -------------------------- usage-limit markers -------------------------- *
    * A limited session looks online and cannot run. `status` is where a human
    * (or the agent itself, next turn) finds out why, and `unblock` is the
@@ -868,6 +935,32 @@ describe('pause / resume / status', () => {
     expect(out).toContain(path.join(stateDir, 'blocked'));
     expect(fs.readdirSync(path.join(stateDir, 'blocked'))).toEqual([]);
     expect(await statusOut()).not.toContain('blocked:');
+  });
+
+  /**
+   * `unblock` runs OUTSIDE a turn, so a sticky `working` from it would have no
+   * hook to clear it and would stand until the next idle. It carries the same
+   * 10-minute TTL as the hooks' ordinary `working`. `pause` stays sticky: the
+   * `loop paused` note is meant to stand until the human resumes.
+   */
+  it('unblock posts a TTL-bounded working, never sticky; pause stays sticky', async () => {
+    await run(['install']);
+    const bodies: unknown[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
+      bodies.push(JSON.parse(init.body));
+      return new Response('{}', { status: 200 });
+    });
+    try {
+      const testEnv = { ...env(), SPARROW_SERVER: 'https://example.test', SPARROW_TOKEN: 'agk_test', SPARROW_ROOM: 'rom_a' };
+      writeMarker('20260917T090000-1.json', { at: new Date().toISOString() });
+      await run(['unblock'], { env: testEnv });
+      expect(bodies).toEqual([{ state: 'working', note: 'working', ttlSeconds: 600 }]);
+      bodies.length = 0;
+      await run(['pause'], { env: testEnv });
+      expect(bodies).toEqual([{ state: 'working', note: 'loop paused', sticky: true }]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('unblock is a no-op that says so when nothing is blocked', async () => {

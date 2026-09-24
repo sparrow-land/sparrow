@@ -344,6 +344,43 @@ describe('SKILL.md — the come-online fork (online is not attentive)', () => {
     expect(line).toMatch(/nothing is printed|prints nothing/i);
   });
 
+  /**
+   * A listener armed as a disowned `( … & )` inside a foreground Bash call is
+   * online but can never wake the session. The CLI refuses that shape (exit 5)
+   * and stands down with an `orphaned` stamp when the session disappears; the
+   * playbook must say so beside the interrupt note, the hooks section must name
+   * the stamp, and `sparrow skill status` is where the owner is shown.
+   */
+  it('warns against a disowned await: exit 5, the orphaned stamp, a tracked task instead', () => {
+    const idx = skillMd.indexOf('### The wake pattern');
+    const section = skillMd.slice(idx, skillMd.indexOf('## Session-start protocol'));
+    expect(section).toMatch(/disowned `\( … & \)`/);
+    expect(section).toMatch(/online but can never wake/i);
+    expect(section).toMatch(/exit 5/);
+    expect(section).toContain('`orphaned`');
+    expect(section).toMatch(/tracked background task/);
+    expect(section).toMatch(/sparrow skill status[^\n]*own/);
+  });
+
+  it('the hooks section names the orphaned stamp beside killed/stopped', () => {
+    const section = skillMd.slice(skillMd.indexOf('## What the hooks enforce'));
+    const stop = section.slice(section.indexOf('- **Stop**'), section.indexOf('\n', section.indexOf('- **Stop**')));
+    expect(stop).toContain('`orphaned`');
+    const prompt = section.slice(section.indexOf('- **UserPromptSubmit**'));
+    expect(prompt.slice(0, prompt.indexOf('\n-'))).toContain('`orphaned`');
+  });
+
+  it('describes the bounded working status: 10 minutes, refreshed by tool calls', () => {
+    const idx = skillMd.indexOf('### Auto-status');
+    const section = skillMd.slice(idx, skillMd.indexOf('## Presence for turn-based agents'));
+    expect(section).not.toMatch(/you go sticky \*\*working\*\*/);
+    expect(section).toMatch(/10 minutes/);
+    expect(section).toMatch(/subagent/i);
+    const hooks = skillMd.slice(skillMd.indexOf('## What the hooks enforce'));
+    expect(hooks).not.toMatch(/keeps the sticky status alive/);
+    expect(hooks).not.toMatch(/`sparrow-auto-status\.sh prompt`\) — sticky/);
+  });
+
   it('warns that a presence heartbeat without a wake path is the WORST state', () => {
     const idx = skillMd.indexOf('## Presence for turn-based agents');
     expect(idx).toBeGreaterThan(0);

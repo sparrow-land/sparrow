@@ -147,6 +147,15 @@ describe('readHeartbeatState', () => {
     expect(readHeartbeatState(stateDir)).toBeUndefined();
   });
 
+  it('reads an `orphaned` stamp (the CLI stood down: its Claude Code session is gone)', () => {
+    fs.writeFileSync(heartbeatPath(stateDir), 'orphaned 4f2c9a01bb33cd10\n');
+    expect(readHeartbeatState(stateDir)).toEqual({ state: 'orphaned', generation: '4f2c9a01bb33cd10' });
+    fs.writeFileSync(heartbeatPath(stateDir), 'orphaned\n');
+    expect(readHeartbeatState(stateDir)).toEqual({ state: 'orphaned' });
+    // It is a corpse, not a listener: the raw kind reader keeps answering undefined.
+    expect(readHeartbeatKind(stateDir)).toBeUndefined();
+  });
+
   it('ignores a signal suffix on a listener kind (only the dead words carry one)', () => {
     fs.writeFileSync(heartbeatPath(stateDir), 'await:SIGTERM\n');
     expect(readHeartbeatState(stateDir)).toBeUndefined();

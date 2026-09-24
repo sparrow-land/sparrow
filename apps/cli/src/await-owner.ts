@@ -91,6 +91,18 @@ export interface AwaitOwnerRecord {
    * written before 0.1.39.
    */
   lock?: ArmLockMechanism;
+  /**
+   * The listener's PARENT pid at arm time. Diagnostic: under Claude Code a
+   * tracked background task is the harness's child, a disowned `( … & )` is
+   * not. Absent in records written before 0.1.52.
+   */
+  ppid?: number;
+  /**
+   * The Claude Code harness (`CLAUDE_PID`) this listener was armed for, when
+   * one was detected — the process whose session its exit is meant to wake.
+   * Absent outside Claude Code and in records written before 0.1.52.
+   */
+  harnessPid?: number;
 }
 
 /** `process.kill(pid, 0)`, injectable so the three answers are testable. */
@@ -292,6 +304,14 @@ function writeAwaitCandidate(env: Env, nonce: string, lock?: ArmLockMechanism): 
   }
 }
 
+const positivePid = (v: unknown): v is number => Number.isInteger(v) && (v as number) > 0;
+
+/** The optional diagnostic pids, spread into a record only when present. */
+const diagnosticPids = (p: { ppid?: number; harnessPid?: number }): Partial<AwaitOwnerRecord> => ({
+  ...(positivePid(p.ppid) ? { ppid: p.ppid } : {}),
+  ...(positivePid(p.harnessPid) ? { harnessPid: p.harnessPid } : {}),
+});
+
 /** The published generation, or undefined when absent, unreadable, or malformed. */
 export function readAwaitOwner(env: Env): AwaitOwnerRecord | undefined {
   try {
@@ -306,6 +326,8 @@ export function readAwaitOwner(env: Env): AwaitOwnerRecord | undefined {
       ...(typeof raw.profile === 'string' ? { profile: raw.profile } : {}),
       ...(typeof raw.thread === 'string' && raw.thread ? { thread: raw.thread } : {}),
       ...(raw.lock === 'flock' || raw.lock === 'advisory' ? { lock: raw.lock } : {}),
+      ...(positivePid(raw.ppid) ? { ppid: raw.ppid } : {}),
+      ...(positivePid(raw.harnessPid) ? { harnessPid: raw.harnessPid } : {}),
     };
   } catch {
     return undefined;
@@ -538,6 +560,8 @@ interface ArmHelperPayload {
   thread?: string;
   profile?: string;
   takeOver?: boolean;
+  ppid?: number;
+  harnessPid?: number;
 }
 
 export function encodeArmHelperPayload(p: ArmHelperPayload): string {
@@ -600,6 +624,7 @@ export function runArmPublishHelper(payload: string): string {
       ...(p.profile ? { profile: p.profile } : {}),
       ...(p.thread ? { thread: p.thread } : {}),
       lock: 'flock',
+      ...diagnosticPids(p),
     };
     const file = awaitOwnerPath(env);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -796,6 +821,10 @@ export function prepareAwaitGeneration(opts: {
    * {@link assertMayArm}). Omitted by Claude Code and plain listeners.
    */
   thread?: string;
+  /** This listener's parent pid at arm time (diagnostic; see {@link AwaitOwnerRecord.ppid}). */
+  ppid?: number;
+  /** The detected Claude Code harness pid, when any (see {@link AwaitOwnerRecord.harnessPid}). */
+  harnessPid?: number;
   /** Test seam: the `process.kill(pid, 0)` used by the publish-time recheck. */
   kill?: PidSignal;
   /** Injection for the arming lock (mechanism, binary, helper entry, spawn). */
@@ -804,6 +833,7 @@ export function prepareAwaitGeneration(opts: {
   err?(s: string): void;
 }): AwaitGeneration {
   const { env, kind, profile, thread, kill, lock: lockOpts = {}, err } = opts;
+  const pids = diagnosticPids(opts);
   const nonce = crypto.randomBytes(8).toString('hex');
   // WHICH MECHANISM, decided once at arm time: it goes into both records, so a
   // reader (a test, `sparrow skill status`, an operator) can see whether this
@@ -856,6 +886,7 @@ export function prepareAwaitGeneration(opts: {
             ...(thread ? { thread } : {}),
             ...(profile ? { profile } : {}),
             ...(takingOver(env) ? { takeOver: true } : {}),
+            ...pids,
           },
           lockOpts,
         );
@@ -918,6 +949,7 @@ export function prepareAwaitGeneration(opts: {
       ...(profile ? { profile } : {}),
       ...(thread ? { thread } : {}),
       lock: 'advisory',
+      ...pids,
     };
     try {
       const file = awaitOwnerPath(env);

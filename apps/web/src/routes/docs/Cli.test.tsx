@@ -85,6 +85,10 @@ describe('CLI reference — the listener trio and the skill', () => {
     expect(text).toContain('item:null');
     const flags = [...section.querySelectorAll('td code')].map((c) => c.textContent ?? '');
     expect(flags).toContain('--timeout S');
+    // Exit 5: under Claude Code, a listener that cannot wake the session.
+    expect(text).toMatch(/\b5 means\b/);
+    expect(text).toMatch(/cannot wake your session/i);
+    expect(flags).toContain('--allow-unowned');
     // It sits with the other listeners, right after `sparrow watch`.
     const watch = screen.getByRole('heading', { name: 'sparrow watch' });
     expect(watch.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

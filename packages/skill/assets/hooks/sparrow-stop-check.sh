@@ -9,7 +9,11 @@
 #      session interrupt kills the tracked background `sparrow await`, and the
 #      heartbeat it left behind stays FRESH for the whole window -- so this word
 #      SKIPS the freshness check entirely and blocks immediately. (Three prod
-#      sessions ended silently on exactly this, in one day.)
+#      sessions ended silently on exactly this, in one day.) An `orphaned`
+#      stamp is judged the same way: `sparrow await` stood down because the
+#      Claude Code session that armed it is gone, or was never its ancestor (a
+#      disowned `( ... & )` inside a foreground Bash call -- online, but it
+#      could never wake this session).
 #   3. ONLINE-BUT-DEAF -- a listener IS alive, but it is `sparrow watch` or
 #      `sparrow loop`: both hold the events stream open forever, so presence goes
 #      green while nothing can ever re-enter a turn-based session. Only
@@ -34,7 +38,7 @@
 # HOW IT TELLS THEM APART: every CLI listener writes its own kind (`await`,
 # `watch`, `loop`) as the heartbeat file's content while stamping the mtime, and
 # writes `killed:<signal>` / `stopped:<signal>` as it dies.
-# `killed`/`stopped` (fresh or stale) -> block, naming the cause. Fresh +
+# `killed`/`stopped`/`orphaned` (fresh or stale) -> block, naming the cause. Fresh +
 # `await:codex` -> allow. Fresh + `await` under Codex -> block because it is
 # passive. Fresh + `await` under Claude -> allow. Fresh + `watch`/`loop` -> block.
 # Stale/absent -> the drift block.
@@ -365,7 +369,7 @@ mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 #   blocked      standing by on a usage limit, with a marker and a live listener
 #   standby-gone standing by, but the listener process behind it is gone
 #   unjudgeable  fresh heartbeat we cannot read (legacy, third-party, superseded)
-#   dead         a killed:/stopped: stamp from the live generation
+#   dead         a killed:/stopped:/orphaned stamp from the live generation
 #   passive      fresh plain `await` under Codex: no verified queue bridge
 #   hold         fresh `watch`/`loop`: online, but it can never wake a turn
 #   gone         fresh wake-path heartbeat whose listener process is absent
@@ -421,6 +425,10 @@ classify() {
   case "$content" in
     killed | killed:*) dead_word="killed" ;;
     stopped | stopped:*) dead_word="stopped" ;;
+    # `sparrow await` stood down because the Claude Code session that armed it
+    # is gone, or was never its ancestor (a disowned `( ... & )` inside a
+    # foreground Bash call: online, but it could never wake this session).
+    orphaned | orphaned:*) dead_word="orphaned" ;;
   esac
   if [ -n "$dead_word" ]; then
     case "$content" in
@@ -554,6 +562,8 @@ elif [ -n "$dead_word" ]; then
     else
       cause="was killed (usually a session interrupt)"
     fi
+  elif [ "$dead_word" = orphaned ]; then
+    cause="was orphaned (the Claude Code session that armed it is gone, or it was armed from a shell this session does not own)"
   else
     cause="was stopped (Ctrl-C)"
   fi

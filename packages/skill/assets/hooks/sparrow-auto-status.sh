@@ -3,33 +3,38 @@
 #
 # One script, four modes (the mode is the first arg in the settings command; if
 # absent it is inferred from the hook event in stdin JSON):
-#   prompt        (UserPromptSubmit) → sticky "working" across every room + a
+#   prompt        (UserPromptSubmit) → "working" across every room, TTL'd at
+#                 600s and NOT sticky (see A BOUNDED `working` below), + a
 #                 presence heartbeat. Note is the generic "working" unless
 #                 SPARROW_STATUS_NOTES=verbose, which derives a short (privacy-
 #                 sensitive, opt-in) note from the prompt's first ~50 chars.
 #                 ALSO the one mode that may SPEAK: a UserPromptSubmit hook's
 #                 stdout is injected into the agent's context, so when the loop
 #                 is engaged and the heartbeat says no listener is running
-#                 (absent, stale, or a `killed`/`stopped` stamp) it prints ONE
+#                 (absent, stale, or a `killed`/`stopped`/`orphaned` stamp) it prints ONE
 #                 plain-text line telling the agent to re-arm `sparrow await`
 #                 before anything else. That is the only way a session whose
 #                 background listener was killed (a Claude Code interrupt kills
 #                 the process tree) ever finds out.
-#   post-tool     (PostToolUse) → throttled (~20s) presence refresh; PLUS the
+#   post-tool     (PostToolUse) → throttled (~20s) presence refresh, and on the
+#                 same throttle a RE-POST of the note every room was last told
+#                 (the stamp's text, unchanged, so its sinceAt keeps reflecting
+#                 when the work actually STARTED) with the 600s TTL: a live turn
+#                 keeps its `working` alive this way, and a session with no turn
+#                 running loses it within 600s of the last tool call. PLUS the
 #                 idle→working resume handshake: if the last event was a stop
-#                 (marker file), the first tool call of the new turn restores a
-#                 sticky "working" — turns started by a monitor event or task
+#                 (marker file), the first tool call of the new turn restores
+#                 "working" — turns started by a monitor event or task
 #                 notification have no UserPromptSubmit, and without this they
-#                 run entirely under the previous stop's idle. Otherwise it
-#                 never rewrites the status: the sticky "working" set at prompt
-#                 time stays alive because presence stays fresh, and its sinceAt
-#                 keeps reflecting when the work actually STARTED.
+#                 run entirely under the previous stop's idle. It never
+#                 rewrites the note TEXT except to repair a drifted composition
+#                 (the backstop below).
 #   notification  (Notification) → switches on the event's `notification_type`,
 #                 because Claude Code fires ONE Notification event for every
 #                 notification it raises:
 #                   permission_prompt / elicitation_dialog /
 #                   elicitation_url_dialog / agent_needs_input → a human is
-#                     being asked something: sticky "working" noted "blocked —
+#                     being asked something: STICKY "working" noted "blocked —
 #                     needs your input" across every room, cleared naturally by
 #                     the next prompt (back to "working") or stop (idle).
 #                   idle_prompt → the OPPOSITE: Claude Code emits this ~60s
@@ -113,8 +118,26 @@
 #                 note grows a summary of what is running: `working (2 subagents:
 #                 code-review, explore)`. Both post that note themselves, because
 #                 a FOREGROUND subagent blocks its parent -- no tool call fires
-#                 while it runs, which is exactly when someone is watching.
+#                 while it runs, which is exactly when someone is watching. For
+#                 the same reason the note is STICKY while any subagent runs
+#                 (nothing could refresh a TTL), and the stop that leaves none
+#                 re-posts the plain note with the 600s TTL.
 #                 Output is discarded for both, so they write nothing to stdout.
+#
+# A BOUNDED `working` (2026-09-24). Observed on a real host: the Stop hook
+# published idle, three minutes later `working` was re-posted with no turn
+# running, and a sticky status has no timer -- it stood for 2.5 hours on an
+# idle agent. Whatever the trigger, the defence is independent of it: the
+# ordinary `working` (prompt, the resume handshake, a resumed quota) carries
+# `"ttlSeconds":600` (the server's STATUS_TTL_MAX) and lives only while the
+# post-tool refresh keeps re-posting it. STICKY is kept exactly where nothing
+# could refresh a TTL or where a human must see the note: a running subagent,
+# `blocked — needs your input`, and the usage-limit notes. Those are cleared by
+# the events that end them (the last subagent-stop, the next prompt, a stop).
+# `post_note` derives the lifetime from the same state the note was composed
+# from, so a body and its lifetime always agree. Net effect: outside a turn,
+# `working` lasts at most 600s after the last tool call unless a subagent or a
+# blocked note is legitimately outstanding.
 #
 # PAYLOAD FIELDS THIS HOOK READS, and nothing else. StopFailure: `error_type`
 # (falling back to `error`), `session_id`, `prompt_id`, `transcript_path`,
@@ -246,6 +269,10 @@ NOTE_MAX=140
 POST_THROTTLE="${SPARROW_STATUS_POST_THROTTLE:-20}"
 MAX_ROOMS="${SPARROW_STATUS_MAX_ROOMS:-10}"
 PRESENCE_TTL="${SPARROW_PRESENCE_TTL:-300}"
+# The ordinary `working` is TTL'd, not sticky: `STATUS_TTL_MAX` on the server
+# (apps/api), the longest a status may live without a refresh. See A BOUNDED
+# `working` in the header.
+WORKING_TTL=600
 
 # Read stdin once (best-effort). Needed for verbose notes and event inference.
 input=$(cat 2>/dev/null || true)
@@ -787,6 +814,13 @@ listener_nudge() {
         cause="was stopped (Ctrl-C)"
         [ -n "$age" ] && cause="$cause $(fmt_age "$age") ago"
         ;;
+      # `sparrow await` stood down: the Claude Code session that armed it is
+      # gone, or it was armed as a disowned `( ... & )` inside a foreground Bash
+      # call -- online, but it could never have woken this session.
+      orphaned | orphaned:*)
+        cause="was orphaned (the Claude Code session that armed it is gone, or it was armed from a shell this session does not own)"
+        [ -n "$age" ] && cause="$cause $(fmt_age "$age") ago"
+        ;;
       *)
         if [ -n "$age" ] && [ "$age" -ge "$FRESH_SECONDS" ] 2>/dev/null; then
           cause="is not running (no listener has heartbeated for $(fmt_age "$age"))"
@@ -1137,10 +1171,41 @@ EOF
 # rooms which never heard the note are up to date, and nothing would ever repair
 # them. So a truncated publication returns 1, leaves the stamp alone, and (via
 # `publish_rounds`) leaves the pending markers standing for a later hook.
+#
+# STICKY ONLY WHILE NOTHING ELSE CAN KEEP IT ALIVE (see A BOUNDED `working` in
+# the header). The lifetime is a function of the same state the note was
+# composed from, so a body and its lifetime always agree: a running subagent or
+# an unanswered ask is sticky, everything else carries the TTL and lives only as
+# long as the post-tool refresh keeps re-posting it.
+note_is_held() {
+  [ -f "$NEEDS_INPUT_FILE" ] && return 0
+  [ -n "$(subagent_types | head -n 1)" ]
+}
 post_note() {
-  post_status_all "{\"state\":\"working\",\"note\":\"$(safe_json "$1")\",\"sticky\":true}" || return 1
+  if note_is_held; then
+    _pn_life='"sticky":true'
+  else
+    _pn_life="\"ttlSeconds\":$WORKING_TTL"
+  fi
+  post_status_all "{\"state\":\"working\",\"note\":\"$(safe_json "$1")\",$_pn_life}" || return 1
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   printf '%s' "$1" > "$NOTE_STAMP" 2>/dev/null || true
+}
+
+# THE POST-TOOL REFRESH: re-post exactly what every room was last told, so a
+# TTL'd `working` outlives a long turn and lapses on its own within
+# $WORKING_TTL of the last tool call when no Stop ever comes. The TEXT is the
+# stamp's, never recomposed: an unchanged note keeps its `sinceAt` server-side,
+# and a drifted composition is the backstop's business, not this function's.
+#
+# Under the lock like every publication, and it stands down whenever the
+# turn's end is owed or already published: a refresh must never resurrect an
+# idle, and an absent stamp means nothing was ever posted from here.
+publish_refresh() {
+  [ -f "$IDLE_OWED" ] && return 0
+  _rf_prev=$(cat "$NOTE_STAMP" 2>/dev/null || printf '')
+  [ -n "$_rf_prev" ] && [ "$_rf_prev" != "$IDLE_STAMP" ] || return 0
+  post_note "$_rf_prev" || return 0
 }
 
 # Strip anything that would break the hand-rolled JSON body (the composed note
@@ -1591,7 +1656,9 @@ case "$MODE" in
         note="working"
         [ -n "$qt" ] && note="working (quota $(safe_field "$qt" 30) resumed)"
         refresh_presence
-        post_status_all "{\"state\":\"working\",\"note\":\"$note\",\"sticky\":true}"
+        # Ordinary work again, so the ordinary bounded lifetime: the resumed
+        # turn's own hooks keep it alive, and it lapses if none follows.
+        post_status_all "{\"state\":\"working\",\"note\":\"$note\",\"ttlSeconds\":$WORKING_TTL}"
         rm -f "$IDLE_MARKER" 2>/dev/null || true
         ;;
       quota_auto_resume_stale)
@@ -1625,7 +1692,7 @@ case "$MODE" in
     # task notification has NO UserPromptSubmit, so without this the whole
     # autonomous turn runs under the last stop's `idle` and the agent reads as
     # doing nothing while it works. The stop mode leaves a marker; the FIRST
-    # tool call of the next turn restores sticky `working` and consumes it.
+    # tool call of the next turn restores `working` and consumes it.
     if [ -f "$IDLE_MARKER" ]; then
       # Same reasoning as the prompt mode: the turn has resumed, so idle is no
       # longer owed, and that has to be true BEFORE `publish_rounds` looks.
@@ -1659,9 +1726,16 @@ case "$MODE" in
       wait 2>/dev/null || true
       exit 0
     fi
-    # Throttled presence refresh only — never rewrite the status (keeps sinceAt).
+    # Throttled presence refresh, plus the TTL refresh of the note: the SAME
+    # text re-posted (so `sinceAt` is kept), and only once the last publication
+    # is itself at least a throttle window old -- a note the prompt posted a
+    # second ago needs no help yet.
     throttled "$POST_STAMP" "$POST_THROTTLE" || exit 0
     refresh_presence
+    _nage=$(file_age "$NOTE_STAMP")
+    if [ -n "$_nage" ] && [ "$_nage" -ge "$POST_THROTTLE" ] 2>/dev/null; then
+      post_composed_with publish_refresh
+    fi
     ;;
   stop-failure)
     # NO PRESENCE HEARTBEAT. The CLI takes this profile off presence when it

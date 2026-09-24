@@ -273,6 +273,33 @@ describe('publish() re-checks ownership at the last possible moment', () => {
     expect(readAwaitOwner(env())!.thread).toBe('thread-mine');
   });
 
+  /* ORPHAN DETECTION (Claude Code): the parent at arm time and the harness the
+   * listener belongs to, so a reader can see WHOSE wake path this is. Optional
+   * and additive — every reader keeps working on records without them. */
+  it('records the parent pid and the Claude Code harness pid when given', () => {
+    const gen = prepareAwaitGeneration({ env: env(), kind: 'await', ppid: 4321, harnessPid: 1234 });
+    gen.publish();
+    const rec = readAwaitOwner(env())!;
+    expect(rec.ppid).toBe(4321);
+    expect(rec.harnessPid).toBe(1234);
+    expect(rec.version).toBe(1);
+  });
+
+  it('omits both when not given, and the reader drops malformed values', () => {
+    prepareAwaitGeneration({ env: env(), kind: 'await' }).publish();
+    const rec = readAwaitOwner(env())!;
+    expect('ppid' in rec).toBe(false);
+    expect('harnessPid' in rec).toBe(false);
+    fs.writeFileSync(
+      awaitOwnerPath(env()),
+      JSON.stringify({ version: 1, nonce: 'abc', pid: 1, ppid: 'x', harnessPid: -3 }),
+    );
+    const bad = readAwaitOwner(env())!;
+    expect(bad.nonce).toBe('abc');
+    expect('ppid' in bad).toBe(false);
+    expect('harnessPid' in bad).toBe(false);
+  });
+
   it('omits the thread entirely for a non-Codex listener', () => {
     const gen = prepareAwaitGeneration({ env: env(), kind: 'await' });
     gen.publish();
@@ -627,6 +654,19 @@ describe('flock mode — the parent reads exactly one line from the helper', () 
     const payload = payloadOf(args);
     expect(payload).toMatchObject({ kind: 'await:codex', thread: 'thread-mine', listenerPid: process.pid });
     expect(payload.stateDir).toBe(stateDir);
+  });
+
+  it('hands the parent and harness pids to the helper, which records them', () => {
+    const spawn = fakeSpawn(() => ({ ...helperArgs, stdout: '{"result":"published"}\n' }));
+    underFlock(spawn, { ppid: 4321, harnessPid: 1234 }).publish();
+    const payload = payloadOf(spawn.calls[0]!);
+    expect(payload).toMatchObject({ ppid: 4321, harnessPid: 1234 });
+    // …and the helper itself writes them into the record.
+    const line = runArmPublishHelper(
+      encodeArmHelperPayload({ stateDir, nonce: 'n1', listenerPid: process.pid, kind: 'await', ppid: 4321, harnessPid: 1234 }),
+    );
+    expect(JSON.parse(line).result).toBe('published');
+    expect(readAwaitOwner(env())).toMatchObject({ nonce: 'n1', ppid: 4321, harnessPid: 1234, lock: 'flock' });
   });
 
   it('turns the helper’s refusal into exit 1, verbatim, having published nothing', () => {

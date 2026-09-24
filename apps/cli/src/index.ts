@@ -128,9 +128,19 @@ import {
   touchHeartbeat,
   markHeartbeatBlocked,
   markHeartbeatDead,
+  markHeartbeatOrphaned,
   readLoopState,
   skillInstall,
 } from './loop-state.js';
+import {
+  UNOWNED_EXIT_CODE,
+  detectHarness,
+  isAlive,
+  isAncestor,
+  orphanedNotice,
+  unownedRefusal,
+  type HarnessOwner,
+} from './harness-owner.js';
 import {
   ARM_HELPER_COMMAND,
   assertMayArm,
@@ -329,6 +339,21 @@ const MAX_STREAM_AGE_SECONDS_DEFAULT = 300;
  * on this timer while streaming or standing by. A local `readdir`, no network.
  */
 const BLOCKED_POLL_MS_DEFAULT = 30_000;
+
+/**
+ * How often an `await` armed under Claude Code re-asks "is the session that
+ * armed me still there, and am I still its descendant?" (see harness-owner.ts).
+ * A `/proc` walk is cheap, but nothing is lost by asking at this cadence: an
+ * orphan can wake nobody either way. `SPARROW_ORPHAN_CHECK_MS` is a hidden
+ * millisecond override for tests.
+ */
+const ORPHAN_CHECK_MS_DEFAULT = 15_000;
+
+/** The time budget for an orphan's best-effort goodbye (idle statuses + presence). */
+const ORPHAN_CLEANUP_BUDGET_MS = 5_000;
+
+/** At most this many rooms get an idle post from an orphaned listener. */
+const ORPHAN_IDLE_ROOMS_MAX = 10;
 
 /**
  * Reconcile-poll cadence for `watch`/`loop` on the `/me/events` path. Every 30s —
@@ -4393,6 +4418,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
    * throw. Idempotent: it clears the slot before calling, and never throws.
    */
   const awaitSignals: { disarm?: () => void } = {};
+  /** The orphan watch's timer, taken down by the same single `finally`. */
+  const awaitOrphanWatch: { stop?: () => void } = {};
   const runAwait = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
     try {
       await runAwaitArmed(opts);
@@ -4406,6 +4433,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       }
       awaitCandidate.retire?.();
       awaitCandidate.retire = undefined;
+      awaitOrphanWatch.stop?.();
+      awaitOrphanWatch.stop = undefined;
     }
   };
   const runAwaitArmed = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
@@ -4432,6 +4461,38 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const codexThread =
       explicitCodexThread || env.CODEX_THREAD_ID?.trim() || env.CODEX_SESSION_ID?.trim();
     const awaitHeartbeatKind = codexThread ? 'await:codex' : 'await';
+
+    /* ---------------------- WHO CAN THIS LISTENER WAKE? ----------------------
+     * Under Claude Code the wake is this process EXITING, and only a descendant
+     * of the harness can deliver it: a tracked background task is one, a
+     * `( sparrow await & )` disowned inside a foreground Bash call is reparented
+     * away within a second — and then passes every other health check (fresh
+     * heartbeat, live pid, no stamp) while being unable to wake anybody.
+     *
+     * So, BEFORE any side effect: a live harness that is demonstrably NOT an
+     * ancestor refuses the arm (exit 5). `unknown` never refuses, and a harness
+     * pid we cannot see at all is not judged either (it may live in another pid
+     * namespace — a sandbox — where nothing here can be proven). Only a harness
+     * PROVEN to be our ancestor is then watched on every tick (see
+     * `checkOrphaned`). A Codex run wakes through the bridge, not by exiting,
+     * so it is never judged. See harness-owner.ts.
+     * ---------------------------------------------------------------------- */
+    const harness: HarnessOwner | null = codexThread ? null : detectHarness(env);
+    const allowUnowned = opts.allowUnowned === true;
+    let watchedHarness: HarnessOwner | undefined;
+    if (harness && !allowUnowned && isAlive(harness.pid)) {
+      const ancestry = isAncestor(harness.pid, process.pid);
+      if (ancestry === 'no') {
+        io.err(
+          ctx.json
+            ? `${JSON.stringify({ type: 'await.unowned', harnessPid: harness.pid })}\n`
+            : `${unownedRefusal(harness.pid)}\n`,
+        );
+        ctx.exitCode = UNOWNED_EXIT_CODE;
+        return;
+      }
+      if (ancestry === 'yes') watchedHarness = harness;
+    }
 
     /* ------------------------ CODEX ARMING PREFLIGHT ------------------------
      * BEFORE the network and before anything is written to the state dir: a
@@ -4489,6 +4550,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       kind: awaitHeartbeatKind,
       profile: activeProfileName(opts, env),
       ...(codexThread ? { thread: codexThread } : {}),
+      ppid: process.ppid,
+      ...(harness ? { harnessPid: harness.pid } : {}),
       err: (s) => io.err(s),
     });
     awaitCandidate.retire = () => generation.clearCandidate();
@@ -4506,6 +4569,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      * resumes AFTER the failure must not be able to speak either.
      */
     let publishFailure: unknown;
+
+    /**
+     * Set once the Claude Code session that armed this listener is gone (see
+     * `checkOrphaned`). TERMINAL, like a refused claim: no wake line, no touch
+     * over the `orphaned` stamp, no hand-off — only the goodbye and exit 5.
+     */
+    let orphaned = false;
 
     /**
      * IS THIS RUN OVER? A claim that was refused, or a signal — the two states
@@ -4694,6 +4764,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
        * would otherwise print a wake line for a listener that has just reported
        * it could not arm. (`owned()` covers this, and says so explicitly.) */
       if (publishFailure !== undefined) return;
+      if (orphaned) return; // nobody is left to read it
       if (!owned()) return; // superseded: this work belongs to the newer listener
       emittedReason = reason;
       emit({
@@ -4795,6 +4866,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      */
     const interrupt = new AbortController();
     const interrupted = (): boolean => interrupt.signal.aborted;
+    /** Aborted only when this listener is orphaned — ends a hand-off's nap too. */
+    const orphanAbort = new AbortController();
+    /** What ends a deferred hand-off's nap: an interrupt, or (when watched) orphaning. */
+    const handoffNapSignal =
+      watchedHarness === undefined
+        ? interrupt.signal
+        : AbortSignal.any([interrupt.signal, orphanAbort.signal]);
     // The heartbeat is deliberately NOT touched here: this process is still a
     // candidate until the stream opens (see the publish-late rule above), and a
     // candidate must not write over the state dir a healthy listener owns —
@@ -4805,7 +4883,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         interrupt.abort(); // Ctrl-C: whatever this listener is waiting for is off
         controller.abort();
       },
-      () => (generation.published() && owned() ? generation.nonce() : false),
+      // An orphan already left the truer stamp; a later kill must not replace it.
+      () => (!orphaned && generation.published() && owned() ? generation.nonce() : false),
     );
     let timedOut = false;
     /** The wall-clock deadline `--timeout` names, for waits the timer cannot reach. */
@@ -4955,7 +5034,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       standingBy = false;
       // Back to an ordinary listener claim: the stamp is how the hooks learn
       // the wake path is live again.
-      if (owned()) touchHeartbeat(env, awaitHeartbeatKind, true, generation.nonce());
+      if (!orphaned && owned()) touchHeartbeat(env, awaitHeartbeatKind, true, generation.nonce());
       presenceCleared = false; // a fresh block would drop the mark again
       restartPoll(); // …and the reconcile poll comes back with us
       io.err('[await] resuming: usage limit cleared\n');
@@ -5024,6 +5103,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         // handed off and no bridge is rung; the item stays unread and the
         // signal handler's `stopped:`/`killed:` stamp stands.
         if (interrupted()) return false;
+        if (orphaned) return false; // exit 5: there is no session left to hand off to
         if (!owned()) return false; // superseded: exit 4, never a bare 0
         /* THE DEADLINE IS READ FIRST, before the marker. Waking up to find both
          * "the limit lifted" and "my time is up" is not ambiguous: this
@@ -5045,7 +5125,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         if (!owned()) return false;
         // …and the nap can never outlive the deadline it is waiting inside, nor
         // an interrupt: it ends at the FIRST of the three.
-        await abortableNap(napWithinDeadline(blockedPollMs), interrupt.signal);
+        await abortableNap(napWithinDeadline(blockedPollMs), handoffNapSignal);
       }
     };
 
@@ -5092,12 +5172,96 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       }
     };
 
+    /* ============================ ORPHANED ============================
+     * A listener armed as a tracked background task of a Claude Code session
+     * can still lose that session: the harness exits, or the listener is
+     * reparented away from it. From then on its exit wakes nobody, yet its
+     * heartbeat stays fresh and its pid alive — every other check passes. So,
+     * for a harness that was PROVEN our ancestor at arm time, ask on a clock
+     * (and on stream activity, throttled) whether it is still alive and still
+     * our ancestor. `unknown` is never acted on.
+     *
+     * The stamp is written HERE, synchronously, under the same veto as the
+     * signal stamps (published and still the owner); a superseded listener
+     * stamps nothing and leaves through its own exit-4 path. The goodbye — idle
+     * statuses, presence — happens at the tail (`finishOrphaned`).
+     * ================================================================= */
+    const orphanCheckMs = Math.max(
+      10,
+      Number.parseInt(env.SPARROW_ORPHAN_CHECK_MS ?? '', 10) || ORPHAN_CHECK_MS_DEFAULT,
+    );
+    let lastOrphanCheck = 0;
+    const checkOrphaned = (): boolean => {
+      if (orphaned) return true;
+      if (watchedHarness === undefined || runIsOver()) return false;
+      const now = Date.now();
+      if (now - lastOrphanCheck < orphanCheckMs) return false;
+      lastOrphanCheck = now;
+      const gone =
+        !isAlive(watchedHarness.pid) || isAncestor(watchedHarness.pid, process.pid) === 'no';
+      if (!gone) return false;
+      if (!owned()) return false; // superseded: the successor's state dir, and exit 4
+      orphaned = true;
+      if (generation.published()) markHeartbeatOrphaned(env, generation.nonce());
+      stopPoll();
+      orphanAbort.abort();
+      controller.abort();
+      return true;
+    };
+    if (watchedHarness !== undefined) {
+      const orphanTimer = setInterval(checkOrphaned, orphanCheckMs);
+      (orphanTimer as { unref?: () => void }).unref?.();
+      awaitOrphanWatch.stop = () => clearInterval(orphanTimer);
+    }
+
+    /**
+     * The orphan's goodbye, then exit 5. Best-effort and bounded: clear a
+     * `working` status this agent may have left in its rooms (live rooms only,
+     * at most {@link ORPHAN_IDLE_ROOMS_MAX}) and the presence mark, all inside
+     * {@link ORPHAN_CLEANUP_BUDGET_MS}. Nothing here can fail the exit.
+     */
+    const finishOrphaned = async (): Promise<void> => {
+      awaitOrphanWatch.stop?.();
+      const goodbye = async (): Promise<void> => {
+        // A candidate that never claimed the state dir speaks for nobody: the
+        // statuses and presence are the incumbent's, if there is one.
+        if (!generation.published() || !owned()) return;
+        try {
+          const rooms = await client.meRooms();
+          const live = rooms.filter((r) => !r.room.archivedAt).slice(0, ORPHAN_IDLE_ROOMS_MAX);
+          await Promise.allSettled(live.map((r) => client.setStatus(r.room.id, { state: 'idle' })));
+        } catch {
+          /* best-effort: statuses expire on their own */
+        }
+        await dropPresenceMark();
+      };
+      let budget: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        goodbye().catch(() => {}),
+        new Promise<void>((r) => {
+          budget = setTimeout(r, ORPHAN_CLEANUP_BUDGET_MS);
+        }),
+      ]);
+      if (budget !== undefined) clearTimeout(budget);
+      const pid = watchedHarness?.pid ?? 0;
+      io.err(
+        ctx.json
+          ? `${JSON.stringify({ type: 'await.orphaned', harnessPid: pid })}\n`
+          : `${orphanedNotice(pid)}\n`,
+      );
+      ctx.exitCode = UNOWNED_EXIT_CODE;
+    };
+
     /* STANDBY COMES FIRST — before the queue is even asked. A blocked agent
      * must not be woken, and asking is a network call in its own right: the
      * gate returns immediately when nothing is blocking (one `readdir`), and
      * otherwise holds here, with no stream, no poll and no presence, until the
      * hook clears the marker. */
     await standbyGate();
+    if (orphaned) {
+      await finishOrphaned();
+      return;
+    }
 
     // A restarting turn-based agent must never block on a stream while its mail
     // sits unread — so ask the queue BEFORE opening anything.
@@ -5145,6 +5309,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       // Ctrl-C while waiting out the limit: exit 0 silently, as an interrupted
       // listener always has. Nothing was handed off; the item is untouched.
       if (interrupted()) return;
+      if (orphaned) {
+        await finishOrphaned(); // exit 5: nobody is left to hand off to
+        return;
+      }
       if (!owned()) {
         reportSuperseded(); // exit 4 — never a 0 over a suppressed bridge
         return;
@@ -5381,13 +5549,15 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           // discards a claim that is not the live generation's instead of
           // inheriting it (an untagged `await` would demote a live
           // `await:codex` to "no verified bridge").
-          if (first) touchHeartbeat(env, awaitHeartbeatKind, true, generation.nonce());
+          if (first && !orphaned) touchHeartbeat(env, awaitHeartbeatKind, true, generation.nonce());
           onOpen();
         },
         onActivity: () => {
           // The CHECKPOINT that rides the stream's own cadence (events and
           // server heartbeats): no new timer, and an idle listener still
           // notices it was superseded.
+          // An orphan stops here: touching would overwrite its `orphaned` stamp.
+          if (checkOrphaned()) return;
           if (owned()) touchHeartbeat(env, awaitHeartbeatKind, false, generation.nonce());
           // …and the same checkpoint asks whether the agent can still act at
           // all. Closing here drops us into the runner's next attempt, where the
@@ -5523,6 +5693,15 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
      * own words (`reportSuperseded`); failing to claim is exit 1 and says why. */
     if (publishFailure !== undefined) throw publishFailure;
 
+    /* ORPHANED OUTRANKS EVERYTHING BELOW but a refused claim: a wake line, a
+     * timeout line, a hand-off — each is addressed to a session that no longer
+     * exists. `wake()` is already shut, so an inbox read still in flight can
+     * print nothing; it is not awaited. */
+    if (orphaned) {
+      await finishOrphaned();
+      return;
+    }
+
     // Let an inbox check that was in flight when the stream ended finish, so a
     // wake that had already been decided still wins over the timeout.
     await pending;
@@ -5547,6 +5726,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       if (await completeHandoff(reason)) return;
       if (await handoffAfterBlock(reason)) return;
       if (interrupted()) return; // Ctrl-C, not a timeout: say nothing, exit 0
+      if (orphaned) {
+        await finishOrphaned(); // exit 5: the session this hand-off was for is gone
+        return;
+      }
       if (!owned()) {
         reportSuperseded();
         return;
@@ -5579,7 +5762,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         'thread. On wake it heartbeats presence ' +
         '(--turn-seconds) so you stay online while you work. Exit 2 = --timeout elapsed (re-arm); ' +
         'exit 4 = a newer `sparrow await` took over this state dir (arming is idempotent — newest ' +
-        'wins — so re-arming blindly is always safe). ' +
+        'wins — so re-arming blindly is always safe); exit 5 = under Claude Code, this process ' +
+        'cannot wake the session (armed outside it — refused before arming — or the session went ' +
+        'away while it waited; the heartbeat is stamped `orphaned`). ' +
         'On a Codex run it also refuses to arm (exit 1) inside the per-command sandbox, which would ' +
         'SIGKILL the listener the instant this command returns (operators may set ' +
         'SPARROW_AWAIT_SANDBOX_CHECK=0), and warns when Codex hooks have not been observed firing — ' +
@@ -5588,6 +5773,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     )
     .option('--timeout <seconds>', 'give up (exit 2) after this long with nothing waiting', (v) =>
       Number.parseInt(v, 10),
+    )
+    .option(
+      '--allow-unowned',
+      'arm even when this Claude Code session cannot be woken by this process',
     )
     .option(
       '--codex-thread <id>',

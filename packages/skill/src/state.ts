@@ -65,7 +65,13 @@ const DEAD_REASONS: readonly string[] = ['killed', 'stopped'];
  * (`watch`, `loop`, or any pre-0.1.20 CLI) is judged exactly as before.
  */
 export interface HeartbeatState {
-  state: ListenerKind | DeadReason;
+  /**
+   * `orphaned` is written by the CLI (`markHeartbeatOrphaned`), not by this
+   * package: `sparrow await` stood down because the Claude Code session that
+   * armed it is gone, or was never its ancestor. Terminal, like a dead reason,
+   * but it names no signal.
+   */
+  state: ListenerKind | DeadReason | 'orphaned';
   signal?: string;
   generation?: string;
 }
@@ -299,8 +305,8 @@ export function markHeartbeatDead(
 }
 
 /**
- * The full heartbeat claim: a live listener kind, or a terminal `killed`/
- * `stopped` stamp plus the signal that caused it. `undefined` when the file is
+ * The full heartbeat claim: a live listener kind, a terminal `killed`/
+ * `stopped` stamp plus the signal that caused it, or `orphaned`. `undefined` when the file is
  * absent, empty (legacy/third-party heartbeat) or unrecognized — "cannot judge",
  * never "no listener".
  *
@@ -316,6 +322,9 @@ export function readHeartbeatState(stateDir: string): HeartbeatState | undefined
       return generation
         ? { state: head as ListenerKind, generation }
         : { state: head as ListenerKind };
+    }
+    if (head === 'orphaned') {
+      return generation ? { state: 'orphaned', generation } : { state: 'orphaned' };
     }
     const [word, ...rest] = head.split(':');
     if (word !== undefined && DEAD_REASONS.includes(word)) {

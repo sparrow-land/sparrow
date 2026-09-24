@@ -471,6 +471,49 @@ describe('sparrow-stop-check.sh', () => {
       expect(JSON.parse(runHook().stdout).decision).toBe('block');
     });
 
+    /* ---------------------------------------------------------------- *
+     * ORPHANED. `sparrow await` stands down with `orphaned <nonce>` when the
+     * Claude Code session that armed it is gone, or was never its ancestor
+     * (armed as a disowned `( … & )` inside a foreground Bash call). Such a
+     * listener could be online but never wake this session, so the stamp is
+     * terminal exactly like `killed:`/`stopped:`, whatever its age.
+     * ---------------------------------------------------------------- */
+    it.each([
+      ['fresh', 2],
+      ['stale', 600],
+    ])('blocks a %s orphaned stamp of the live generation, naming the cause', (_label, age) => {
+      writeLoopState('engaged');
+      writeHeartbeat(age, 'orphaned 4f2c9a01bb33cd10');
+      writeOwner('4f2c9a01bb33cd10');
+      const json = JSON.parse(runHook().stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toContain(
+        'your listener was orphaned (the Claude Code session that armed it is gone, or it was armed from a shell this session does not own)',
+      );
+      expect(json.reason).toContain('sparrow await');
+      expect(json.reason).toMatch(/as a tracked background task/);
+      expect(json.reason).toMatch(/sparrow skill pause/);
+      expect(json.reason).not.toMatch(/was killed|was stopped/);
+      expect(json.reason).not.toContain('4f2c9a01bb33cd10');
+    });
+
+    it('blocks a bare orphaned stamp (no generation tag)', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'orphaned');
+      const json = JSON.parse(runHook().stdout);
+      expect(json.decision).toBe('block');
+      expect(json.reason).toMatch(/your listener was orphaned/);
+    });
+
+    it('IGNORES an orphaned stamp from a superseded generation', () => {
+      writeLoopState('engaged');
+      writeHeartbeat(2, 'orphaned 4f2c9a01bb33cd10');
+      writeOwner('b0b0b0b0b0b0b0b0');
+      const r = runHook();
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
     it('judges a tagged stamp as before when there is no owner record at all', () => {
       writeLoopState('engaged');
       writeHeartbeat(2, 'killed:SIGTERM 4f2c9a01bb33cd10');

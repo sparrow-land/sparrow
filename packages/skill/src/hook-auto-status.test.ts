@@ -152,7 +152,7 @@ const IDLE_OWED = () => path.join(stateDir, 'auto-status-idle-owed');
 const NOTE_STAMP = () => path.join(stateDir, 'auto-status-note');
 
 describe('sparrow-auto-status.sh — prompt mode', () => {
-  it('sets a sticky working status in every non-archived room', () => {
+  it('sets a TTL-bounded (not sticky) working status in every non-archived room', () => {
     writeLoopState('engaged');
     writeHeartbeat('await'); // a live listener → no nudge on stdout
     stubCurl();
@@ -166,7 +166,8 @@ describe('sparrow-auto-status.sh — prompt mode', () => {
     expect(urls.some((u) => u.includes('rom_z'))).toBe(false); // archived skipped
     for (const p of posts) {
       expect(p.body).toContain('"state":"working"');
-      expect(p.body).toContain('"sticky":true');
+      expect(p.body).toContain('"ttlSeconds":600');
+      expect(p.body).not.toContain('"sticky"');
     }
   });
 
@@ -290,14 +291,14 @@ describe('sparrow-auto-status.sh — notification mode', () => {
     runHook('notification', notify('idle_prompt'));
     expect(fs.existsSync(marker)).toBe(true);
 
-    // ...and the next tool call still restores sticky working.
+    // ...and the next tool call still restores (TTL-bounded) working.
     const before = statusPosts().length;
     runHook('post-tool');
     const working = statusPosts().slice(before);
     expect(working.length).toBe(2);
     for (const p of working) {
       expect(p.body).toContain('"state":"working"');
-      expect(p.body).toContain('"sticky":true');
+      expect(p.body).toContain('"ttlSeconds":600');
     }
   });
 
@@ -354,10 +355,10 @@ describe('sparrow-auto-status.sh — post-tool mode', () => {
  * so a session re-invoked by a monitor event or task notification (no prompt!)
  * ran its whole turn under the Stop hook's `idle` — agents doing real work read
  * as idle fleet-wide. The fix is a marker handshake: `stop` leaves a marker,
- * and the FIRST post-tool of the next turn restores sticky `working`.
+ * and the FIRST post-tool of the next turn restores `working`.
  */
 describe('sparrow-auto-status.sh — idle→working resume handshake', () => {
-  it('stop leaves a marker; the next post-tool restores sticky working and clears it', () => {
+  it('stop leaves a marker; the next post-tool restores TTL-bounded working and clears it', () => {
     writeLoopState('engaged');
     stubCurl();
     runHook('stop');
@@ -368,7 +369,7 @@ describe('sparrow-auto-status.sh — idle→working resume handshake', () => {
     // idle (from stop) + one working restore per active room.
     const working = posts.filter((p) => p.body.includes('"working"'));
     expect(working.length).toBe(2); // rom_a + rom_b, never archived rom_z
-    for (const p of working) expect(p.body).toMatch(/"sticky":true/);
+    for (const p of working) expect(p.body).toMatch(/"ttlSeconds":600/);
     expect(fs.existsSync(path.join(stateDir, 'auto-status-idle'))).toBe(false);
 
     // The restore is once per stop: another post-tool writes no further status.
@@ -531,6 +532,32 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     expect(runHook('prompt', '{"prompt":"go"}').stdout).toContain('SIGHUP');
   });
 
+  it('names an orphaned listener, whatever its age, and prescribes a tracked re-arm', () => {
+    // `sparrow await` stood down: the Claude Code session that armed it is
+    // gone, or it was armed as a disowned `( … & )` this session does not own.
+    writeLoopState('engaged');
+    fs.writeFileSync(
+      path.join(stateDir, 'await-owner.json'),
+      `${JSON.stringify({ version: 1, nonce: '4f2c9a01bb33cd10', pid: 4242, startedAt: '2026-09-09T00:00:00.000Z', kind: 'await' })}\n`,
+    );
+    stubCurl();
+    for (const age of [3, 900]) {
+      writeHeartbeat('orphaned 4f2c9a01bb33cd10', age);
+      const lines = runHook('prompt', '{"prompt":"go"}').stdout.trim().split('\n');
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(NUDGE);
+      expect(lines[0]).toContain(
+        'your listener was orphaned (the Claude Code session that armed it is gone, or it was armed from a shell this session does not own)',
+      );
+      expect(lines[0]).toContain('run `sparrow await` as a tracked background task');
+      expect(lines[0]).not.toMatch(/no listener has heartbeated/);
+      expect(lines[0]).not.toContain('4f2c9a01bb33cd10');
+    }
+    // A superseded generation's orphaned stamp says nothing about the live one.
+    writeHeartbeat('orphaned b0b0b0b0b0b0b0b0', 3);
+    expect(runHook('prompt', '{"prompt":"go"}').stdout.trim()).toBe('');
+  });
+
   it('calls a Ctrl-C stop what it is', () => {
     writeLoopState('engaged');
     writeHeartbeat('stopped:SIGINT');
@@ -590,7 +617,7 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     }
   });
 
-  it('still writes the sticky working status alongside the nudge', () => {
+  it('still writes the working status alongside the nudge', () => {
     writeLoopState('engaged');
     writeHeartbeat('killed:SIGTERM');
     stubCurl();
@@ -1000,7 +1027,7 @@ describe('sparrow-auto-status.sh — quota auto-resume notifications', () => {
       expect(posts.length).toBeGreaterThan(0);
       for (const p of posts) {
         expect(p.body).toContain('"state":"working"');
-        expect(p.body).toContain('"sticky":true');
+        expect(p.body).toContain('"ttlSeconds":600');
         expect(p.body).not.toContain('blocked');
       }
     });
@@ -3790,5 +3817,166 @@ exit 0
     runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
     expect(statusPosts().length).toBe(before);
     expect(fs.existsSync(DIVERGED())).toBe(false);
+  });
+});
+
+/* ===================== A BOUNDED `working` ================================= *
+ * Observed 2026-09-24: the Stop hook set idle, three minutes later `working`
+ * was re-posted with no turn running, and nothing cleared it for 2.5 hours —
+ * the human saw "working" on an idle agent. Whatever re-posted it, a sticky
+ * `working` from prompt/post-tool has no timer and lapses only on idle. So the
+ * ordinary `working` is TTL'd (600s, the server max) and every throttled
+ * post-tool tick re-posts the SAME note to keep a live turn alive (same text,
+ * so `sinceAt` is preserved). Sticky is kept only where no tool call can fire
+ * to refresh it — a running subagent — and where a human must see the note: a
+ * blocked ask or a usage limit.
+ * =========================================================================== */
+describe('sparrow-auto-status.sh — a bounded working status', () => {
+  const isTtl = (body: string): boolean => body.includes('"ttlSeconds":600') && !body.includes('"sticky"');
+  const isSticky = (body: string): boolean => body.includes('"sticky":true') && !body.includes('ttlSeconds');
+  /** Pretend the last note publication happened `ageSeconds` ago. */
+  const ageNoteStamp = (ageSeconds: number): void => {
+    const when = new Date(Date.now() - ageSeconds * 1000);
+    fs.utimesSync(NOTE_STAMP(), when, when);
+  };
+  const ageThrottle = (ageSeconds: number): void => {
+    const f = path.join(stateDir, 'auto-status-post');
+    if (!fs.existsSync(f)) return;
+    const when = new Date(Date.now() - ageSeconds * 1000);
+    fs.utimesSync(f, when, when);
+  };
+
+  it('prompt posts working with ttlSeconds 600 and NOT sticky', () => {
+    writeLoopState('engaged');
+    writeHeartbeat('await');
+    stubCurl();
+    runHook('prompt', '{"prompt":"go"}');
+    const posts = statusPosts();
+    expect(posts).toHaveLength(2);
+    for (const p of posts) {
+      expect(p.body).toContain('"state":"working"');
+      expect(p.body).toContain('"note":"working"');
+      expect(isTtl(p.body)).toBe(true);
+    }
+  });
+
+  it('post-tool re-posts the current note with the TTL on the throttle, never changing its text', () => {
+    writeLoopState('engaged');
+    writeHeartbeat('await');
+    stubCurl();
+    runHook('prompt', '{"prompt":"go"}');
+    const afterPrompt = statusPosts().length;
+
+    // Straight after the prompt the note is fresh: presence only.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts().length).toBe(afterPrompt);
+
+    // Later in the same turn: the throttle has elapsed and the note is ageing.
+    ageNoteStamp(60);
+    ageThrottle(60);
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    const refresh = statusPosts().slice(afterPrompt);
+    expect(refresh).toHaveLength(2);
+    for (const p of refresh) {
+      expect(p.body).toContain('"note":"working"'); // same text: sinceAt survives
+      expect(isTtl(p.body)).toBe(true);
+    }
+    expect(fs.readFileSync(NOTE_STAMP(), 'utf8')).toBe('working');
+
+    // Inside the throttle window again: nothing more.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts().length).toBe(afterPrompt + 2);
+  });
+
+  it('post-tool never refreshes a note it did not see posted, nor an idle one', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    // No stamp at all: a tool call must not start writing the status.
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts()).toHaveLength(0);
+    // After a stop the stamp reads idle; the resume handshake owns the comeback,
+    // and once it has run, an idle stamp is never "refreshed" into working.
+    fs.writeFileSync(NOTE_STAMP(), 'idle');
+    ageNoteStamp(60);
+    ageThrottle(60);
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    expect(statusPosts()).toHaveLength(0);
+  });
+
+  it('subagent-start is sticky; the last subagent-stop goes back to the TTL', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    const start = statusPosts();
+    expect(start.length).toBeGreaterThan(0);
+    for (const p of start) expect(isSticky(p.body)).toBe(true);
+
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_1', 'explore'));
+    const stop = statusPosts().slice(start.length);
+    expect(stop.length).toBeGreaterThan(0);
+    for (const p of stop) {
+      expect(p.body).toContain('"note":"working"');
+      expect(isTtl(p.body)).toBe(true);
+    }
+  });
+
+  it('a subagent-stop that leaves others running keeps the summary sticky', () => {
+    writeLoopState('engaged');
+    writeSubagent('ag_2', 'code-review');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    const before = statusPosts().length;
+    runHook('subagent-stop', subagentPayload('SubagentStop', 'ag_1', 'explore'));
+    const stop = statusPosts().slice(before);
+    expect(stop.length).toBeGreaterThan(0);
+    for (const p of stop) {
+      expect(p.body).toContain('"note":"working (1 subagent: code-review)"');
+      expect(isSticky(p.body)).toBe(true);
+    }
+  });
+
+  it('the post-tool refresh of a subagent note stays sticky', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('subagent-start', subagentPayload('SubagentStart', 'ag_1', 'explore'));
+    const before = statusPosts().length;
+    ageNoteStamp(60);
+    ageThrottle(60);
+    runHook('post-tool', '{"hook_event_name":"PostToolUse"}');
+    const refresh = statusPosts().slice(before);
+    expect(refresh.length).toBeGreaterThan(0);
+    for (const p of refresh) expect(isSticky(p.body)).toBe(true);
+  });
+
+  it('a blocked ask stays sticky', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('notification', notify('permission_prompt'));
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0);
+    for (const p of posts) {
+      expect(p.body).toContain('blocked');
+      expect(isSticky(p.body)).toBe(true);
+    }
+  });
+
+  it('a resumed quota is ordinary work: TTL, not sticky', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('notification', notify('quota_auto_resume_fired'));
+    const posts = statusPosts();
+    expect(posts.length).toBeGreaterThan(0);
+    for (const p of posts) expect(isTtl(p.body)).toBe(true);
+  });
+
+  it('stop still posts idle everywhere', () => {
+    writeLoopState('engaged');
+    stubCurl();
+    runHook('prompt', '{"prompt":"go"}');
+    const before = statusPosts().length;
+    runHook('stop');
+    const idle = statusPosts().slice(before);
+    expect(idle).toHaveLength(2);
+    for (const p of idle) expect(p.body).toBe('{"state":"idle"}');
   });
 });

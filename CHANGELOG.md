@@ -14,6 +14,63 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Added
+
+- `sparrow await` now refuses to arm, with exit 5 and one line on stderr, when it
+  runs under Claude Code from a shell that session does not own, such as a
+  `( sparrow await & )` disowned inside a foreground command. A listener like that
+  could never wake the session, yet looked healthy to every other check. Run it
+  as a tracked background task instead, or pass the new `--allow-unowned` flag to
+  arm anyway.
+- A `sparrow await` armed as a tracked background task of a Claude Code session
+  now notices when that session goes away while it waits (the session's process
+  exits, or the listener is no longer its descendant). It stamps the heartbeat
+  `orphaned`, clears its working status in its rooms and its presence mark, says
+  so on stderr and exits 5, instead of looking online while it can wake nobody.
+- `await-owner.json` records the listener's parent pid (`ppid`) and, under Claude
+  Code, the session's pid (`harnessPid`), so you can see whose wake path a
+  listener is.
+
+### Changed
+
+- The automatic `working` status no longer outlives a turn. The status posted on
+  each prompt now expires after 10 minutes instead of being sticky, and each tool
+  call re-posts the same note on its usual ~20-second throttle, so a running turn
+  stays `working` and keeps its original start time. A session with no turn
+  running drops back within 10 minutes of its last tool call, even if the
+  end-of-turn hook never fires. A running subagent, a `blocked — needs your input`
+  note and the usage-limit notes stay sticky until whatever they describe is
+  over, and the status goes back to expiring when the last subagent finishes. A
+  `working` note posted when Claude Code resumes after a usage limit also expires
+  now.
+- The hooks recognise the new `orphaned` heartbeat stamp that `sparrow await`
+  writes when the Claude Code session that armed it is gone, or when it was armed
+  from a shell that session does not own. Like `killed`, the stamp counts however
+  old it is. The Stop hook blocks with "your listener was orphaned (the Claude
+  Code session that armed it is gone, or it was armed from a shell this session
+  does not own)", and the next prompt gets the same explanation along with the
+  re-arm instruction.
+- `sparrow skill status` names the Claude Code session that owns the listener
+  (`heartbeat:  await, 45s ago · owned by claude pid 2746654`). It says
+  `ORPHANED (claude pid … is gone)` when that session has exited. An `orphaned`
+  stamp also gets a `listener died:` line that explains it.
+- The playbook warns against arming `sparrow await` as a disowned `( … & )`
+  inside a foreground Bash call. A listener started that way is online but can
+  never wake the session. It also describes the new time-limited `working`
+  status.
+- `sparrow skill unblock` posts its `working` status with the same 10-minute
+  expiry instead of making it sticky. The command runs outside a turn, so a
+  sticky `working` from it never cleared on its own. `sparrow skill pause` still
+  posts a sticky `loop paused`.
+
+### Notes
+
+- Only Claude Code runs are affected (`CLAUDECODE` and `CLAUDE_PID` both set).
+  Codex-bridged listeners, `sparrow harness`, `enroll --exec`, `watch` and `loop`
+  behave exactly as before. If the session's pid is not visible from the
+  listener (a sandbox with its own pid namespace) or its ancestry cannot be
+  read, nothing is refused and nothing is watched.
+
 ## [0.1.51] — 2026-09-22
 
 ### Changed
