@@ -124,6 +124,12 @@ export const agents = sqliteTable(
     roleTitle: text('role_title'),
     roleInstructions: text('role_instructions'),
     roleUpdatedAt: text('role_updated_at'),
+    /**
+     * Which AGENTS this agent may DM: `any` (default — today's rule), `tags`
+     * (only agents sharing ≥1 tag), `none`. Humans and room posts are never
+     * restricted by it. See `messagingVerdict` in visibility.ts.
+     */
+    messaging: text('messaging').notNull().default('any'),
     /** Null for a freshly minted agent that has never authenticated. */
     lastSeenAt: text('last_seen_at'),
     /**
@@ -154,6 +160,68 @@ export const agentVisibility = sqliteTable(
   (t) => ({
     pk: primaryKey({ columns: [t.agentId, t.humanId] }),
     humanIdx: index('agent_visibility_human').on(t.humanId),
+  }),
+);
+
+/* ------------------------------------------------------------------ *
+ * Agent visibility — tags, grants, message analytics
+ * ------------------------------------------------------------------ */
+
+/** One tag on one agent (org-visible lowercase slug; the set is sorted on read). */
+export const agentTags = sqliteTable(
+  'agent_tags',
+  {
+    agentId: text('agent_id').notNull(),
+    tag: text('tag').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.agentId, t.tag] }),
+  }),
+);
+
+/**
+ * A delegated authority grant (`grt_`): `principalId` (a `usr_` human or `agt_`
+ * agent in the org) holds `scope` (`tags:*` or `tag:<slug>`), granted by
+ * `grantedBy` (a principal id). One row per (org, principal, scope).
+ */
+export const grants = sqliteTable(
+  'grants',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id').notNull(),
+    principalId: text('principal_id').notNull(),
+    principalKind: text('principal_kind').notNull(),
+    scope: text('scope').notNull(),
+    grantedBy: text('granted_by').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    orgPrincipalScope: unique().on(t.orgId, t.principalId, t.scope),
+    principalIdx: index('grants_principal').on(t.principalId),
+  }),
+);
+
+/**
+ * Always-on message analytics: one HOURLY bucket per (agent, UTC hour start,
+ * direction `sent`|`received`, counterpart kind `agent`|`human`|`room`,
+ * counterpart id — the other DM member, or the room). Upsert-incremented as each
+ * message is stored; `tokens` is the text estimate `ceil(body chars / 4)`.
+ */
+export const messageStats = sqliteTable(
+  'message_stats',
+  {
+    agentId: text('agent_id').notNull(),
+    hourStart: text('hour_start').notNull(),
+    direction: text('direction').notNull(),
+    counterpartKind: text('counterpart_kind').notNull(),
+    counterpartId: text('counterpart_id').notNull(),
+    messages: integer('messages').notNull().default(0),
+    tokens: integer('tokens').notNull().default(0),
+  },
+  (t) => ({
+    pk: primaryKey({
+      columns: [t.agentId, t.hourStart, t.direction, t.counterpartKind, t.counterpartId],
+    }),
   }),
 );
 
@@ -786,6 +854,9 @@ export type HumanRow = typeof humans.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
 export type AgentRow = typeof agents.$inferSelect;
 export type AgentVisibilityRow = typeof agentVisibility.$inferSelect;
+export type AgentTagRow = typeof agentTags.$inferSelect;
+export type GrantRow = typeof grants.$inferSelect;
+export type MessageStatRow = typeof messageStats.$inferSelect;
 export type InviteRow = typeof invites.$inferSelect;
 export type EnrollmentRow = typeof enrollments.$inferSelect;
 export type RoomRow = typeof rooms.$inferSelect;

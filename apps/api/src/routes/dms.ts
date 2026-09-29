@@ -7,7 +7,9 @@
  *   - human → human: both members of the org;
  *   - agent → human (not its owner): that human holds visibility on the agent;
  *   - agent → agent: they have MET (co-inhabit a room) on first contact, some
- *     human can oversee both, and the pair is not severed.
+ *     human can oversee both, the pair is not severed, and BOTH agents'
+ *     messaging policies allow it (a met pair refused by policy hears why:
+ *     `403` reason `messaging_policy`).
  * `orgId` is required only when the eligible pair shares more than one org.
  */
 import type { FastifyInstance } from 'fastify';
@@ -21,7 +23,8 @@ import type { AppContext } from '../context.js';
 import { resolvePrincipal, principalIdent } from '../context.js';
 import { orgMemberships, rooms } from '../db/schema.js';
 import { parse } from '../validate.js';
-import { badRequest, forbidden } from '../errors.js';
+import { badRequest, forbidden, forbiddenBecause } from '../errors.js';
+import { messagingBlockers, messagingPolicyMessage } from '../visibility.js';
 import {
   AGENT_DM_NO_COMMON_VIEWER_MESSAGE,
   AGENT_DM_SEVERED_MESSAGE,
@@ -83,7 +86,7 @@ export function registerDmRoutes(app: FastifyInstance, ctx: AppContext): void {
       orgId: string,
       a: ReturnType<typeof agentById>,
       b: ReturnType<typeof agentById>,
-    ): 'ok' | 'unmet' | 'no-viewer' | 'severed' => {
+    ): 'ok' | 'unmet' | 'no-viewer' | 'severed' | 'policy' => {
       if (!a || !b || a.orgId !== orgId || b.orgId !== orgId) return 'unmet';
       // First contact is gated on having MET: an agent's directory is its rooms,
       // so a raw `agt_` id must not open a door its name could not.
@@ -91,6 +94,9 @@ export function registerDmRoutes(app: FastifyInstance, ctx: AppContext): void {
       if (!room && !agentsHaveMet(ctx, a, b)) return 'unmet';
       // A severed pair stays severed until a human allows it again.
       if (room && severOf(ctx, room.id)) return 'severed';
+      // Both agents' messaging policies must allow the DM (SPEC "Agent
+      // visibility → Messaging policy"); `any` on both sides is today's rule.
+      if (messagingBlockers(ctx, a, b).length > 0) return 'policy';
       // The live rule, for first contact and every re-ensure alike: some human
       // can currently see BOTH (the `canAccessAgent` sharing machinery).
       return someHumanCanSeeBoth(ctx, a, b) ? 'ok' : 'no-viewer';
@@ -129,6 +135,14 @@ export function registerDmRoutes(app: FastifyInstance, ctx: AppContext): void {
             agentById(ctx, targetId),
           );
           if (verdict === 'severed') throw forbidden(AGENT_DM_SEVERED_MESSAGE);
+          if (verdict === 'policy') {
+            throw forbiddenBecause(
+              'messaging_policy',
+              messagingPolicyMessage(
+                messagingBlockers(ctx, agentById(ctx, caller.id)!, agentById(ctx, targetId)!),
+              ),
+            );
+          }
           if (verdict === 'no-viewer') throw forbidden(AGENT_DM_NO_COMMON_VIEWER_MESSAGE);
         }
       }

@@ -42,7 +42,8 @@ import type { AppContext } from '../context.js';
 import { nowIso, resolvePrincipal, principalIdent } from '../context.js';
 import { activityEntries, attachments, members, messageRecipients, messages } from '../db/schema.js';
 import { parse } from '../validate.js';
-import { badRequest, conflict, forbidden, notFound, payloadTooLarge } from '../errors.js';
+import { badRequest, conflict, forbidden, forbiddenBecause, notFound, payloadTooLarge } from '../errors.js';
+import { messagingBlockers, messagingPolicyMessage, recordMessageStats } from '../visibility.js';
 import { resolveLimit, cursorCondition, withCursor, pageResult } from '../pagination.js';
 import {
   requireRoomMember,
@@ -113,6 +114,14 @@ export function registerMessageRoutes(app: FastifyInstance, ctx: AppContext): vo
         const other = agentById(ctx, counterpart.id);
         if (self && other && !someHumanCanSeeBoth(ctx, self, other)) {
           throw forbidden(AGENT_DM_NO_COMMON_VIEWER_MESSAGE);
+        }
+        // Messaging policy: a DM a policy change now forbids stays READABLE, but
+        // new posts are refused with the setting that blocks them named.
+        if (self && other) {
+          const blockers = messagingBlockers(ctx, self, other);
+          if (blockers.length > 0) {
+            throw forbiddenBecause('messaging_policy', messagingPolicyMessage(blockers));
+          }
         }
       }
     }
@@ -193,6 +202,18 @@ export function registerMessageRoutes(app: FastifyInstance, ctx: AppContext): vo
           })
           .run();
       }
+      // Analytics counters, in the same transaction as the message they count.
+      recordMessageStats(tx, {
+        roomId: caller.room.id,
+        isDm: caller.room.kind === 'dm',
+        createdAt: ts,
+        body: body.body,
+        sender: { type: senderRef.principalType, id: senderRef.principalId },
+        recipients: recipientIds.map((rid) => {
+          const ref = recipientRefs.get(rid)!;
+          return { type: ref.principalType, id: ref.principalId };
+        }),
+      });
       for (const att of decoded) {
         tx.insert(attachments)
           .values({

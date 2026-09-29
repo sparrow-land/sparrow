@@ -32,6 +32,7 @@ import {
   activityEntries,
   agents,
   agentVisibility,
+  grants,
   attachments,
   enrollments,
   humans,
@@ -57,6 +58,7 @@ import {
 } from '../org-helpers.js';
 import { parse } from '../validate.js';
 import { deleteAgentEmailCascade, deleteOrgEmailCascade } from '../email/store.js';
+import { deleteAgentVisibility } from '../visibility.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -239,6 +241,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       if (agentIds.length > 0) {
         tx.delete(agentVisibility).where(inArray(agentVisibility.agentId, agentIds)).run();
       }
+      deleteAgentVisibility(tx, agentIds);
+      tx.delete(grants).where(eq(grants.orgId, orgId)).run();
       tx.delete(agents).where(eq(agents.orgId, orgId)).run();
       // Layer 3: activity entries are durable ORG data and cascade with the org.
       tx.delete(activityEntries).where(eq(activityEntries.orgId, orgId)).run();
@@ -378,6 +382,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       // Deleting an agent takes its timeline with it (SPEC "Unified attention →
       // Retention"), the same cascade the owner-facing delete performs.
       tx.delete(activityEntries).where(eq(activityEntries.agentId, agent.id)).run();
+      deleteAgentVisibility(tx, [agent.id]);
       tx.delete(agents).where(eq(agents.id, agent.id)).run();
     });
     deleteAgentEmailCascade(ctx, [agent.id]);
@@ -403,6 +408,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         .where(eq(members.principalId, human.id))
         .run();
       tx.delete(agentVisibility).where(eq(agentVisibility.humanId, human.id)).run();
+      // Delegated authority goes with the account, in every org.
+      tx.delete(grants).where(eq(grants.principalId, human.id)).run();
       tx.delete(userSessions).where(eq(userSessions.humanId, human.id)).run();
       tx.delete(humans).where(eq(humans.id, human.id)).run();
     });

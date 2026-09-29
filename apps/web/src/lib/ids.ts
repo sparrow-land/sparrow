@@ -84,7 +84,7 @@ export function agentProfilePath(orgWireId: string, agentWireId: string): string
 export function agentTabPath(
   orgWireId: string,
   agentWireId: string,
-  tab: 'overview' | 'activity' | 'email',
+  tab: 'overview' | 'access' | 'analytics' | 'activity' | 'email',
 ): string {
   const base = agentProfilePath(orgWireId, agentWireId);
   return tab === 'overview' ? base : `${base}?tab=${tab}`;

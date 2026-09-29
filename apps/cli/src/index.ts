@@ -86,6 +86,7 @@ import {
   type TurnBasedRuntime,
 } from '@sparrow/skill';
 import { codexAwaitPreflight } from './await-preflight.js';
+import { FORBIDDEN_HINTS, registerVisibilityCommands } from './visibility.js';
 import {
   clearPending,
   loadPending,
@@ -2385,8 +2386,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const err = e as { code?: unknown; message?: string };
     const code = e instanceof ApiError ? String(e.code) : e instanceof CliError ? 'cli_error' : 'error';
     const message = err?.message ?? String(e);
-    if (ctx.json) io.err(`${JSON.stringify({ error: { code, message } })}\n`);
-    else io.err(`Error: ${message}\n`);
+    // A 403 refusal from the agent-visibility guard rails carries a `reason`;
+    // add one plain hint for the ones a person can act on.
+    const reason = e instanceof ApiError && e.status === 403 ? e.reason : undefined;
+    const hint = reason ? FORBIDDEN_HINTS[reason] : undefined;
+    if (ctx.json) {
+      io.err(`${JSON.stringify({ error: { code, message, ...(reason ? { reason } : {}), ...(hint ? { hint } : {}) } })}\n`);
+    } else io.err(`Error: ${message}\n${hint ? `Hint: ${hint}\n` : ''}`);
   };
 
   const action =
@@ -3076,6 +3082,9 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         );
       }),
     );
+
+  /* ================ tags / messaging / grants / stats ================ */
+  registerVisibilityCommands({ program, env, withOrg, action, print, buildClient });
 
   /* ============================ members ============================ */
   withRoom(program.command('members'))
