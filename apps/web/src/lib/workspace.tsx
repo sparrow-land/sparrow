@@ -490,8 +490,14 @@ export function WorkspaceProvider({
     setHumans(items);
     presenceStore.hydrate(items.map((h) => ({ principalId: h.human.id, online: h.online })));
   }, [orgId]);
+  // Reloads can overlap (two quick edits on the agent page, an event burst); only
+  // the NEWEST request may write, so a slow older answer never overwrites a
+  // fresher one. A superseded call still resolves — after its successor was issued.
+  const agentsReq = useRef(0);
   const reloadAgents = useCallback(async () => {
+    const req = ++agentsReq.current;
     const items = await api.orgMeAgents(orgId).catch(() => []);
+    if (req !== agentsReq.current) return;
     setAgents(items);
     presenceStore.hydrate(items.map((a) => ({ principalId: a.agent.id, online: a.agent.online })));
   }, [orgId]);

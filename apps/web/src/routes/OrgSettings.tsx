@@ -43,6 +43,7 @@ import { DEFAULT_EMAIL_SETTINGS, EmailPolicy } from './org/EmailPolicy.js';
 import { OrgEmailApprovals } from './org/EmailApprovals.js';
 import { ContactsSection } from './org/Contacts.js';
 import { RoomsSection } from './org/Rooms.js';
+import { GrantsSection } from './org/Grants.js';
 import { useDocumentTitle, pageTitle } from '../lib/title.js';
 
 /**
@@ -50,7 +51,8 @@ import { useDocumentTitle, pageTitle } from '../lib/title.js';
  * surface, rendered inside the app shell's main pane. A scrollable, single-column
  * panel with anchored subsections: Org (name/slug), Policies (who can invite / how
  * people and agents join / who can create rooms), People (the member roster with
- * role + remove), Agents (the governance list), Approvals (EVERY pending
+ * role + remove), Agents (the governance list), Grants (delegated tag authority;
+ * also shown to plain members, who may read it), Approvals (EVERY pending
  * enrollment, org-wide), and Invites (ALL outstanding links with revoke + a create
  * action). The personal approval view lives separately at `/me/approvals`.
  *
@@ -69,10 +71,15 @@ export function OrgSettings() {
   const [agentsEpoch, setAgentsEpoch] = useState(0);
 
   if (!isAdmin) {
+    // Grants are readable by every member (and a `tags:*` holder may grant
+    // `tag:<slug>`), so the Grants list is the one section a member gets.
     return (
       <Scroll>
         <Header />
         <Notice className="mt-6">You don&rsquo;t have access to org admin.</Notice>
+        <div className="mt-8">
+          <GrantsSection orgId={orgId} isAdmin={false} />
+        </div>
       </Scroll>
     );
   }
@@ -86,6 +93,7 @@ export function OrgSettings() {
         <PeopleSection orgId={orgId} callerRole={role} />
         <RoomsSection orgId={orgId} />
         <AgentsSection orgId={orgId} emailOn={emailOn} reloadKey={agentsEpoch} />
+        <GrantsSection orgId={orgId} isAdmin />
         <ApprovalsSection
           orgId={orgId}
           emailOn={emailOn}

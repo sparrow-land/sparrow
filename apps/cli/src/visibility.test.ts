@@ -255,6 +255,8 @@ async function startFake(): Promise<Fake> {
       }
       if (req.method === 'GET' && p === '/orgs/org_a/grants') return send(200, { items: fake.grants });
       if (req.method === 'POST' && p === '/orgs/org_a/grants') {
+        const existing = fake.grants.find((g) => g.principalId === body.principalId && g.scope === body.scope);
+        if (existing) return send(200, { grant: existing });
         const grant: FakeGrant = {
           id: `grt_${fake.grants.length + 1}`,
           orgId: 'org_a',
@@ -444,6 +446,39 @@ describe('sparrow tags', () => {
     expect(writes()).toHaveLength(0);
   });
 
+  it('-j prints the same { agent, changed } shape on a no-op and on a change', async () => {
+    const noop = JSON.parse((await run('human', 'tags', 'add', 'reviewer', 'reviewers', '-j')).out);
+    expect(Object.keys(noop).sort()).toEqual(['agent', 'changed']);
+    expect(noop.changed).toBe(false);
+    expect(noop.agent).toMatchObject({ id: 'agt_rev', name: 'reviewer', tags: ['reviewers'], messaging: 'any' });
+    const changed = JSON.parse((await run('human', 'tags', 'add', 'reviewer', 'ops', '-j')).out);
+    expect(Object.keys(changed).sort()).toEqual(['agent', 'changed']);
+    expect(changed.changed).toBe(true);
+    expect(changed.agent).toMatchObject({ id: 'agt_rev', name: 'reviewer', tags: ['ops', 'reviewers'], messaging: 'any' });
+    const setNoop = JSON.parse((await run('human', 'tags', 'set', 'reviewer', 'ops', 'reviewers', '-j')).out);
+    expect(Object.keys(setNoop).sort()).toEqual(['agent', 'changed']);
+    expect(setNoop.changed).toBe(false);
+  });
+
+  it('tags set reads the current tags fresh, so a stale list never fakes a no-op', async () => {
+    fake.agents[1]!.tags = ['ops', 'reviewers']; // the lists would agree; the point is the fresh read
+    const r = await run('human', 'tags', 'set', 'reviewer', 'reviewers');
+    expect(r.code).toBe(0);
+    expect(fake.seen.some((x) => x.method === 'GET' && x.path === '/orgs/org_a/agents/agt_rev')).toBe(true);
+    expect(writes()[0]!.body).toEqual({ tags: ['reviewers'] });
+  });
+
+  it('a human who cannot list the agent by name is told to pass its agt_ id', async () => {
+    fake.humanGovernance = false; // a grant holder, not an admin: no governance list
+    const r = await run('human', 'tags', 'quiet');
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/agt_ id/);
+    // …and the id works: the single-agent read is open to any org member.
+    const byId = await run('human', 'tags', 'agt_quiet');
+    expect(byId.code).toBe(0);
+    expect(byId.out).toContain('quiet (agt_quiet)');
+  });
+
   it('tags set with an empty set is refused (use rm to clear)', async () => {
     const r = await run('human', 'tags', 'set', 'reviewer');
     expect(r.code).toBe(1);
@@ -597,6 +632,23 @@ describe('sparrow grants', () => {
     expect(r.code).toBe(1);
     expect(r.err).toMatch(/tags:\*.*tag:<slug>/);
     expect(writes()).toHaveLength(0);
+  });
+
+  it('add of a grant that already exists says "Already granted"', async () => {
+    const r = await run('human', 'grants', 'add', 'agt_cubey', 'tags:*');
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^Already granted tags:\* to agt_cubey — grt_one\./);
+    expect(r.out).not.toMatch(/^Granted/m);
+    const j = JSON.parse((await run('human', 'grants', 'add', 'agt_cubey', 'tags:*', '-j')).out);
+    expect(j).toMatchObject({ grant: { id: 'grt_one' }, created: false });
+    const fresh = JSON.parse((await run('human', 'grants', 'add', 'agt_rev', 'tag:ops', '-j')).out);
+    expect(fresh).toMatchObject({ grant: { principalId: 'agt_rev', scope: 'tag:ops' }, created: true });
+  });
+
+  it('rm help names who may revoke: admins, the creator, or the holder giving it up', async () => {
+    const r = await run('human', 'grants', 'rm', '--help');
+    expect(r.out + r.err).toMatch(/holder/i);
+    expect(r.out + r.err).toMatch(/creat/i);
   });
 
   it('rm deletes by grant id', async () => {

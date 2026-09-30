@@ -28,22 +28,135 @@ export function grantCoversAgent(scope: string, tags: readonly string[]): boolea
   return false;
 }
 
-/**
- * The viewer may manage this agent's tags and messaging, and read its analytics:
- * its owner, an org owner/admin, or a holder of a grant covering one of its tags.
- */
-export function hasAuthority(input: {
+/** Singular/plural count wording: `1 message`, `2 messages`, `12,345 messages`. */
+export function plural(n: number, noun: string, many = `${noun}s`): string {
+  return `${n.toLocaleString()} ${n === 1 ? noun : many}`;
+}
+
+/** The grant scopes `principalId` holds. */
+export function scopesOf(principalId: string | undefined, grants: readonly Grant[]): string[] {
+  if (!principalId) return [];
+  return grants.filter((g) => g.principalId === principalId).map((g) => g.scope);
+}
+
+/** Whether `held` covers `scope`: exactly, or `tags:*` covering any `tag:<slug>`. */
+export function coversScope(held: readonly string[], scope: string): boolean {
+  return held.includes(scope) || (scope.startsWith('tag:') && held.includes('tags:*'));
+}
+
+/** `target` holds a grant `actor` does not also hold (the `outranked` guard rail). */
+function outranks(targetScopes: readonly string[], actorScopes: readonly string[]): boolean {
+  return targetScopes.some((s) => !coversScope(actorScopes, s));
+}
+
+export interface AuthorityInput {
   isOwner: boolean;
   isAdmin: boolean;
   meId: string | undefined;
+  agentId: string;
   agentTags: readonly string[];
   grants: readonly Grant[];
+}
+
+/** What the viewer may do to one agent — mirrors the server's rules (render gating only). */
+export interface Authority {
+  /** Owner or org owner/admin: every tag, exempt from `outranked`. */
+  implicit: boolean;
+  /** The agent holds a grant the viewer does not (irrelevant when `implicit`). */
+  outranked: boolean;
+  /** May change messaging and tags, and see Access + Analytics. */
+  manage: boolean;
+  /** May add/remove any tag. */
+  anyTag: boolean;
+  /** When `!anyTag`: the only tags the viewer may add or remove. */
+  tags: string[];
+  canEditTag(tag: string): boolean;
+}
+
+/**
+ * The viewer's authority over an agent (SPEC.md, *Agent visibility → Authority*):
+ * the owner and org owners/admins over everything; otherwise a `tags:*` holder,
+ * or a `tag:y` holder where the agent CURRENTLY carries `y` — never over
+ * yourself, and never over an agent holding a grant the viewer does not
+ * ("outranked"). Adding or removing a tag also needs authority over THAT tag.
+ */
+export function authorityOver(input: AuthorityInput): Authority {
+  const none: Authority = {
+    implicit: false,
+    outranked: false,
+    manage: false,
+    anyTag: false,
+    tags: [],
+    canEditTag: () => false,
+  };
+  if (input.meId && input.meId === input.agentId) return none;
+  if (input.isOwner || input.isAdmin) {
+    return { implicit: true, outranked: false, manage: true, anyTag: true, tags: [], canEditTag: () => true };
+  }
+  const mine = scopesOf(input.meId, input.grants);
+  const outranked = outranks(scopesOf(input.agentId, input.grants), mine);
+  const anyTag = mine.includes('tags:*');
+  const tags = mine.filter((s) => s.startsWith('tag:')).map((s) => s.slice(4));
+  const covering = anyTag || input.agentTags.some((t) => tags.includes(t));
+  if (!covering || outranked) return { ...none, outranked };
+  return {
+    implicit: false,
+    outranked: false,
+    manage: true,
+    anyTag,
+    tags: anyTag ? [] : [...tags].sort(),
+    canEditTag: (t) => anyTag || tags.includes(t),
+  };
+}
+
+/** The viewer may manage this agent's tags and messaging, and read its analytics. */
+export function hasAuthority(input: AuthorityInput): boolean {
+  return authorityOver(input).manage;
+}
+
+/** Which scopes the viewer may grant: admins any, `tags:*` holders only `tag:<slug>`. */
+export function grantableScopes(input: {
+  isAdmin: boolean;
+  meId: string | undefined;
+  grants: readonly Grant[];
+}): 'any' | 'tag' | 'none' {
+  if (input.isAdmin) return 'any';
+  return scopesOf(input.meId, input.grants).includes('tags:*') ? 'tag' : 'none';
+}
+
+/**
+ * Whether the viewer may grant to `principalId`: never themselves; a non-admin
+ * never to a principal that outranks them.
+ */
+export function canGrantTo(input: {
+  isAdmin: boolean;
+  meId: string | undefined;
+  grants: readonly Grant[];
+  principalId: string;
 }): boolean {
-  if (input.isOwner || input.isAdmin) return true;
-  if (!input.meId) return false;
-  return input.grants.some(
-    (g) => g.principalId === input.meId && grantCoversAgent(g.scope, input.agentTags),
-  );
+  if (!input.meId || input.principalId === input.meId) return false;
+  const can = grantableScopes(input);
+  if (can === 'none') return false;
+  if (can === 'any') return true;
+  return !outranks(scopesOf(input.principalId, input.grants), scopesOf(input.meId, input.grants));
+}
+
+/**
+ * Whether the viewer may revoke `grant`: org owners/admins; its holder (giving
+ * it up); or its creator, unless the holder now outranks them.
+ */
+export function canRevokeGrant(input: {
+  grant: Grant;
+  isAdmin: boolean;
+  meId: string | undefined;
+  grants: readonly Grant[];
+}): boolean {
+  const { grant, meId } = input;
+  if (input.isAdmin) return true;
+  if (!meId) return false;
+  if (grant.principalId === meId) return true;
+  if (grant.grantedBy !== meId) return false;
+  return !outranks(scopesOf(grant.principalId, input.grants), scopesOf(meId, input.grants));
 }
 
 export interface PolicyAgent {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import type {
   Agent,
   AgentMessagingPolicy,
@@ -9,12 +9,17 @@ import type {
 } from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import {
+  authorityOver,
+  canGrantTo,
+  canRevokeGrant,
   forbiddenMessage,
+  grantableScopes,
   grantCoversAgent,
   namesList,
   normalizeTag,
   reachability,
   tagSuggestions,
+  type Authority,
   type PolicyAgent,
 } from './access.js';
 import { TagChip } from './TagChip.js';
@@ -25,32 +30,47 @@ const TAGS_MAX = 10;
 /**
  * The agent page's **Access** tab: the agent's tags, its messaging
  * policy with a reachability preview, who may change them, and the grants the
- * agent itself holds (with the grant form for org owners/admins).
+ * agent itself holds (with the grant form for org owners/admins, and a
+ * one-tag grant form for `tags:*` holders).
  *
  * Rendered only for viewers with authority over the agent (owner, org
- * owners/admins, holders of a grant covering one of its tags). The server
- * enforces every guard rail; a `403` renders inline in plain words.
+ * owners/admins, non-outranked holders of a grant covering one of its tags).
+ * Each control is gated by the same rules the server enforces — a `tag:x`
+ * delegate edits only `x` — and a change that would end the viewer's own
+ * authority asks first. The server stays the authority; a `403` renders inline
+ * in plain words.
  */
 export function AccessTab({
   orgId,
   agent,
   owner,
   isAdmin,
+  meId,
+  authority,
   grants,
+  grantsError,
   visibleAgents,
   onAgentChanged,
   onGrantsChanged,
+  onLostAccess,
 }: {
   orgId: string;
   agent: { id: string; name: string; tags: string[]; messaging: AgentMessagingPolicy };
   owner: HumanRef;
   isAdmin: boolean;
+  meId: string | undefined;
+  /** The viewer's authority over this agent (`authorityOver`). */
+  authority: Authority;
   grants: Grant[];
+  /** The last grants reload failed; `grants` is the previous list. */
+  grantsError: string | null;
   /** The caller's visibility list — the org's agents as far as this viewer can see. */
   visibleAgents: VisibilityAgent[];
   /** A PUT returned the updated agent resource. */
   onAgentChanged: (agent: Agent) => void;
   onGrantsChanged: () => void;
+  /** The viewer just ended their own authority over the agent (after confirming). */
+  onLostAccess: (notice: string) => void;
 }) {
   const roster = useRoster(orgId);
   const orgAgents = useOrgAgents(orgId, isAdmin, visibleAgents);
@@ -68,14 +88,34 @@ export function AccessTab({
     [orgAgents, agent.tags],
   );
 
+  // Would this change leave a delegate without authority over the agent? (An
+  // owner/admin never loses it.)
+  const losesAccess = (next: { tags?: string[]; grants?: Grant[] }) =>
+    !authority.implicit &&
+    !authorityOver({
+      isOwner: false,
+      isAdmin: false,
+      meId,
+      agentId: agent.id,
+      agentTags: next.tags ?? agent.tags,
+      grants: next.grants ?? grants,
+    }).manage;
+
+  const grantScopes = grantableScopes({ isAdmin, meId, grants });
+  const canGrant = grantScopes !== 'none' && canGrantTo({ isAdmin, meId, grants, principalId: agent.id });
+
   return (
     <div className="space-y-8">
       <TagsEditor
         orgId={orgId}
+        agentName={agent.name}
         agentId={agent.id}
         tags={agent.tags}
         orgTagSets={orgAgents.map((a) => a.tags)}
+        authority={authority}
+        losesAccessWithout={(tag) => losesAccess({ tags: agent.tags.filter((t) => t !== tag) })}
         onChanged={onAgentChanged}
+        onLostAccess={onLostAccess}
       />
       <MessagingControl
         orgId={orgId}
@@ -90,10 +130,15 @@ export function AccessTab({
         owner={owner}
         roster={roster}
         grants={grants}
+        grantsError={grantsError}
         isAdmin={isAdmin}
+        meId={meId}
+        canGrant={canGrant ? grantScopes : 'none'}
         orgTags={orgTags}
         nameOf={nameOf}
+        losesAccessWithout={(grantId) => losesAccess({ grants: grants.filter((g) => g.id !== grantId) })}
         onGrantsChanged={onGrantsChanged}
+        onLostAccess={onLostAccess}
       />
     </div>
   );
@@ -172,38 +217,116 @@ function useOrgAgents(orgId: string, isAdmin: boolean, visible: VisibilityAgent[
 const inputShell =
   'flex flex-wrap items-center gap-1.5 rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-bg)] px-2 py-1.5 transition-colors focus-within:border-[var(--sparrow-accent)]';
 
+/** `cubes` → "the cubes tag"; `[cubes, ops]` → "the cubes and ops tags". */
+function tagPhrase(tags: readonly string[]): string {
+  if (tags.length === 1) return `the ${tags[0]} tag`;
+  return `the ${tags.slice(0, -1).join(', ')} and ${tags[tags.length - 1]} tags`;
+}
+
+/** `[ops]` → "ops"; `[a, b, c]` → "a, b or c". */
+function orList(tags: readonly string[]): string {
+  return tags.length <= 1 ? (tags[0] ?? '') : `${tags.slice(0, -1).join(', ')} or ${tags[tags.length - 1]}`;
+}
+
+/** Inline "you'll lose access" confirmation (the page's delete-confirm pattern). */
+function LoseAccessConfirm({
+  what,
+  confirmLabel,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  what: string;
+  confirmLabel: string;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="Confirm"
+      className="mt-3 rounded-md border border-[var(--sparrow-danger)] bg-[var(--sparrow-panel)] px-3 py-2.5"
+    >
+      <p className="text-sm text-[var(--sparrow-text)]">
+        {what} You’ll lose access to this agent: its Access and Analytics tabs close for you.
+      </p>
+      <div className="mt-2.5 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={onConfirm}
+          disabled={busy}
+          className="inline-flex min-h-[36px] items-center rounded-md border border-[var(--sparrow-danger)] px-3 py-1.5 text-sm text-[var(--sparrow-danger)] transition-colors hover:bg-[var(--sparrow-panel-2)] disabled:opacity-50"
+        >
+          {confirmLabel}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="inline-flex min-h-[36px] items-center rounded-md border border-[var(--sparrow-border)] px-3 py-1.5 text-sm text-[var(--sparrow-muted)] transition-colors hover:text-[var(--sparrow-text)]"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TagsEditor({
   orgId,
   agentId,
+  agentName,
   tags,
   orgTagSets,
+  authority,
+  losesAccessWithout,
   onChanged,
+  onLostAccess,
 }: {
   orgId: string;
   agentId: string;
+  agentName: string;
   tags: string[];
   orgTagSets: readonly (readonly string[])[];
+  authority: Authority;
+  /** Removing this tag would end the viewer's authority over the agent. */
+  losesAccessWithout: (tag: string) => boolean;
   onChanged: (agent: Agent) => void;
+  onLostAccess: (notice: string) => void;
 }) {
+  const listId = useId();
   const [value, setValue] = useState('');
   const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
+
+  // What this viewer may add: any tag (owner/admin/`tags:*`), or only the tags
+  // they hold a grant for that the agent doesn't carry yet.
+  const addable = authority.anyTag ? null : authority.tags.filter((t) => !tags.includes(t));
   const suggestions = useMemo(
-    () => tagSuggestions(orgTagSets, tags, value).slice(0, 8),
-    [orgTagSets, tags, value],
+    () => tagSuggestions(addable ? [addable] : orgTagSets, tags, value).slice(0, 8),
+    [addable, orgTagSets, tags, value],
   );
   const full = tags.length >= TAGS_MAX;
+  const canAdd = addable === null || addable.length > 0;
+  const showList = open && suggestions.length > 0;
+  const activeIndex = showList && active < suggestions.length ? active : -1;
+  const optionId = (i: number) => `${listId}-opt-${i}`;
 
-  async function save(next: string[]) {
-    if (busy) return;
+  async function save(next: string[]): Promise<boolean> {
+    if (busy) return false;
     setBusy(true);
     setError(null);
     try {
       const res = await api.putAgentTags(orgId, agentId, [...next].sort());
       onChanged(res.agent);
+      return true;
     } catch (err) {
       setError(forbiddenMessage(err, 'Could not update the tags.'));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -215,10 +338,30 @@ function TagsEditor({
       setError('Tags are lowercase letters, digits and hyphens (up to 32), starting with a letter or digit.');
       return;
     }
+    if (addable && !addable.includes(tag) && !tags.includes(tag)) {
+      setError(`You can only add ${orList(addable)}.`);
+      return;
+    }
     setValue('');
     setOpen(false);
+    setActive(-1);
     if (tags.includes(tag)) return;
     void save([...tags, tag]);
+  }
+
+  function remove(tag: string) {
+    if (losesAccessWithout(tag)) {
+      setConfirming(tag);
+      return;
+    }
+    void save(tags.filter((x) => x !== tag));
+  }
+
+  async function confirmRemove(tag: string) {
+    if (await save(tags.filter((x) => x !== tag))) {
+      setConfirming(null);
+      onLostAccess(`You removed ${tag} from ${agentName}, so you no longer manage ${agentName}.`);
+    }
   }
 
   return (
@@ -226,68 +369,106 @@ function TagsEditor({
       <h2 className="text-sm font-semibold text-[var(--sparrow-text)]">Tags</h2>
       <p className="mt-1 text-xs text-[var(--sparrow-muted)]">
         Labels everyone in the org can see. Messaging and grants refer to them.
+        {authority.anyTag ? null : ` You can change only ${tagPhrase(authority.tags)}.`}
       </p>
       <div className={`mt-3 ${inputShell}`}>
         {tags.map((t) => (
           <TagChip key={t} tag={t}>
-            <button
-              type="button"
-              aria-label={`Remove tag ${t}`}
-              disabled={busy}
-              onClick={() => void save(tags.filter((x) => x !== t))}
-              className="ml-0.5 px-1 font-sans text-[var(--sparrow-faint)] hover:text-[var(--sparrow-danger)] disabled:opacity-50"
-            >
-              ×
-            </button>
+            {authority.canEditTag(t) ? (
+              <button
+                type="button"
+                aria-label={`Remove tag ${t}`}
+                disabled={busy}
+                onClick={() => remove(t)}
+                className="ml-0.5 px-1 font-sans text-[var(--sparrow-faint)] hover:text-[var(--sparrow-danger)] disabled:opacity-50"
+              >
+                ×
+              </button>
+            ) : null}
           </TagChip>
         ))}
-        <input
-          role="combobox"
-          aria-label="Add a tag"
-          aria-expanded={open && suggestions.length > 0}
-          aria-controls="agent-tag-suggestions"
-          aria-autocomplete="list"
-          value={value}
-          disabled={busy || full}
-          placeholder={full ? `At most ${TAGS_MAX} tags` : 'Add a tag…'}
-          onChange={(e) => {
-            setValue(e.target.value);
-            setOpen(true);
-            setError(null);
-          }}
-          onFocus={() => setOpen(true)}
-          onBlur={() => setTimeout(() => setOpen(false), 150)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              if (value.trim()) add(value);
-            } else if (e.key === 'Escape') {
-              setOpen(false);
+        {canAdd ? (
+          <input
+            role="combobox"
+            aria-label="Add a tag"
+            aria-expanded={showList}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={activeIndex >= 0 ? optionId(activeIndex) : undefined}
+            value={value}
+            disabled={busy || full}
+            placeholder={full ? `At most ${TAGS_MAX} tags` : 'Add a tag…'}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setOpen(true);
+              setActive(-1);
+              setError(null);
+            }}
+            onFocus={() => setOpen(true)}
+            onBlur={() =>
+              setTimeout(() => {
+                setOpen(false);
+                setActive(-1);
+              }, 150)
             }
-          }}
-          className="min-w-[8rem] flex-1 bg-transparent px-1 py-0.5 text-sm text-[var(--sparrow-text)] outline-none placeholder:text-[var(--sparrow-faint)]"
-        />
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (!showList) {
+                  setOpen(true);
+                  setActive(0);
+                } else {
+                  setActive(Math.min(activeIndex + 1, suggestions.length - 1));
+                }
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (showList) setActive(Math.max(activeIndex - 1, 0));
+              } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (activeIndex >= 0) add(suggestions[activeIndex]!);
+                else if (value.trim()) add(value);
+              } else if (e.key === 'Escape') {
+                setOpen(false);
+                setActive(-1);
+              }
+            }}
+            className="min-w-[8rem] flex-1 bg-transparent px-1 py-0.5 text-sm text-[var(--sparrow-text)] outline-none placeholder:text-[var(--sparrow-faint)]"
+          />
+        ) : null}
       </div>
-      {open && suggestions.length > 0 ? (
+      {showList ? (
         <ul
-          id="agent-tag-suggestions"
+          id={listId}
           role="listbox"
           aria-label="Tags used in this org"
           className="mt-2 overflow-hidden rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-panel-2)]"
         >
-          {suggestions.map((s) => (
+          {suggestions.map((s, i) => (
             <li
               key={s}
+              id={optionId(i)}
               role="option"
-              aria-selected={false}
+              aria-selected={i === activeIndex}
               onMouseDown={(e) => e.preventDefault()}
+              onMouseEnter={() => setActive(i)}
               onClick={() => add(s)}
-              className="mono cursor-pointer px-3 py-1.5 text-sm text-[var(--sparrow-text)] hover:bg-[var(--sparrow-panel)]"
+              className={`mono cursor-pointer px-3 py-1.5 text-sm text-[var(--sparrow-text)] hover:bg-[var(--sparrow-panel)] ${
+                i === activeIndex ? 'bg-[var(--sparrow-panel)]' : ''
+              }`}
             >
               {s}
             </li>
           ))}
         </ul>
+      ) : null}
+      {confirming ? (
+        <LoseAccessConfirm
+          what={`${confirming} is the tag you manage ${agentName} by.`}
+          confirmLabel={`Remove ${confirming} and lose access`}
+          busy={busy}
+          onConfirm={() => void confirmRemove(confirming)}
+          onCancel={() => setConfirming(null)}
+        />
       ) : null}
       {error ? <p className="mt-2 text-sm text-[var(--sparrow-danger)]">{error}</p> : null}
     </section>
@@ -441,25 +622,37 @@ function WhoCanChange({
   owner,
   roster,
   grants,
+  grantsError,
   isAdmin,
+  meId,
+  canGrant,
   orgTags,
   nameOf,
+  losesAccessWithout,
   onGrantsChanged,
+  onLostAccess,
 }: {
   orgId: string;
   agent: { id: string; name: string; tags: string[] };
   owner: HumanRef;
   roster: OrgMembership[];
-  /** Every tag this page knows of in the org — what an admin can grant as `tag:<slug>`. */
+  /** Every tag this page knows of in the org — what can be granted as `tag:<slug>`. */
   orgTags: string[];
   grants: Grant[];
+  grantsError: string | null;
   isAdmin: boolean;
+  meId: string | undefined;
+  /** Which grant form the viewer gets for THIS agent: every scope, one tag, or none. */
+  canGrant: 'any' | 'tag' | 'none';
   nameOf: (id: string) => string;
+  losesAccessWithout: (grantId: string) => boolean;
   onGrantsChanged: () => void;
+  onLostAccess: (notice: string) => void;
 }) {
   const admins = roster.filter((m) => m.role === 'owner' || m.role === 'admin').map((m) => m.human.displayName);
   const covering = grants.filter((g) => g.principalId !== agent.id && grantCoversAgent(g.scope, agent.tags));
   const held = grants.filter((g) => g.principalId === agent.id);
+  const revocable = (g: Grant) => canRevokeGrant({ grant: g, isAdmin, meId, grants });
 
   return (
     <section>
@@ -467,6 +660,7 @@ function WhoCanChange({
       <p className="mt-1 text-xs text-[var(--sparrow-muted)]">
         People and agents allowed to edit these tags and this messaging setting.
       </p>
+      {grantsError ? <p className="mt-2 text-sm text-[var(--sparrow-danger)]">{grantsError}</p> : null}
       <ul aria-label="Who can change this" className={listClass}>
         <li className="px-3 py-2.5">
           <span className="block text-sm text-[var(--sparrow-text)]">{owner.displayName}</span>
@@ -479,7 +673,18 @@ function WhoCanChange({
           ) : null}
         </li>
         {covering.map((g) => (
-          <GrantRow key={g.id} orgId={orgId} grant={g} name={nameOf(g.principalId)} canRevoke={isAdmin} onRevoked={onGrantsChanged} />
+          <GrantRow
+            key={g.id}
+            orgId={orgId}
+            grant={g}
+            name={nameOf(g.principalId)}
+            canRevoke={revocable(g)}
+            own={g.principalId === meId}
+            agentName={agent.name}
+            losesAccess={g.principalId === meId && losesAccessWithout(g.id)}
+            onRevoked={onGrantsChanged}
+            onLostAccess={onLostAccess}
+          />
         ))}
       </ul>
 
@@ -487,17 +692,33 @@ function WhoCanChange({
       {held.length === 0 ? (
         <p className="mt-1 text-xs text-[var(--sparrow-muted)]">
           None. {agent.name} can’t change other agents.
-          {isAdmin ? '' : ' Only org owners and admins can grant.'}
+          {canGrant === 'none' ? ' Only org owners and admins can grant.' : ''}
         </p>
       ) : (
         <ul aria-label="Grants this agent holds" className={listClass}>
           {held.map((g) => (
-            <GrantRow key={g.id} orgId={orgId} grant={g} name={agent.name} canRevoke={isAdmin} onRevoked={onGrantsChanged} held />
+            <GrantRow
+              key={g.id}
+              orgId={orgId}
+              grant={g}
+              name={agent.name}
+              canRevoke={revocable(g)}
+              agentName={agent.name}
+              onRevoked={onGrantsChanged}
+              onLostAccess={onLostAccess}
+              held
+            />
           ))}
         </ul>
       )}
-      {isAdmin ? (
-        <GrantForm orgId={orgId} agent={agent} orgTags={orgTags} onGranted={onGrantsChanged} />
+      {canGrant !== 'none' ? (
+        <GrantForm
+          orgId={orgId}
+          agent={agent}
+          orgTags={orgTags}
+          scopes={canGrant}
+          onGranted={onGrantsChanged}
+        />
       ) : null}
     </section>
   );
@@ -508,18 +729,29 @@ function GrantRow({
   grant,
   name,
   canRevoke,
+  own = false,
+  agentName,
+  losesAccess = false,
   onRevoked,
+  onLostAccess,
   held = false,
 }: {
   orgId: string;
   grant: Grant;
   name: string;
   canRevoke: boolean;
+  /** The viewer's OWN grant: "Give up" rather than "Revoke". */
+  own?: boolean;
+  agentName: string;
+  /** Giving this up ends the viewer's authority over the agent: ask first. */
+  losesAccess?: boolean;
   onRevoked: () => void;
+  onLostAccess: (notice: string) => void;
   held?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
   async function revoke() {
     if (busy) return;
@@ -528,51 +760,67 @@ function GrantRow({
     try {
       await api.deleteGrant(orgId, grant.id);
       onRevoked();
+      if (losesAccess) onLostAccess(`You gave up ${grant.scope}, so you no longer manage ${agentName}.`);
     } catch (err) {
-      setError(forbiddenMessage(err, 'Could not revoke.'));
+      setError(forbiddenMessage(err, own ? 'Could not give it up.' : 'Could not revoke.'));
       setBusy(false);
     }
   }
 
   return (
-    <li className="flex items-center gap-3 px-3 py-2.5">
-      <span className="min-w-0 flex-1">
-        <span className="block text-sm text-[var(--sparrow-text)]">
-          {held ? scopeWhy(grant.scope) : name}
-          {!held && grant.principalKind === 'agent' ? <AgentKind /> : null}
+    <li className="px-3 py-2.5">
+      <div className="flex items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm text-[var(--sparrow-text)]">
+            {held ? scopeWhy(grant.scope) : own ? `${name} (you)` : name}
+            {!held && grant.principalKind === 'agent' ? <AgentKind /> : null}
+          </span>
+          {!held ? <span className="block text-xs text-[var(--sparrow-faint)]">{scopeWhy(grant.scope)}</span> : null}
+          {error ? <span className="block text-xs text-[var(--sparrow-danger)]">{error}</span> : null}
         </span>
-        {!held ? <span className="block text-xs text-[var(--sparrow-faint)]">{scopeWhy(grant.scope)}</span> : null}
-        {error ? <span className="block text-xs text-[var(--sparrow-danger)]">{error}</span> : null}
-      </span>
-      <ScopePill scope={grant.scope} />
-      {canRevoke ? (
-        <button
-          type="button"
-          onClick={() => void revoke()}
-          disabled={busy}
-          aria-label={`Revoke ${grant.scope} from ${name}`}
-          className="shrink-0 rounded border border-[var(--sparrow-border-strong)] px-2 py-1 text-xs text-[var(--sparrow-muted)] transition-colors hover:border-[var(--sparrow-danger)] hover:text-[var(--sparrow-danger)] disabled:opacity-50"
-        >
-          {busy ? 'Revoking…' : 'Revoke'}
-        </button>
+        <ScopePill scope={grant.scope} />
+        {canRevoke ? (
+          <button
+            type="button"
+            onClick={() => (losesAccess ? setConfirming(true) : void revoke())}
+            disabled={busy}
+            aria-label={own ? `Give up ${grant.scope}` : `Revoke ${grant.scope} from ${name}`}
+            className="shrink-0 rounded border border-[var(--sparrow-border-strong)] px-2 py-1 text-xs text-[var(--sparrow-muted)] transition-colors hover:border-[var(--sparrow-danger)] hover:text-[var(--sparrow-danger)] disabled:opacity-50"
+          >
+            {busy ? (own ? 'Giving up…' : 'Revoking…') : own ? 'Give up' : 'Revoke'}
+          </button>
+        ) : null}
+      </div>
+      {confirming ? (
+        <LoseAccessConfirm
+          what={`${grant.scope} is how you manage ${agentName}.`}
+          confirmLabel="Give up and lose access"
+          busy={busy}
+          onConfirm={() => void revoke()}
+          onCancel={() => setConfirming(false)}
+        />
       ) : null}
     </li>
   );
 }
 
 /**
- * Org owners/admins grant this agent `tag:<slug>` or `tags:*`. Agents start with
- * no grants; the form says in one line what `tags:*` lets the agent do.
+ * Grant this agent `tag:<slug>` or `tags:*`: org owners/admins get both;
+ * a `tags:*` holder gets `tag:<slug>` only (only admins grant `tags:*`).
+ * Agents start with no grants; the form says in one line what `tags:*` lets
+ * the agent do.
  */
 function GrantForm({
   orgId,
   agent,
   orgTags,
+  scopes,
   onGranted,
 }: {
   orgId: string;
   agent: { id: string; name: string };
   orgTags: string[];
+  scopes: 'any' | 'tag';
   onGranted: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -581,7 +829,8 @@ function GrantForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const chosenTag = orgTags.includes(tag) ? tag : (orgTags[0] ?? '');
-  const scope = kind === 'all' ? 'tags:*' : chosenTag ? `tag:${chosenTag}` : null;
+  const all = scopes === 'any' && kind === 'all';
+  const scope = all ? 'tags:*' : chosenTag ? `tag:${chosenTag}` : null;
 
   async function grant() {
     if (busy || !scope) return;
@@ -624,18 +873,24 @@ function GrantForm({
   return (
     <div className="mt-3 rounded-lg border border-[var(--sparrow-accent)] bg-[var(--sparrow-panel)] p-4">
       <div className="text-sm font-semibold text-[var(--sparrow-text)]">Grant {agent.name} access to…</div>
-      <p className="mt-0.5 text-xs text-[var(--sparrow-muted)]">Agents start with none. Only org owners and admins can grant.</p>
+      <p className="mt-0.5 text-xs text-[var(--sparrow-muted)]">
+        {scopes === 'any'
+          ? 'Agents start with none. Only org owners and admins can grant.'
+          : 'Agents start with none. You can grant one tag; only org owners and admins can grant tags:*.'}
+      </p>
       <fieldset className="mt-2.5 space-y-2" aria-label="Grant scope" disabled={busy}>
-        <div className={card(kind === 'one')}>
+        <div className={card(!all)}>
           <label className="flex flex-1 cursor-pointer items-start gap-3">
-            <input
-              type="radio"
-              name="grant-kind"
-              checked={kind === 'one'}
-              onChange={() => setKind('one')}
-              disabled={orgTags.length === 0}
-              className="mt-0.5 accent-[var(--sparrow-accent)]"
-            />
+            {scopes === 'any' ? (
+              <input
+                type="radio"
+                name="grant-kind"
+                checked={kind === 'one'}
+                onChange={() => setKind('one')}
+                disabled={orgTags.length === 0}
+                className="mt-0.5 accent-[var(--sparrow-accent)]"
+              />
+            ) : null}
             <span className="flex flex-col">
               <span className="text-sm text-[var(--sparrow-text)]">One tag</span>
               <span className="text-xs text-[var(--sparrow-faint)]">
@@ -663,25 +918,27 @@ function GrantForm({
             </select>
           ) : null}
         </div>
-        <label className={`${card(kind === 'all')} cursor-pointer`}>
-          <input
-            type="radio"
-            name="grant-kind"
-            checked={kind === 'all'}
-            onChange={() => setKind('all')}
-            className="mt-0.5 accent-[var(--sparrow-accent)]"
-          />
-          <span className="flex flex-col">
-            <span className="text-sm text-[var(--sparrow-text)]">
-              Every tag <ScopePill scope="tags:*" />
+        {scopes === 'any' ? (
+          <label className={`${card(kind === 'all')} cursor-pointer`}>
+            <input
+              type="radio"
+              name="grant-kind"
+              checked={kind === 'all'}
+              onChange={() => setKind('all')}
+              className="mt-0.5 accent-[var(--sparrow-accent)]"
+            />
+            <span className="flex flex-col">
+              <span className="text-sm text-[var(--sparrow-text)]">
+                Every tag <ScopePill scope="tags:*" />
+              </span>
+              <span className="text-xs text-[var(--sparrow-faint)]">
+                The same for all tags, and it can give one-tag access to others.
+              </span>
             </span>
-            <span className="text-xs text-[var(--sparrow-faint)]">
-              The same for all tags, and it can give one-tag access to others.
-            </span>
-          </span>
-        </label>
+          </label>
+        ) : null}
       </fieldset>
-      {kind === 'all' ? (
+      {all ? (
         <div className="mt-3 flex gap-2 rounded-md bg-[var(--sparrow-accent-soft)] px-3 py-2 text-sm text-[var(--sparrow-accent-2)]">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true" className="mt-[3px] shrink-0">
             <path d="M8 1.8 15 14H1z" strokeLinejoin="round" />

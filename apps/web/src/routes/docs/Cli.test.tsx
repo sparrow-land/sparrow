@@ -262,6 +262,17 @@ describe('CLI reference — agent visibility (tags, messaging, grants, stats)', 
     expect(flatText(s)).toContain('grt_');
   });
 
+  it('says who may revoke a grant and who may change which tags', () => {
+    render(<Cli />);
+    const grants = flatText(section('sparrow grants'));
+    expect(grants).toMatch(/grant's creator/);
+    expect(grants).toMatch(/holder.*giv(e|ing) (it )?up/i);
+    const tags = flatText(section('sparrow tags'));
+    expect(tags).toMatch(/tag:<slug> holder only that tag/);
+    expect(tags).toMatch(/holds a grant they don't/);
+    expect(tags).toMatch(/messaging policy isn't any may not add a tag it carries/);
+  });
+
   it('documents sparrow stats with --window and says tokens are estimated', () => {
     render(<Cli />);
     const s = section('sparrow stats');

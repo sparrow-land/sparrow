@@ -110,7 +110,13 @@ async function resolveTarget(
     if (p.kind !== 'agent') throw new CliError(`${label(p)} is a human; tags and messaging apply to agents only.`);
     return { id: p.id, name: p.name };
   }
-  throw new CliError(`No agent "${selector}" is visible to you. Run \`sparrow agents\` to list them.`);
+  // A human who manages an agent only through a grant may not see it in any list
+  // they can read (the governance list is admins-only), but the single-agent read
+  // is open to every org member: the id always works.
+  throw new CliError(
+    `No agent named "${selector}" is visible to you. Run \`sparrow agents\` to list the ones you can see, ` +
+      'or pass its agt_ id (an agent you manage through a grant works by id).',
+  );
 }
 
 /** The agent's CURRENT tags and messaging, read fresh from `GET /orgs/:orgId/agents/:agentId`. */
@@ -289,6 +295,14 @@ async function resolveGrantee(
   throw new CliError(`No agent or human named "${selector}" in this org. Pass an agt_/usr_ id or an email.`);
 }
 
+/** Who may change tags (mirrors the server's rules; the server is the authority). */
+const TAGS_RULES = `
+Who may change an agent's tags: its owner and org owners/admins (any tag); a
+tags:* holder (any tag); a tag:<slug> holder (only that tag, and only on agents
+that already carry a tag it holds). Nobody edits their own tags or an agent that
+holds a grant they don't. An agent whose own messaging policy is not "any" may
+not add a tag it carries itself to another agent.`;
+
 /* --------------------------------- commands ------------------------------ */
 
 export function registerVisibilityCommands(d: VisibilityDeps): void {
@@ -312,6 +326,7 @@ export function registerVisibilityCommands(d: VisibilityDeps): void {
       .description(description)
       .argument('<agent>', 'agent name or agt_ id')
       .argument('<tag...>', 'tag slugs (lowercase letters, digits, dashes)')
+      .addHelpText('after', TAGS_RULES)
       .action(
         action(async (opts, args) => {
           const selector = args[0]!;
@@ -319,35 +334,34 @@ export function registerVisibilityCommands(d: VisibilityDeps): void {
           const { client } = d.buildClient(opts, env);
           const orgId = await resolveOrg(client, opts, env);
           const t = await resolveTarget(client, selector, orgId, `sparrow tags ${verb} <agent> <tag…>`);
-          let next: string[];
-          let before: string[] | undefined;
-          if (verb === 'set') {
-            next = given;
-            before = t.tags;
-          } else {
-            before = (await readCurrent(client, orgId, t)).tags;
-            next = verb === 'add' ? [...new Set([...before, ...given])] : before.filter((x) => !given.includes(x));
-          }
+          // Always read the CURRENT set (a list may be stale): it decides the no-op,
+          // and a no-op still prints the agent resource, so -j has one shape.
+          const { agent: current } = await client.getOrgAgent(orgId, t.id);
+          const before = current.tags;
+          const next =
+            verb === 'set'
+              ? given
+              : verb === 'add'
+                ? [...new Set([...before, ...given])]
+                : before.filter((x) => !given.includes(x));
           next.sort();
           checkMax(next);
-          if (before && next.join(',') === [...before].sort().join(',')) {
+          if (next.join(',') === [...before].sort().join(',')) {
             print(
-              { agent: { id: t.id, name: t.name, tags: next }, changed: false },
-              `${label(t)} tags unchanged: ${formatTagList(next)}`,
+              { agent: current, changed: false },
+              `${label(current)} tags unchanged: ${formatTagList(next)}`,
             );
             return;
           }
           const res = await client.putAgentTags(orgId, t.id, next);
           const after = res.agent.tags;
           const diff: string[] = [];
-          if (before) {
-            const added = after.filter((x) => !before!.includes(x));
-            const removed = before.filter((x) => !after.includes(x));
-            if (added.length) diff.push(`added: ${added.join(', ')}`);
-            if (removed.length) diff.push(`removed: ${removed.join(', ')}`);
-          }
+          const added = after.filter((x) => !before.includes(x));
+          const removed = before.filter((x) => !after.includes(x));
+          if (added.length) diff.push(`added: ${added.join(', ')}`);
+          if (removed.length) diff.push(`removed: ${removed.join(', ')}`);
           print(
-            res,
+            { agent: res.agent, changed: true },
             `${label({ id: res.agent.id, name: res.agent.name })} tags: ${formatTagList(after)}` +
               (diff.length ? ` (${diff.join('; ')})` : ''),
           );
@@ -412,15 +426,26 @@ export function registerVisibilityCommands(d: VisibilityDeps): void {
         const { client } = d.buildClient(opts, env);
         const orgId = await resolveOrg(client, opts, env);
         const p = await resolveGrantee(client, selector, orgId);
+        // The server answers an existing (principal, scope) with that grant (200,
+        // not 201); the SDK hides the status, so compare against the list first.
+        let known: string[] = [];
+        try {
+          known = (await client.listGrants(orgId)).map((g) => g.id);
+        } catch {
+          /* best-effort: without it every add reads as new */
+        }
         const grant = await client.createGrant(orgId, { principalId: p.id, scope });
+        const created = !known.includes(grant.id);
         print(
-          { grant },
-          `Granted ${scope} to ${label(p)} — ${grant.id}.\nIt lets them ${grantMeaning(scope)}.`,
+          { grant, created },
+          created
+            ? `Granted ${scope} to ${label(p)} — ${grant.id}.\nIt lets them ${grantMeaning(scope)}.`
+            : `Already granted ${scope} to ${label(p)} — ${grant.id}. Nothing changed.`,
         );
       }),
     );
   withOrg(grantsCmd.command('rm'))
-    .description('revoke a grant (org owners/admins, or whoever created it)')
+    .description('revoke a grant (org owners/admins, its creator, or its holder giving it up)')
     .argument('<grantId>', 'the grt_ id (see `sparrow grants`)')
     .action(
       action(async (opts, args) => {

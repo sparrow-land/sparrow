@@ -8,6 +8,7 @@ import type {
   AgentShare,
   AgentSharingMode,
   CreateAgentResponse,
+  GetOrgAgentResponse,
   HumanContact,
 } from '@sparrow-land/sdk/types';
 import { ApiError } from '@sparrow-land/sdk';
@@ -29,7 +30,7 @@ import { useContactBook } from './agent/contacts.js';
 import { AccessTab } from './agent/AccessTab.js';
 import { AnalyticsCard, AnalyticsTab } from './agent/AnalyticsTab.js';
 import { TagChips } from './agent/TagChip.js';
-import { forbiddenMessage, hasAuthority } from './agent/access.js';
+import { authorityOver, forbiddenMessage, scopesOf } from './agent/access.js';
 
 /** The agent page's sections. Overview is the default and always renders. */
 type AgentTab = 'overview' | 'access' | 'analytics' | 'activity' | 'email';
@@ -61,9 +62,13 @@ type AgentTab = 'overview' | 'access' | 'analytics' | 'activity' | 'email';
  * Agent visibility (SPEC.md) adds **Access** (tags, messaging policy, who may
  * change them, grants) and **Analytics** — for viewers with AUTHORITY over the
  * agent: its owner, org owners/admins, and holders of a grant covering one of
- * its tags (`GET /grants` is readable by any member). Tag chips sit in the
- * header for everyone; Overview gains a one-line analytics card for viewers
- * with authority. A teammate without authority sees no more tabs than before.
+ * its tags (`GET /grants` is readable by any member), never over an agent that
+ * holds a grant the viewer lacks ("outranked"; see `agent/access.ts`). Tag
+ * chips sit in the header for everyone; Overview gains a one-line analytics
+ * card for viewers with authority. A teammate without authority sees no more
+ * tabs than before. A grant holder whose visibility list lacks the
+ * agent — nobody shared it with them — still reaches it through
+ * `GET /orgs/:orgId/agents/:agentId`, with Access and Analytics but no Message.
  */
 export function AgentProfile() {
   const { agentId: bareAgentId = '' } = useParams<{ agentId: string }>();
@@ -74,6 +79,7 @@ export function AgentProfile() {
   const ws = useWorkspace();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const meId = auth.user?.id;
 
   // Tick for relative times (kept cheap: once every 30s).
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -83,96 +89,155 @@ export function AgentProfile() {
   }, []);
 
   const entry = ws.agents.find((a) => a.agent.id === agentId);
-  // Named by the agent once the visibility list resolves; a bare product title
-  // while it loads (never a flash of "not found" in the tab).
-  useDocumentTitle(pageTitle(entry ? `@${entry.agent.name}` : null));
-  const isOwner = !!entry && entry.sharedBy === null && entry.owner.id === auth.user?.id;
-  const canReadActivity = isOwner || isAdmin;
 
   // Delegated grants (any member may read them) — they decide whether a plain
-  // member holds authority over this agent through one of its tags.
+  // member holds authority over this agent through one of its tags. A failed
+  // reload keeps the last list (tabs never vanish over a blip) and says so.
+  // Only the newest request may write, so reloads never land out of order.
   const [grants, setGrants] = useState<Grant[]>([]);
+  const [grantsState, setGrantsState] = useState<{ loaded: boolean; error: string | null }>({
+    loaded: false,
+    error: null,
+  });
+  const grantsReq = useRef(0);
   const reloadGrants = useCallback(() => {
+    const req = ++grantsReq.current;
     api
       .listGrants(orgId)
-      .then(setGrants)
-      .catch(() => setGrants([]));
+      .then((items) => {
+        if (req !== grantsReq.current) return;
+        setGrants(items);
+        setGrantsState({ loaded: true, error: null });
+      })
+      .catch(() => {
+        if (req !== grantsReq.current) return;
+        setGrantsState({ loaded: true, error: 'Couldn’t refresh the grants. Showing the last list loaded.' });
+      });
   }, [orgId]);
   useEffect(() => reloadGrants(), [reloadGrants]);
-
-  // A tags/messaging PUT answers with the updated agent; hold it until the
-  // visibility list catches up (the reload that follows every change), so the
-  // header and preview never flash the old values.
-  const [patch, setPatch] = useState<{
-    agentId: string;
-    base: string;
-    tags: string[];
-    messaging: AgentMessagingPolicy;
-  } | null>(null);
+  const holdsGrant = scopesOf(meId, grants).length > 0;
 
   // A viewer who is neither the owner nor an org owner/admin reads the agent's
   // CURRENT tags and messaging from `GET /orgs/:orgId/agents/:agentId` (any
   // member may read it; the governance list is admin-only). Owners and admins
-  // use their visibility entry. A failed read falls back to the entry.
-  const readsOrgAgent = !!entry && !isOwner && !isAdmin;
-  const [orgAgent, setOrgAgent] = useState<Agent | null>(null);
-  const [orgAgentTick, setOrgAgentTick] = useState(0);
-  useEffect(() => {
-    if (!readsOrgAgent) {
-      setOrgAgent(null);
-      return;
-    }
-    let alive = true;
-    api
-      .getOrgAgent(orgId, agentId)
-      .then((res) => {
-        if (alive) setOrgAgent(res.agent);
-      })
-      .catch(() => {
-        if (alive) setOrgAgent(null);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [readsOrgAgent, orgId, agentId, orgAgentTick]);
-  const base =
-    readsOrgAgent && orgAgent?.id === agentId
-      ? { tags: orgAgent.tags, messaging: orgAgent.messaging }
-      : { tags: entry?.agent.tags ?? [], messaging: entry?.agent.messaging ?? 'any' };
+  // use their visibility entry. The same read is the FALLBACK for an agent that
+  // isn't in the caller's visibility list at all: a grant holder
+  // can manage an agent nobody shared with them.
+  const entryIsOwn = !!entry && entry.sharedBy === null && entry.owner.id === meId;
+  const fallback = !entry && !ws.loading && grantsState.loaded && holdsGrant;
+  const readsOrgAgent = entry ? !entryIsOwn && !isAdmin : fallback;
 
-  const liveKey = entry ? JSON.stringify([base.tags, base.messaging]) : '';
+  // Every tags/messaging change takes a sequence number. The PUT's answer is
+  // shown (the `patch`) until the reload issued FOR THAT CHANGE has landed
+  // (`settled`) — and, as before, while the source still reads exactly what it
+  // read when the change was made (a reload that has not caught up). Only the
+  // newest org-agent read (and the newest visibility reload) may write, so two
+  // quick edits never flash the first one's state, whatever order the reloads
+  // answer in.
+  const seqRef = useRef(0);
+  const [settled, setSettled] = useState(0);
+  const [patch, setPatch] = useState<{
+    agentId: string;
+    seq: number;
+    /** The source's tags/messaging when the change was made. */
+    baseKey: string;
+    tags: string[];
+    messaging: AgentMessagingPolicy;
+  } | null>(null);
+
+  const [orgRead, setOrgRead] = useState<{ agentId: string; res: GetOrgAgentResponse | null } | null>(null);
+  const orgReq = useRef(0);
+  const loadOrgAgent = useCallback(
+    (seq: number) => {
+      const req = ++orgReq.current;
+      api
+        .getOrgAgent(orgId, agentId)
+        .then((res) => {
+          if (req === orgReq.current) setOrgRead({ agentId, res });
+        })
+        .catch(() => {
+          // Keep the last good read; a first read that fails is "not readable".
+          if (req === orgReq.current) {
+            setOrgRead((prev) => ({ agentId, res: prev?.agentId === agentId ? prev.res : null }));
+          }
+        })
+        .finally(() => {
+          if (req === orgReq.current) setSettled((s) => Math.max(s, seq));
+        });
+    },
+    [orgId, agentId],
+  );
+  useEffect(() => {
+    if (readsOrgAgent) loadOrgAgent(seqRef.current);
+  }, [readsOrgAgent, loadOrgAgent]);
+  const orgAgent = orgRead?.agentId === agentId ? orgRead.res : null;
+  const orgReadDone = orgRead?.agentId === agentId;
+
+  // What the page renders: the visibility entry, or (fallback) the org read.
+  const view: NonNullable<typeof entry> | null = entry
+    ? entry
+    : fallback && orgAgent
+      ? { agent: orgAgent.agent, owner: orgAgent.owner, sharedBy: null, emailUnreadCount: null, roleInstructions: null }
+      : null;
+  const shared = !!entry;
+  // Named by the agent once it resolves; a bare product title while it loads
+  // (never a flash of "not found" in the tab).
+  useDocumentTitle(pageTitle(view ? `@${view.agent.name}` : null));
+  const isOwner = !!view && view.sharedBy === null && view.owner.id === meId;
+  const canReadActivity = isOwner || isAdmin;
+
+  const base =
+    readsOrgAgent && orgAgent
+      ? { tags: orgAgent.agent.tags, messaging: orgAgent.agent.messaging }
+      : { tags: view?.agent.tags ?? [], messaging: view?.agent.messaging ?? ('any' as const) };
+  const baseKey = JSON.stringify([base.tags, base.messaging]);
   const live =
-    entry && patch && patch.agentId === entry.agent.id && patch.base === liveKey ? patch : null;
+    patch && patch.agentId === agentId && (patch.seq > settled || patch.baseKey === baseKey) ? patch : null;
   const tags = live ? live.tags : base.tags;
   const messaging = live ? live.messaging : base.messaging;
 
-  const authority =
-    !!entry &&
-    hasAuthority({ isOwner, isAdmin, meId: auth.user?.id, agentTags: tags, grants });
+  const authority = authorityOver({ isOwner, isAdmin, meId, agentId, agentTags: tags, grants });
+  const manage = !!view && authority.manage;
+
+  // Set when the viewer just gave up their own authority (removed the tag they
+  // manage it by, or gave up their grant): they land on Overview — or, for an
+  // agent not shared with them, the not-found panel — with a plain notice.
+  const [notice, setNotice] = useState<{ agentId: string; text: string } | null>(null);
+  const noticeText = notice?.agentId === agentId ? notice.text : null;
+  const noticeLine = noticeText ? (
+    <p
+      role="status"
+      className="mb-5 rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-panel-2)] px-3 py-2 text-sm text-[var(--sparrow-muted)]"
+    >
+      {noticeText}
+    </p>
+  ) : null;
 
   // Tabs are a `?tab=` VIEW PREFERENCE on the one agent route. A tab the caller
   // may not read (or a medium that is off) falls back to Overview rather than
   // rendering an "unavailable" placeholder.
   const requested = searchParams.get('tab');
   const tab: AgentTab =
-    requested === 'access' && authority
+    requested === 'access' && manage
       ? 'access'
-      : requested === 'analytics' && authority
+      : requested === 'analytics' && manage
         ? 'analytics'
         : requested === 'activity' && canReadActivity
           ? 'activity'
           : requested === 'email' && canReadActivity && caps.email
             ? 'email'
             : 'overview';
-  const showTabs = canReadActivity || authority;
+  const showTabs = canReadActivity || manage;
 
   // Trust pills come from the admin-only contacts route; a non-admin owner gets
   // no pill rather than a 404 (see `agent/contacts.ts`).
   const contacts = useContactBook(orgId, caps.email && isAdmin && tab !== 'overview');
 
-  if (!entry) {
-    // Still loading the visibility list — hold the layout, don't flash not-found.
-    if (ws.loading) {
+  if (!view || (!shared && !manage)) {
+    // Still resolving (the visibility list, the grants, or the fallback read) —
+    // hold the layout, don't flash not-found.
+    const pending = !entry && (ws.loading || !meId || !grantsState.loaded || (fallback && !orgReadDone));
+    if (pending) {
       return (
         <Panel>
           <p className="text-sm text-[var(--sparrow-faint)]">Loading…</p>
@@ -181,6 +246,7 @@ export function AgentProfile() {
     }
     return (
       <Panel>
+        {noticeLine}
         <h1 className="text-lg font-semibold tracking-tight text-[var(--sparrow-text)]">
           You can’t see this agent
         </h1>
@@ -198,11 +264,12 @@ export function AgentProfile() {
     );
   }
 
-  const { agent, owner, sharedBy, rooms, sharedWith, roleInstructions } = entry;
+  const { agent, owner, sharedBy, rooms, sharedWith, roleInstructions } = view;
   const presence = presenceDot(agent.online, agent.lastSeenAt, nowMs);
 
   return (
     <Panel>
+      {noticeLine}
       {/* Header ---------------------------------------------------------- */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <PresenceGlyph presence={presence} busy={false} />
@@ -246,7 +313,7 @@ export function AgentProfile() {
           agentId={agent.id}
           active={tab}
           email={caps.email}
-          access={authority}
+          access={manage}
           correspondence={canReadActivity}
         />
       ) : null}
@@ -262,14 +329,23 @@ export function AgentProfile() {
             agent={{ id: agent.id, name: agent.name, tags, messaging }}
             owner={owner}
             isAdmin={isAdmin}
+            meId={meId}
+            authority={authority}
             grants={grants}
+            grantsError={grantsState.error}
             visibleAgents={ws.agents}
             onAgentChanged={(next: Agent) => {
-              setPatch({ agentId: agent.id, base: liveKey, tags: next.tags, messaging: next.messaging });
-              void ws.reloadAgents();
-              if (readsOrgAgent) setOrgAgentTick((n) => n + 1);
+              const seq = ++seqRef.current;
+              setPatch({ agentId: agent.id, seq, baseKey, tags: next.tags, messaging: next.messaging });
+              const reload = ws.reloadAgents();
+              if (readsOrgAgent) loadOrgAgent(seq);
+              else void reload.then(() => setSettled((s) => Math.max(s, seq)));
             }}
             onGrantsChanged={reloadGrants}
+            onLostAccess={(text) => {
+              setNotice({ agentId: agent.id, text });
+              navigate(agentTabPath(orgId, agent.id, 'overview'));
+            }}
           />
         ) : tab === 'analytics' ? (
           <AnalyticsTab orgId={orgId} agentId={agent.id} />
@@ -294,8 +370,15 @@ export function AgentProfile() {
           />
         ) : (
           <>
-            {authority ? <AnalyticsCard orgId={orgId} agentId={agent.id} /> : null}
-            <MessageButton agentId={agent.id} orgId={orgId} />
+            {manage ? <AnalyticsCard orgId={orgId} agentId={agent.id} /> : null}
+            {shared ? (
+              <MessageButton agentId={agent.id} orgId={orgId} />
+            ) : (
+              <p className="text-sm text-[var(--sparrow-muted)]">
+                {agent.name} isn’t shared with you. You can manage its tags and messaging through a
+                grant, but not message it.
+              </p>
+            )}
             {isOwner ? (
               <OwnerControls
                 agentId={agent.id}

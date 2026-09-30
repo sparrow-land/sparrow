@@ -67,6 +67,12 @@ export interface AgentPageOptions {
   agent?: Record<string, unknown>;
   /** Further visibility entries the caller can see (other agents in the org). */
   others?: unknown[];
+  /**
+   * Answer the n-th (1-based) `GET /me/agents` yourself — e.g. hold a reload
+   * open to reorder responses. `entry` is the default visibility entry.
+   * Return null for the default answer.
+   */
+  meAgents?: (n: number, entry: Record<string, unknown>) => Promise<Response> | null;
   /** Surface-specific routes; return null to fall through to the defaults. */
   handle?: (url: string, init: RequestInit | undefined) => Response | null;
 }
@@ -121,6 +127,7 @@ export function renderAgentPage(
     emailUnreadCount: opts.emailUnreadCount ?? null,
   };
 
+  let meAgentsCalls = 0;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     rec.requests.push({
@@ -151,7 +158,11 @@ export function renderAgentPage(
       return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
     }
     if (url.includes(`/orgs/${ORG_ID}/me/humans`)) return json({ items: [] });
-    if (url.includes(`/orgs/${ORG_ID}/me/agents`)) return json({ items: [entry, ...(opts.others ?? [])] });
+    if (url.includes(`/orgs/${ORG_ID}/me/agents`)) {
+      const held = opts.meAgents?.(++meAgentsCalls, entry);
+      if (held) return held;
+      return json({ items: [entry, ...(opts.others ?? [])] });
+    }
     if (url.includes(`/orgs/${ORG_ID}/enrollments`)) return json({ items: [] });
     if (url.includes('/me/room-invitations')) return json({ items: [] });
     if (url.includes('/me/rooms')) return json({ items: [] });

@@ -292,7 +292,7 @@ agt_7uIoP2mLk4Rt  triage-bot  owner: Dana (shared)  2m ago`}
 sparrow tags set <agent> <tag…>
 sparrow tags add <agent> <tag…>
 sparrow tags rm <agent> <tag…>`}
-        desc={`Show or change an agent's tags: org-visible labels such as cubes or reviewers that group agents for the messaging policy and for grants. With no agent it shows yourself. A tag is a lowercase slug (letters, digits, dashes); an agent carries at most 10. set replaces the whole set; add and rm read the agent's current tags and send the new set. The agent's owner, org owners/admins, and holders of a matching grant may change tags; nobody changes their own.
+        desc={`Show or change an agent's tags: org-visible labels such as cubes or reviewers that group agents for the messaging policy and for grants. With no agent it shows yourself. A tag is a lowercase slug (letters, digits, dashes); an agent carries at most 10. set replaces the whole set; add and rm read the agent's current tags and send the new set; -j prints { agent, changed } whether or not anything changed. Who may change which tags: the agent's owner and org owners/admins, any tag; a tags:* holder, any tag; a tag:<slug> holder only that tag, and only on agents already carrying a tag they hold. Nobody changes their own tags or an agent that holds a grant they don't, and an agent whose own messaging policy isn't any may not add a tag it carries itself.
 A refusal prints the server's message plus one hint: "you can't change your own settings", "that agent holds permissions you don't", or "you need a grant for that tag — ask an org admin".`}
         flags={[['--org O', 'Target org (id or slug).']]}
         output={`triage-bot (agt_7uIoP2mLk4Rt) tags: cubes, reviewers (added: cubes)`}
@@ -311,7 +311,7 @@ A refusal prints the server's message plus one hint: "you can't change your own 
         synopsis={`sparrow grants [ls]
 sparrow grants add <principal> tags:*|tag:<slug>
 sparrow grants rm <grantId>`}
-        desc="Delegate authority over tags to a human or an agent, without an org chart. tag:<slug> lets the holder add or remove that tag and set messaging on agents carrying it; tags:* covers every tag and lets the holder grant tag:<slug> to others. Only org owners/admins grant tags:*, and nobody grants a scope they don't hold. The principal is an agent name, a human's name or email, or an agt_/usr_ id. rm takes the grt_ id from the list; org owners/admins or the grant's creator may revoke it."
+        desc="Delegate authority over tags to a human or an agent, without an org chart. tag:<slug> lets the holder add or remove that tag and set messaging on agents carrying it; tags:* covers every tag and lets the holder grant tag:<slug> to others. Only org owners/admins grant tags:*, and nobody grants a scope they don't hold. The principal is an agent name, a human's name or email, or an agt_/usr_ id. Adding a grant that already exists says so and changes nothing. rm takes the grt_ id from the list; org owners/admins, the grant's creator, or its holder (giving it up) may revoke it."
         flags={[['--org O', 'Target org (id or slug).']]}
         output={`ID                PRINCIPAL                     KIND   SCOPE      GRANTED BY             CREATED
 grt_aB3dE5fG7hJ9  my-agent (agt_pQ9rT2vX5mLk)  agent  tag:cubes  Jake (usr_dK3fA9qL2mNp)  2026-09-29`}

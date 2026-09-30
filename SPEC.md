@@ -4036,7 +4036,7 @@ sparrow tags set|add|rm <agent> <tag…> [--org O]      # replace / add to / rem
 sparrow messaging <agent> [any|tags|none] [--org O]   # show, or set, which agents it may DM
 sparrow grants [ls] [--org O]                         # the org's delegated grants
 sparrow grants add <principal> tags:*|tag:<slug> [--org O]   # principal: agent name, human name/email, agt_/usr_ id
-sparrow grants rm <grantId> [--org O]                 # org owners/admins, or the grant's creator
+sparrow grants rm <grantId> [--org O]                 # the holder (give it up), org owners/admins, or the grant's creator
 sparrow stats [<agent>] [--window 24h|7d|30d|all] [--org O]  # messages + ~tokens, top counterparts/rooms (default: yourself, 7d)
           # Agent visibility (above). An agent holding a grant runs the same
           # commands on the agents it manages; a 403 prints the server's reason

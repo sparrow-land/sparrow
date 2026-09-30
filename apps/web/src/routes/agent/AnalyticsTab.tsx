@@ -7,7 +7,8 @@ import type {
 } from '@sparrow-land/sdk/types';
 import { api } from '../../lib/client.js';
 import { agentTabPath } from '../../lib/ids.js';
-import { compactNumber, forbiddenMessage } from './access.js';
+import { compactNumber, forbiddenMessage, plural } from './access.js';
+import { CURRENT_LABEL, bucketLabel, bucketSeries, type Bucket, type BucketUnit } from './series.js';
 
 /**
  * The agent page's **Analytics** tab, and the one-line card that opens it from
@@ -95,7 +96,7 @@ export function AnalyticsCard({ orgId, agentId }: { orgId: string; agentId: stri
         <div className="text-sm text-[var(--sparrow-text)]">
           {messages === 0
             ? 'No messages this week'
-            : `${messages.toLocaleString()} messages · ~${compactNumber(totalTokens(data))} tokens this week`}
+            : `${plural(messages, 'message')} · ~${compactNumber(totalTokens(data))} tokens this week`}
         </div>
         {messages > 0 && where ? (
           <div className="mt-px truncate text-xs text-[var(--sparrow-faint)]">
@@ -264,9 +265,10 @@ function AnalyticsBody({ data }: { data: AgentAnalyticsResponse }) {
             </ul>
             {restAgents.length > 0 ? (
               <p className="px-3.5 pb-2 pt-1.5 text-xs text-[var(--sparrow-faint)]">
-                {`+ ${restAgents.length} more ${restAgents.length === 1 ? 'agent' : 'agents'} · ${restAgents
-                  .reduce((n, a) => n + a.messages, 0)
-                  .toLocaleString()} msgs`}
+                {`+ ${restAgents.length} more ${restAgents.length === 1 ? 'agent' : 'agents'} · ${plural(
+                  restAgents.reduce((n, a) => n + a.messages, 0),
+                  'msg',
+                )}`}
               </p>
             ) : null}
           </>
@@ -289,7 +291,7 @@ function AnalyticsBody({ data }: { data: AgentAnalyticsResponse }) {
       </div>
 
       <p className="mt-5 text-xs text-[var(--sparrow-faint)]">
-        {`${data.inRooms.messages.toLocaleString()} messages in rooms, ${data.inDms.messages.toLocaleString()} in DMs. `}
+        {`${plural(data.inRooms.messages, 'message')} in rooms, ${data.inDms.messages.toLocaleString()} in DMs. `}
         Tokens are estimated from message text (characters ÷ 4): the size of the conversation, not
         model spend.
       </p>
@@ -360,45 +362,50 @@ function SmallRank({
   );
 }
 
-/** Axis label for one bucket: hour for 24h, weekday for a week, a date otherwise. */
-function bucketLabel(start: string, hourly: boolean, dense: boolean): string {
-  const d = new Date(start);
-  if (hourly) return d.toLocaleTimeString(undefined, { hour: 'numeric' });
-  if (!dense) return d.toLocaleDateString(undefined, { weekday: 'short' });
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
+const PER: Record<BucketUnit, string> = {
+  hour: 'Messages per hour',
+  day: 'Messages per day',
+  week: 'Messages per week',
+  month: 'Messages per month',
+};
 
 /**
- * The window's series as single-colour bars (hourly for 24h, daily otherwise).
- * The last bucket is still filling, so it renders lighter. Values sit on the
- * bars when there are few enough to read; every bar carries a tooltip.
+ * The window's series as single-colour bars: hourly for 24h, daily for 7d/30d,
+ * and — for a long `all` series — weekly or monthly sums (see `series.ts`), so
+ * the chart never holds more bars than a phone-width panel can fit. The last
+ * bucket is still filling, so it renders lighter. Compact values sit on the
+ * bars when there are few enough to read; every bar carries a full-count tooltip.
  */
 function Bars({ series, hourly }: { series: AgentAnalyticsPoint[]; hourly: boolean }) {
   if (series.length === 0) return null;
-  const max = Math.max(1, ...series.map((p) => p.messages));
-  const dense = series.length > 8;
-  const labelEvery = dense ? Math.ceil(series.length / 6) : 1;
-  const last = series.length - 1;
-  const label = (p: AgentAnalyticsPoint, i: number) =>
-    i === last ? (hourly ? 'Now' : 'Today') : bucketLabel(p.start, hourly, dense);
+  const { unit, points } = bucketSeries(series, hourly);
+  const max = Math.max(1, ...points.map((p) => p.messages));
+  const dense = points.length > 8;
+  const labelEvery = dense ? Math.ceil(points.length / 6) : 1;
+  const last = points.length - 1;
+  const withYear = unit === 'month' && points[0]!.start.slice(0, 4) !== points[last]!.start.slice(0, 4);
+  const label = (p: Bucket, i: number) =>
+    i === last ? CURRENT_LABEL[unit] : bucketLabel(p.start, unit, dense, withYear);
+  const tip = (p: Bucket, i: number) =>
+    `${unit === 'week' && i !== last ? 'Week of ' : ''}${label(p, i)}: ${plural(p.messages, 'message')}`;
+  const gap = dense ? 'gap-0.5' : 'gap-2.5';
   return (
     <div
       role="img"
-      aria-label={hourly ? 'Messages per hour' : 'Messages per day'}
-      className="mt-2 rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-panel)] px-3.5 pb-2 pt-3.5"
+      aria-label={PER[unit]}
+      className="mt-2 overflow-hidden rounded-md border border-[var(--sparrow-border)] bg-[var(--sparrow-panel)] px-3.5 pb-2 pt-3.5"
     >
-      <div
-        className={`flex h-24 items-end border-b border-[var(--sparrow-border)] ${dense ? 'gap-0.5' : 'gap-2.5'}`}
-      >
-        {series.map((p, i) => (
+      <div className={`flex h-24 items-end border-b border-[var(--sparrow-border)] ${gap}`}>
+        {points.map((p, i) => (
           <div
             key={p.start}
-            title={`${label(p, i)}: ${p.messages.toLocaleString()}`}
-            className="flex h-full flex-1 flex-col items-center justify-end"
+            data-bar
+            title={tip(p, i)}
+            className="flex h-full min-w-0 flex-1 flex-col items-center justify-end"
           >
             {!dense ? (
-              <span className="mb-0.5 text-[11px] tabular-nums text-[var(--sparrow-faint)]">
-                {p.messages.toLocaleString()}
+              <span className="mb-0.5 max-w-full truncate text-[11px] tabular-nums text-[var(--sparrow-faint)]">
+                {compactNumber(p.messages)}
               </span>
             ) : null}
             <i
@@ -408,9 +415,9 @@ function Bars({ series, hourly }: { series: AgentAnalyticsPoint[]; hourly: boole
           </div>
         ))}
       </div>
-      <div className={`mt-1.5 flex text-[11px] text-[var(--sparrow-faint)] ${dense ? 'gap-0.5' : 'gap-2.5'}`}>
-        {series.map((p, i) => (
-          <span key={p.start} className="flex-1 overflow-visible whitespace-nowrap text-center">
+      <div className={`mt-1.5 flex text-[11px] text-[var(--sparrow-faint)] ${gap}`}>
+        {points.map((p, i) => (
+          <span key={p.start} className="min-w-0 flex-1 overflow-visible whitespace-nowrap text-center">
             {i % labelEvery === 0 || i === last ? label(p, i) : ''}
           </span>
         ))}
