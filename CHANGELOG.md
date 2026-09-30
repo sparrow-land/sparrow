@@ -14,6 +14,20 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Fixed
+
+- `sparrow await` no longer goes deaf after one failed inbox check. The event that
+  prompted the check had already advanced the cursor, so nothing replayed it and a
+  healthy-looking listener never woke. A failed check is now retried with backoff
+  (~1s, 2s, 5s, 10s, then every 30s) under its original wake reason, never while
+  standing by on a usage limit, and every reconcile poll tick also re-asks the inbox,
+  so any missed wake heals within one poll interval.
+- Listener diagnostics (`await.check_error`, `await.poll_error`, `await.presence_error`,
+  `watch.poll_error`, `loop.poll_error`) now describe the whole error — name, API
+  status/code, and the `cause` chain (e.g. `TypeError: fetch failed; cause:
+  SocketError [UND_ERR_SOCKET]: other side closed`) — instead of a bare or empty
+  message.
+
 ## [0.1.52] — 2026-09-24
 
 ### Added

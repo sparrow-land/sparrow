@@ -176,32 +176,6 @@ describe('migrate: idempotent column adds', () => {
     sqlite.close();
   });
 
-  it('adds agents.messaging (default any) to a DB whose agents predate the messaging policy', () => {
-    const sqlite = new Database(path.join(dir, 'old-messaging.db'));
-    sqlite.exec(`
-      CREATE TABLE agents (
-        id             TEXT PRIMARY KEY,
-        org_id         TEXT NOT NULL,
-        owner_human_id TEXT NOT NULL,
-        name           TEXT NOT NULL,
-        key_hash       TEXT NOT NULL,
-        last_seen_at   TEXT,
-        created_at     TEXT NOT NULL
-      );
-      INSERT INTO agents (id, org_id, owner_human_id, name, key_hash, created_at)
-        VALUES ('agt_old', 'org_1', 'usr_1', 'legacy', 'hash', '2026-01-01T00:00:00Z');
-    `);
-    migrate(sqlite);
-    const row = sqlite.prepare('SELECT messaging FROM agents WHERE id = ?').get('agt_old') as {
-      messaging: string;
-    };
-    // Every existing agent reads today's rule.
-    expect(row.messaging).toBe('any');
-    // Idempotent on a second boot.
-    migrate(sqlite);
-    sqlite.close();
-  });
-
   it('moves pre-split inbound quarantined/rejected rows into email_quarantine, idempotently', () => {
     const sqlite = new Database(path.join(dir, 'split.db'));
     migrate(sqlite);

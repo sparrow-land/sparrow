@@ -30,7 +30,6 @@ import {
 } from './db/schema.js';
 import type { AgentRow, HumanRow } from './db/schema.js';
 import { agentAddress } from './email/addresses.js';
-import { agentTagsOf, messagingOf } from './visibility.js';
 
 /**
  * An agent's DERIVED email address (`<name>@<org-slug><EMAIL_ORG_SUFFIX>`), or
@@ -48,9 +47,8 @@ export function agentEmailAddress(ctx: AppContext, row: AgentRow): string | null
  * Wire shape for an agent principal. `online` is the OR across the agent's open
  * events streams (any room's `/events` or `/me/events`), grace-windowed.
  * `emailAddress` is the derived address or `null` (see {@link agentEmailAddress}).
- * `tags` may be passed in by a caller that batch-loaded them for a list.
  */
-export function toAgent(ctx: AppContext, row: AgentRow, tags?: readonly string[]): Agent {
+export function toAgent(ctx: AppContext, row: AgentRow): Agent {
   return {
     id: row.id,
     name: row.name,
@@ -61,11 +59,6 @@ export function toAgent(ctx: AppContext, row: AgentRow, tags?: readonly string[]
     sharing: (row.sharing as AgentSharingMode) ?? 'selected',
     // Org-visible label only; the private instructions never ride the wire Agent.
     roleTitle: row.roleTitle ?? null,
-    // Agent visibility: the org-visible tags (sorted) and the messaging policy.
-    // Lists pass the tags they batch-loaded (`agentTagsByAgent`); a single agent
-    // reads its own.
-    tags: tags ? [...tags] : agentTagsOf(ctx.db, row.id),
-    messaging: messagingOf(row),
     createdAt: row.createdAt,
   };
 }
@@ -413,7 +406,6 @@ export function insertAgent(
     roleTitle: null,
     roleInstructions: null,
     roleUpdatedAt: null,
-    messaging: 'any',
     lastSeenAt: null,
     lastClientVersion: null,
     createdAt: ts,

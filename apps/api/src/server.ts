@@ -28,7 +28,6 @@ import { registerOrgRoutes } from './routes/orgs.js';
 import { registerInviteRoutes } from './routes/invites.js';
 import { registerEnrollmentRoutes } from './routes/enrollment.js';
 import { registerAgentRoutes } from './routes/agents.js';
-import { registerVisibilityRoutes } from './routes/visibility.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerConfigRoutes } from './routes/config.js';
 import { registerOnboardingRoutes } from './routes/onboarding.js';
@@ -68,16 +67,8 @@ function errorEnvelope(
   code: ErrorResponse['error']['code'],
   message: string,
   docs?: string,
-  reason?: string,
 ): ErrorResponse {
-  return {
-    error: {
-      code,
-      message,
-      ...(docs ? { docs } : {}),
-      ...(reason !== undefined ? { reason } : {}),
-    },
-  };
+  return { error: docs ? { code, message, docs } : { code, message } };
 }
 
 function sendError(reply: FastifyReply, status: number, body: ErrorResponse): void {
@@ -525,7 +516,7 @@ export function buildServer(config: ServerConfig): FastifyInstance {
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ApiError) {
       const docs = error.statusCode >= 400 && error.statusCode < 500 ? docsForRequest(request) : undefined;
-      sendError(reply, error.statusCode, errorEnvelope(error.code, error.message, docs, error.reason));
+      sendError(reply, error.statusCode, errorEnvelope(error.code, error.message, docs));
       return;
     }
     const status = (error as { statusCode?: number }).statusCode;
@@ -610,7 +601,6 @@ export function buildServer(config: ServerConfig): FastifyInstance {
   registerInviteRoutes(app, ctx);
   registerEnrollmentRoutes(app, ctx);
   registerAgentRoutes(app, ctx);
-  registerVisibilityRoutes(app, ctx);
   registerAdminRoutes(app, ctx);
   registerConfigRoutes(app, ctx);
   registerRoomRoutes(app, ctx);

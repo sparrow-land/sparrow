@@ -6841,6 +6841,311 @@ describe('sparrow CLI — watch/loop stream health', () => {
       await stub.close();
     }
   });
+
+  /* ------------- a failed inbox check must never leave await deaf -------------
+   * Field report, CLI 0.1.52: the inbox read triggered by a `message.new` hung
+   * ~30 s and failed. The event had already advanced the cursor, so the
+   * reconcile poll never replayed it, and nothing asked again: a heartbeating,
+   * "healthy" listener that never woke. A fresh `await` woke instantly on the
+   * same unread message. */
+  const waitingItem = (id: string, preview: string) => ({
+    type: 'chat.message',
+    id,
+    from: sampleMessage.from,
+    kind: 'dm',
+    subject: null,
+    preview,
+    truncated: false,
+    attachmentCount: 0,
+    status: 'received',
+    createdAt: sampleMessage.createdAt,
+    room: sampleRoom,
+  });
+  /** The JSON diagnostics await wrote on stderr (`--json`). */
+  const stderrLines = (cap: Capture): any[] =>
+    cap
+      .err()
+      .split('\n')
+      .filter((l) => l.startsWith('{'))
+      .map((l) => JSON.parse(l));
+
+  it('await: a FAILED inbox check after message.new is retried, and still wakes on that message', async () => {
+    let inboxChecks = 0;
+    let waiting: unknown = null;
+    const stub = await listen((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/inbox')) {
+        inboxChecks += 1;
+        req.resume();
+        if (inboxChecks === 2) {
+          // The first read after the event: the one that failed in the field.
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: 'internal', message: 'upstream read timed out' } }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ items: waiting ? [waiting] : [], nextCursor: null }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        res.writeHead(200, SSE_HEAD);
+        res.write(': open\n\n');
+        setTimeout(() => {
+          waiting = waitingItem('msg_after_failed_check', 'the message the failed check missed');
+          res.write(`id: 7\nevent: message.new\ndata: ${JSON.stringify(messageNewData('x'))}\n\n`);
+        }, 50);
+        return; // silent from here on: no further event will ever prompt a re-ask
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const cap = capture();
+      const started = Date.now();
+      const code = await runCli(
+        // --poll-seconds 0: the RETRY alone must heal this, not the poll.
+        ['await', '--timeout', '8', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0', '--json'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub' },
+        cap.io,
+      );
+      expect(code).toBe(0);
+      const wake = JSON.parse(cap.out().trim());
+      expect(wake.type).toBe('await.item');
+      expect(wake.reason).toBe('message.new'); // the ORIGINAL reason survives the retry
+      expect(wake.item.id).toBe('msg_after_failed_check');
+      expect(Date.now() - started).toBeLessThan(5000); // first retry is ~1 s, not a timeout
+      expect(inboxChecks).toBeGreaterThanOrEqual(3); // preflight, the failed read, the retry
+      const errs = stderrLines(cap).filter((l) => l.type === 'await.check_error');
+      expect(errs).toHaveLength(1);
+      expect(typeof errs[0].message).toBe('string');
+      expect(errs[0].message).toContain('500');
+      expect(errs[0].message).toContain('upstream read timed out');
+    } finally {
+      await stub.close();
+    }
+  }, 15_000);
+
+  it('await: repeated dropped inbox reads back off and retry until one succeeds; the error text names the cause', async () => {
+    let inboxChecks = 0;
+    let waiting: unknown = null;
+    const stub = await listen((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/inbox')) {
+        inboxChecks += 1;
+        if (inboxChecks >= 2 && inboxChecks <= 4) {
+          req.socket.destroy(); // dropped connection: `TypeError: fetch failed` + a cause
+          return;
+        }
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ items: waiting ? [waiting] : [], nextCursor: null }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        res.writeHead(200, SSE_HEAD);
+        res.write(': open\n\n');
+        setTimeout(() => {
+          waiting = waitingItem('msg_after_drops', 'survived three dropped reads');
+          res.write(`id: 9\nevent: message.new\ndata: ${JSON.stringify(messageNewData('x'))}\n\n`);
+        }, 50);
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const cap = capture();
+      const code = await runCli(
+        ['await', '--timeout', '8', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0', '--json'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub', SPARROW_AWAIT_CHECK_RETRY_MS: '40,80' },
+        cap.io,
+      );
+      expect(code).toBe(0);
+      const wake = JSON.parse(cap.out().trim());
+      expect(wake.reason).toBe('message.new');
+      expect(wake.item.id).toBe('msg_after_drops');
+      expect(inboxChecks).toBe(5);
+      const errs = stderrLines(cap).filter((l) => l.type === 'await.check_error');
+      expect(errs).toHaveLength(3);
+      for (const e of errs) {
+        expect(typeof e.message).toBe('string');
+        // Not the bare "fetch failed": the cause chain is what an operator needs.
+        expect(e.message).toMatch(/fetch failed/);
+        expect(e.message).toMatch(/cause/);
+        expect(e.message).toMatch(/UND_ERR_SOCKET|ECONNRESET|other side closed|socket hang up/i);
+      }
+    } finally {
+      await stub.close();
+    }
+  }, 15_000);
+
+  it('await: a missed wake heals on the next reconcile poll tick (the tick asks the inbox too)', async () => {
+    // A `message.new` whose inbox check SUCCEEDED but saw nothing yet (the item
+    // became visible a moment later, with no further event). No retry applies —
+    // the check did not fail — so only the poll tick can notice it.
+    let inboxChecks = 0;
+    let waiting: unknown = null;
+    const stub = await listen((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/events/log')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ events: [], latest: 11 }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/inbox')) {
+        inboxChecks += 1;
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ items: waiting ? [waiting] : [], nextCursor: null }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        res.writeHead(200, SSE_HEAD);
+        res.write(': open\n\n');
+        res.write(`id: 11\nevent: message.new\ndata: ${JSON.stringify(messageNewData('x'))}\n\n`);
+        setTimeout(() => {
+          waiting = waitingItem('msg_visible_late', 'visible after its event was checked');
+        }, 300);
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const cap = capture();
+      const code = await runCli(
+        ['await', '--timeout', '6', '--stale-seconds', '0', '--max-stream-age', '0', '--json'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub', SPARROW_RECONCILE_POLL_MS: '150' },
+        cap.io,
+      );
+      expect(code).toBe(0);
+      const wake = JSON.parse(cap.out().trim());
+      expect(wake.reason).toBe('waiting');
+      expect(wake.item.id).toBe('msg_visible_late');
+    } finally {
+      await stub.close();
+    }
+  }, 15_000);
+
+  for (const [when, clearAfterMs] of [
+    ['cleared after standby began (the resume re-asks)', 900],
+    // The race: the retry sees the marker and closes the stream, but the marker
+    // is gone before the runner's gate looks — standby is never entered, so no
+    // resume re-ask happens. Only a retry that was KEPT (not dropped) wakes.
+    ['cleared before standby was entered (the kept retry asks)', 105],
+  ] as const) {
+    it(`await: a check retry never touches the network while a usage-limit marker stands — ${when}`, async () => {
+      const blockedDir = path.join(stateDir, 'blocked');
+      const marker = path.join(blockedDir, '2026-retry-marker.json');
+      let inboxChecks = 0;
+      let checksWhileBlocked = -1;
+      let eventConns = 0;
+      const item = waitingItem('msg_after_standby', 'found on resume, not by the retry');
+      const stub = await listen((req, res) => {
+        const u = req.url!;
+        if (u.startsWith('/api/v1/me/inbox')) {
+          inboxChecks += 1;
+          req.resume();
+          if (inboxChecks === 2) {
+            // The failed check — and the session hits its usage limit right now.
+            fs.mkdirSync(blockedDir, { recursive: true });
+            fs.writeFileSync(
+              marker,
+              `${JSON.stringify({ version: 1, reason: 'rate_limit', at: new Date().toISOString(), session: 's' })}\n`,
+            );
+            checksWhileBlocked = inboxChecks;
+            setTimeout(() => {
+              checksWhileBlocked = inboxChecks - checksWhileBlocked; // asks made while blocked
+              fs.rmSync(blockedDir, { recursive: true, force: true });
+            }, clearAfterMs);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { code: 'internal', message: 'boom' } }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ items: inboxChecks === 1 ? [] : [item], nextCursor: null }));
+          return;
+        }
+        if (u.startsWith('/api/v1/me/presence')) {
+          req.resume();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{}');
+          return;
+        }
+        if (u.startsWith('/api/v1/me/events')) {
+          eventConns += 1;
+          res.writeHead(200, SSE_HEAD);
+          res.write(': open\n\n');
+          if (eventConns === 1) {
+            res.write(`id: 7\nevent: message.new\ndata: ${JSON.stringify(messageNewData('x'))}\n\n`);
+          }
+          return;
+        }
+        res.writeHead(404).end();
+      });
+      try {
+        const cap = capture();
+        const code = await runCli(
+          ['await', '--timeout', '8', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0', '--json'],
+          {
+            ...env,
+            SPARROW_SERVER: stub.url,
+            SPARROW_TOKEN: 'agk_stub',
+            SPARROW_AWAIT_CHECK_RETRY_MS: '100',
+            SPARROW_BLOCKED_POLL_MS: '1500',
+          },
+          cap.io,
+        );
+        expect(code).toBe(0);
+        expect(checksWhileBlocked).toBe(0); // the retry fired inside the block and asked nothing
+        const wake = JSON.parse(cap.out().trim());
+        // Found by the resume's re-ask (`waiting`) or — when the marker cleared
+        // before standby was ever entered — by the retry that was kept armed.
+        expect(['waiting', 'message.new']).toContain(wake.reason);
+        expect(wake.item.id).toBe('msg_after_standby');
+      } finally {
+        fs.rmSync(blockedDir, { recursive: true, force: true });
+        await stub.close();
+      }
+    }, 15_000);
+  }
+
+  it('await: --poll-seconds 0 still means no poll — no inbox self-heal ticks either', async () => {
+    let inboxChecks = 0;
+    let logReads = 0;
+    const stub = await listen((req, res) => {
+      const u = req.url!;
+      if (u.startsWith('/api/v1/me/events/log')) {
+        logReads += 1;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ events: [], latest: 0 }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/inbox')) {
+        inboxChecks += 1;
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ items: [], nextCursor: null }));
+        return;
+      }
+      if (u.startsWith('/api/v1/me/events')) {
+        res.writeHead(200, SSE_HEAD);
+        res.write(': open\n\n');
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    try {
+      const cap = capture();
+      const code = await runCli(
+        ['await', '--timeout', '1', '--stale-seconds', '0', '--max-stream-age', '0', '--poll-seconds', '0'],
+        { ...env, SPARROW_SERVER: stub.url, SPARROW_TOKEN: 'agk_stub', SPARROW_RECONCILE_POLL_MS: '50' },
+        cap.io,
+      );
+      expect(code).toBe(2);
+      expect(logReads).toBe(0);
+      expect(inboxChecks).toBe(1); // the pre-stream look, and nothing on a clock
+    } finally {
+      await stub.close();
+    }
+  });
 });
 
 /* ================================================================== *

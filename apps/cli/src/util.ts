@@ -38,6 +38,68 @@ export function envSwitchedOn(value: string | undefined): boolean {
 
 export const CLI_CLIENT_IDENT = `sparrow-cli/${clientBuildVersion()}`;
 
+/** How deep {@link describeError} follows `.cause` before it stops. */
+const DESCRIBE_ERROR_MAX_DEPTH = 5;
+
+/**
+ * One line that says what actually went wrong — never empty.
+ *
+ * `String(e?.message ?? e)` is not enough for a network failure: undici's fetch
+ * throws `TypeError: fetch failed` and hides the real reason (a headers timeout,
+ * a reset socket, every address refusing) in `.cause`, and some errors carry no
+ * message at all. So: the error's name and message, an `ApiError`'s status and
+ * code, any errno-style `code` the message does not already carry, the members
+ * of an `AggregateError`, and then each link of the cause chain (bounded, and
+ * cycle-safe). Falls back to the constructor name, never to `''`.
+ */
+export function describeError(e: unknown): string {
+  const seen = new Set<unknown>();
+  const one = (x: unknown): string => {
+    if (x instanceof ApiError) {
+      const head = `ApiError ${x.status} ${x.code}`;
+      return x.message ? `${head}: ${x.message}` : head;
+    }
+    if (x instanceof Error) {
+      const ctorName = (x.constructor as { name?: string } | undefined)?.name;
+      const name = x.name || ctorName || 'Error';
+      const code = (x as { code?: unknown }).code;
+      const codeText =
+        (typeof code === 'string' || typeof code === 'number') && !x.message.includes(String(code))
+          ? ` [${String(code)}]`
+          : '';
+      let text = x.message ? `${name}${codeText}: ${x.message}` : `${name}${codeText}`;
+      if (x instanceof AggregateError && Array.isArray(x.errors) && x.errors.length > 0) {
+        const members = x.errors.slice(0, 3).map((m) => one(m));
+        if (x.errors.length > 3) members.push(`+${x.errors.length - 3} more`);
+        text += ` {${members.join('; ')}}`;
+      }
+      return text;
+    }
+    if (typeof x === 'string') return x || '(empty error string)';
+    if (x !== null && typeof x === 'object') {
+      try {
+        const json = JSON.stringify(x);
+        if (json && json !== '{}') return json;
+      } catch {
+        /* fall through */
+      }
+      return (x.constructor as { name?: string } | undefined)?.name || 'Object';
+    }
+    return String(x);
+  };
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let depth = 0; depth < DESCRIBE_ERROR_MAX_DEPTH; depth++) {
+    seen.add(cur);
+    parts.push(one(cur));
+    if (!(cur instanceof Error)) break;
+    const cause = (cur as { cause?: unknown }).cause;
+    if (cause === undefined || seen.has(cause)) break;
+    cur = cause;
+  }
+  return parts.join('; cause: ');
+}
+
 const CONTENT_TYPES: Record<string, string> = {
   '.txt': 'text/plain',
   '.md': 'text/markdown',

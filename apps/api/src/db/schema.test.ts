@@ -51,10 +51,6 @@ describe('fresh v3 schema', () => {
       'email_attachments',
       // The extra per-recipient wire Message-IDs one outbound email is known by.
       'email_wire_ids',
-      // Agent visibility: tags, delegated grants, hourly message counters.
-      'agent_tags',
-      'grants',
-      'message_stats',
     ]) {
       expect(names.has(t)).toBe(true);
     }

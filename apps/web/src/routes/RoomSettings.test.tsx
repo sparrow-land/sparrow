@@ -59,8 +59,6 @@ const AGENT: VisibilityAgent = {
     lastSeenAt: null,
     sharing: 'room-members',
     roleTitle: null,
-    tags: [],
-    messaging: 'any',
     createdAt: '2026-08-20T10:00:00Z',
   },
   owner: { id: 'usr_self', displayName: 'Jake' },

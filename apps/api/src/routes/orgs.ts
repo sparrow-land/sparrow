@@ -23,7 +23,6 @@ import {
   type OrgRole,
 } from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
-import { agentTagsByAgent, messagingOf } from '../visibility.js';
 import { agents, humans, orgs, orgMemberships } from '../db/schema.js';
 import { agentEmailAddress } from '../agent-helpers.js';
 import { outboundWebhookUrl } from '../email/addresses.js';
@@ -376,15 +375,12 @@ export function registerOrgRoutes(app: FastifyInstance, ctx: AppContext): void {
         .where(eq(agents.orgId, request.params.orgId))
         .all()
         .sort((a, b) => a.agent.createdAt.localeCompare(b.agent.createdAt));
-      const tagsByAgent = agentTagsByAgent(ctx.db, rows.map((r) => r.agent.id));
       const response: ListOrgAgentsResponse = {
         items: rows.map((r) => ({
           agent: {
             id: r.agent.id,
             name: r.agent.name,
             emailAddress: agentEmailAddress(ctx, r.agent),
-            tags: tagsByAgent.get(r.agent.id) ?? [],
-            messaging: messagingOf(r.agent),
             createdAt: r.agent.createdAt,
           },
           owner: { id: r.owner.id, displayName: r.owner.displayName },

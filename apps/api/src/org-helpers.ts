@@ -19,7 +19,6 @@ import {
 import type { AppContext } from './context.js';
 import type { DB } from './db/index.js';
 import { agents, humans, members, orgs, orgMemberships, rooms } from './db/schema.js';
-import { deleteHumanGrants } from './visibility.js';
 import type { HumanRow, OrgRow, OrgMembershipRow } from './db/schema.js';
 import { conflict, forbidden, notFound } from './errors.js';
 
@@ -335,8 +334,6 @@ export function removeOrgMembership(
     tx.delete(orgMemberships)
       .where(and(eq(orgMemberships.orgId, orgId), eq(orgMemberships.humanId, targetId)))
       .run();
-    // Delegated authority is org membership's: a departing human's grants go.
-    deleteHumanGrants(tx, orgId, targetId);
     for (const roomId of orgRoomIds) {
       tx.delete(members)
         .where(

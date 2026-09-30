@@ -86,7 +86,6 @@ import {
   type TurnBasedRuntime,
 } from '@sparrow/skill';
 import { codexAwaitPreflight } from './await-preflight.js';
-import { FORBIDDEN_HINTS, registerVisibilityCommands } from './visibility.js';
 import {
   clearPending,
   loadPending,
@@ -105,6 +104,7 @@ import {
   buildClient,
   buildAttachments,
   buildEmailAttachments,
+  describeError,
   dmHandle,
   parseInviteUrl,
   resolveAgent,
@@ -343,6 +343,24 @@ const MAX_STREAM_AGE_SECONDS_DEFAULT = 300;
  * on this timer while streaming or standing by. A local `readdir`, no network.
  */
 const BLOCKED_POLL_MS_DEFAULT = 30_000;
+
+/**
+ * The backoff between re-asks after an `await` inbox check FAILS: ≈1 s, 2 s,
+ * 5 s, 10 s, then every 30 s until one succeeds (which resets it). Without it a
+ * single failed read left the listener deaf — the event that prompted the check
+ * had already advanced the cursor, so nothing would ever replay it (field
+ * report, 0.1.52). `SPARROW_AWAIT_CHECK_RETRY_MS` (a comma list of ms; the last
+ * entry repeats) is a hidden override for tests.
+ */
+const AWAIT_CHECK_RETRY_MS_DEFAULT: readonly number[] = [1_000, 2_000, 5_000, 10_000, 30_000];
+
+function awaitCheckRetryScheduleOf(env: Env): readonly number[] {
+  const parsed = (env.SPARROW_AWAIT_CHECK_RETRY_MS ?? '')
+    .split(',')
+    .map((v) => Number.parseInt(v.trim(), 10))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  return parsed.length > 0 ? parsed : AWAIT_CHECK_RETRY_MS_DEFAULT;
+}
 
 /**
  * How often an `await` armed under Claude Code re-asks "is the session that
@@ -780,6 +798,15 @@ function startReconcilePoll(params: {
    */
   onSeed: (latest: string) => void;
   onError: (e: unknown) => void;
+  /**
+   * Runs once after every tick that actually ran (success OR failure, never
+   * after an abort, never for a tick skipped because the previous one was still
+   * in flight). `await` uses it to re-ask its inbox on this cadence, so a wake
+   * missed for ANY reason — a failed check whose event already advanced the
+   * cursor, an item not yet visible when its event was checked — heals within
+   * one interval. No poll (`--poll-seconds 0`), no ticks.
+   */
+  onTick?: () => void;
 }): () => void {
   const { client, pollMs, timeoutMs, signal } = params;
   if (pollMs === undefined) return () => {};
@@ -841,6 +868,7 @@ function startReconcilePoll(params: {
     } finally {
       running = false;
     }
+    if (!signal.aborted) params.onTick?.();
   };
   const timer = setInterval(() => void tick(), pollMs);
   (timer as { unref?: () => void }).unref?.();
@@ -2386,13 +2414,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const err = e as { code?: unknown; message?: string };
     const code = e instanceof ApiError ? String(e.code) : e instanceof CliError ? 'cli_error' : 'error';
     const message = err?.message ?? String(e);
-    // A 403 refusal from the agent-visibility guard rails carries a `reason`;
-    // add one plain hint for the ones a person can act on.
-    const reason = e instanceof ApiError && e.status === 403 ? e.reason : undefined;
-    const hint = reason ? FORBIDDEN_HINTS[reason] : undefined;
-    if (ctx.json) {
-      io.err(`${JSON.stringify({ error: { code, message, ...(reason ? { reason } : {}), ...(hint ? { hint } : {}) } })}\n`);
-    } else io.err(`Error: ${message}\n${hint ? `Hint: ${hint}\n` : ''}`);
+    if (ctx.json) io.err(`${JSON.stringify({ error: { code, message } })}\n`);
+    else io.err(`Error: ${message}\n`);
   };
 
   const action =
@@ -3082,9 +3105,6 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         );
       }),
     );
-
-  /* ================ tags / messaging / grants / stats ================ */
-  registerVisibilityCommands({ program, env, withOrg, action, print, buildClient });
 
   /* ============================ members ============================ */
   withRoom(program.command('members'))
@@ -4789,7 +4809,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       try {
         await client.setPresence(turnSeconds);
       } catch (e) {
-        const message = String((e as Error)?.message ?? e);
+        const message = describeError(e);
         note(
           { type: 'await.presence_error', turnSeconds, message },
           `[await] presence heartbeat failed (${message}) — you may read offline while you work`,
@@ -5208,9 +5228,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       try {
         await client.setPresence(0);
       } catch (e) {
+        const message = describeError(e);
         lifecycle(
-          { type: 'await.presence_error', turnSeconds: 0, message: String((e as Error)?.message ?? e) },
-          `[await] could not clear presence (${String((e as Error)?.message ?? e)}) — it expires within ${PRESENCE_TTL_MAX}s`,
+          { type: 'await.presence_error', turnSeconds: 0, message },
+          `[await] could not clear presence (${message}) — it expires within ${PRESENCE_TTL_MAX}s`,
         );
       }
     };
@@ -5452,6 +5473,39 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     let checking = false;
     let recheck = false;
     let pending: Promise<void> | undefined;
+    /* A FAILED CHECK IS RETRIED, NOT FORGOTTEN. The event that prompted it has
+     * already advanced the cursor, so the reconcile poll will never replay it:
+     * without a retry, one failed read left a heartbeating, green listener that
+     * never woke (field report, 0.1.52). One timer, re-armed (never stacked),
+     * backing off along the schedule; a successful check resets it. */
+    const checkRetryMs = awaitCheckRetryScheduleOf(env);
+    let checkRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    let checkRetryAttempt = 0;
+    const clearCheckRetry = (): void => {
+      if (checkRetryTimer !== undefined) clearTimeout(checkRetryTimer);
+      checkRetryTimer = undefined;
+    };
+    const armCheckRetry = (reason: string): void => {
+      clearCheckRetry();
+      const ms = checkRetryMs[Math.min(checkRetryAttempt, checkRetryMs.length - 1)]!;
+      checkRetryAttempt += 1;
+      checkRetryTimer = setTimeout(() => {
+        checkRetryTimer = undefined;
+        if (emitted || controller.signal.aborted) return;
+        // NO NETWORK WHILE BLOCKED: standing by (or a marker just landed) asks
+        // nothing — but the retry is KEPT, not dropped. The resume's
+        // `reconcileOnResume` usually re-asks first, yet a marker cleared before
+        // the runner's gate ever entered standby never triggers a resume; a
+        // dropped retry would be the same deafness again.
+        if (blockedSinceAsking()) {
+          checkBlockedWhileStreaming();
+          armCheckRetry(reason);
+          return;
+        }
+        consider(reason); // the ORIGINAL reason: this is the same wake, late
+      }, ms);
+      (checkRetryTimer as unknown as { unref?: () => void }).unref?.();
+    };
     const consider = (reason: string): void => {
       if (emitted || controller.signal.aborted) return;
       if (checking) {
@@ -5464,6 +5518,10 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           do {
             recheck = false;
             const decision = await nextWake();
+            // The queue answered: any pending retry is moot, and the next
+            // failure starts the backoff from the beginning again.
+            clearCheckRetry();
+            checkRetryAttempt = 0;
             // RECHECK POINT 2 — an event or poll tick asked the queue and a
             // marker arrived mid-flight. Drop the answer and stand by.
             if (blockedSinceAsking()) {
@@ -5484,12 +5542,14 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
           // already be over (refused claim, or a signal).
           if (runIsOver()) return;
           if (terminateForUpgrade(e)) return;
-          // A transient inbox read must never end the wait — the next event or
-          // poll tick asks again.
+          // A transient inbox read must never end the wait — and must never be
+          // the LAST word either: re-ask on the backoff (and on every poll tick).
+          const message = describeError(e);
           note(
-            { type: 'await.check_error', message: String((e as Error)?.message ?? e) },
-            `[await] inbox check failed (${String((e as Error)?.message ?? e)}) — still waiting`,
+            { type: 'await.check_error', message },
+            `[await] inbox check failed (${message}) — still waiting`,
           );
+          armCheckRetry(reason);
         } finally {
           checking = false;
         }
@@ -5690,10 +5750,23 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
         onError: (e) => {
           if (runIsOver()) return;
           if (terminateForUpgrade(e)) return;
+          const message = describeError(e);
           lifecycle(
-            { type: 'await.poll_error', message: String((e as Error)?.message ?? e) },
-            `[await] reconcile poll failed (${String((e as Error)?.message ?? e)})`,
+            { type: 'await.poll_error', message },
+            `[await] reconcile poll failed (${message})`,
           );
+        },
+        // SELF-HEAL: every tick also asks the queue, so a wake missed for any
+        // reason is found within one interval. `waiting` is the pre-stream
+        // look's reason and means the same: it was already queued when asked.
+        // Never while blocked (the poll is stopped in standby anyway; this
+        // covers a marker that landed since the last check).
+        onTick: () => {
+          if (blockedSinceAsking()) {
+            checkBlockedWhileStreaming();
+            return;
+          }
+          consider('waiting');
         },
       });
     restartPoll = (): void => {
@@ -5746,6 +5819,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       if (batchTimer !== undefined) clearTimeout(batchTimer);
+      clearCheckRetry();
       clearInterval(blockedTimer);
       stopPoll();
       // NOT the signals: the hand-off below still has to answer them, and a
@@ -6081,7 +6155,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
                 onError: (e) => {
                   if (ctx.json) {
                     io.out(
-                      `${JSON.stringify({ type: 'watch.poll_error', message: String((e as Error)?.message ?? e) })}\n`,
+                      `${JSON.stringify({ type: 'watch.poll_error', message: describeError(e) })}\n`,
                     );
                   }
                 },
@@ -6381,7 +6455,7 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
                 onError: (e) => {
                   if (ctx.json) {
                     io.err(
-                      `${JSON.stringify({ type: 'loop.poll_error', message: String((e as Error)?.message ?? e) })}\n`,
+                      `${JSON.stringify({ type: 'loop.poll_error', message: describeError(e) })}\n`,
                     );
                   }
                 },

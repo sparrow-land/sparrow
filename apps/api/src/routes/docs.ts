@@ -52,14 +52,6 @@ export const DOCS_BY_ROUTE: Record<string, string> = {
   '/api/v1/orgs/:orgId/agent-dms/:roomId/messages': 'me/dms',
   '/api/v1/orgs/:orgId/agent-dms/:roomId/sever': 'me/dms',
   '/api/v1/orgs/:orgId/agent-dms/:roomId/allow': 'me/dms',
-  // Agent visibility: tags, messaging, grants, analytics. Their 403s carry an
-  // `error.reason` (self / outranked / grant_required) the page explains.
-  '/api/v1/orgs/:orgId/agents/:agentId': 'orgs/agents',
-  '/api/v1/orgs/:orgId/agents/:agentId/tags': 'orgs/agents',
-  '/api/v1/orgs/:orgId/agents/:agentId/messaging': 'orgs/agents',
-  '/api/v1/orgs/:orgId/agents/:agentId/analytics': 'orgs/agents',
-  '/api/v1/orgs/:orgId/grants': 'orgs/agents',
-  '/api/v1/orgs/:orgId/grants/:grantId': 'orgs/agents',
   // Org room governance (list + archive/restore) lives on the orgs page.
   '/api/v1/orgs/:orgId/rooms': 'orgs',
   '/api/v1/orgs/:orgId/rooms/:roomId': 'orgs',
