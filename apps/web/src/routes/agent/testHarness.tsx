@@ -63,6 +63,10 @@ export interface AgentPageOptions {
   owner?: HumanRef;
   /** The visibility entry's owner-only mail count (`null` = not countable here). */
   emailUnreadCount?: number | null;
+  /** Extra fields merged into the visibility entry's agent (e.g. `tags`, `messaging`). */
+  agent?: Record<string, unknown>;
+  /** Further visibility entries the caller can see (other agents in the org). */
+  others?: unknown[];
   /** Surface-specific routes; return null to fall through to the defaults. */
   handle?: (url: string, init: RequestInit | undefined) => Response | null;
 }
@@ -108,6 +112,7 @@ export function renderAgentPage(
       lastSeenAt: '2026-08-31T11:00:00Z',
       sharing: 'selected',
       createdAt: '2026-08-01T00:00:00Z',
+      ...opts.agent,
     },
     owner: opts.owner ?? { id: 'usr_1', displayName: 'Jake' },
     sharedBy: opts.sharedBy ?? null,
@@ -146,7 +151,7 @@ export function renderAgentPage(
       return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
     }
     if (url.includes(`/orgs/${ORG_ID}/me/humans`)) return json({ items: [] });
-    if (url.includes(`/orgs/${ORG_ID}/me/agents`)) return json({ items: [entry] });
+    if (url.includes(`/orgs/${ORG_ID}/me/agents`)) return json({ items: [entry, ...(opts.others ?? [])] });
     if (url.includes(`/orgs/${ORG_ID}/enrollments`)) return json({ items: [] });
     if (url.includes('/me/room-invitations')) return json({ items: [] });
     if (url.includes('/me/rooms')) return json({ items: [] });

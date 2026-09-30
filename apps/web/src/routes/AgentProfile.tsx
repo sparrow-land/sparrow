@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type {
+  Agent,
+  AgentMessagingPolicy,
   AgentRoomMembership,
+  Grant,
   AgentShare,
   AgentSharingMode,
   CreateAgentResponse,
@@ -23,9 +26,13 @@ import { Terminal } from '../components/Terminal.js';
 import { ActivityTab } from './agent/ActivityTab.js';
 import { EmailTab } from './agent/EmailTab.js';
 import { useContactBook } from './agent/contacts.js';
+import { AccessTab } from './agent/AccessTab.js';
+import { AnalyticsCard, AnalyticsTab } from './agent/AnalyticsTab.js';
+import { TagChips } from './agent/TagChip.js';
+import { forbiddenMessage, hasAuthority } from './agent/access.js';
 
-/** The agent page's three sections. Overview is the default and always renders. */
-type AgentTab = 'overview' | 'activity' | 'email';
+/** The agent page's sections. Overview is the default and always renders. */
+type AgentTab = 'overview' | 'access' | 'analytics' | 'activity' | 'email';
 
 /**
  * Agent profile (`/org/:orgId/agents/:agentId`) — nested under the app shell, so
@@ -50,6 +57,13 @@ type AgentTab = 'overview' | 'activity' | 'email';
  * does not admit a reader, so the tabs render for the OWNER or an org
  * owner/admin. The server is the authority (a caller who fails every test gets
  * `404`); this is render gating, and discovery is never gated.
+ *
+ * Agent visibility (SPEC.md) adds **Access** (tags, messaging policy, who may
+ * change them, grants) and **Analytics** — for viewers with AUTHORITY over the
+ * agent: its owner, org owners/admins, and holders of a grant covering one of
+ * its tags (`GET /grants` is readable by any member). Tag chips sit in the
+ * header for everyone; Overview gains a one-line analytics card for viewers
+ * with authority. A teammate without authority sees no more tabs than before.
  */
 export function AgentProfile() {
   const { agentId: bareAgentId = '' } = useParams<{ agentId: string }>();
@@ -75,16 +89,82 @@ export function AgentProfile() {
   const isOwner = !!entry && entry.sharedBy === null && entry.owner.id === auth.user?.id;
   const canReadActivity = isOwner || isAdmin;
 
+  // Delegated grants (any member may read them) — they decide whether a plain
+  // member holds authority over this agent through one of its tags.
+  const [grants, setGrants] = useState<Grant[]>([]);
+  const reloadGrants = useCallback(() => {
+    api
+      .listGrants(orgId)
+      .then(setGrants)
+      .catch(() => setGrants([]));
+  }, [orgId]);
+  useEffect(() => reloadGrants(), [reloadGrants]);
+
+  // A tags/messaging PUT answers with the updated agent; hold it until the
+  // visibility list catches up (the reload that follows every change), so the
+  // header and preview never flash the old values.
+  const [patch, setPatch] = useState<{
+    agentId: string;
+    base: string;
+    tags: string[];
+    messaging: AgentMessagingPolicy;
+  } | null>(null);
+
+  // A viewer who is neither the owner nor an org owner/admin reads the agent's
+  // CURRENT tags and messaging from `GET /orgs/:orgId/agents/:agentId` (any
+  // member may read it; the governance list is admin-only). Owners and admins
+  // use their visibility entry. A failed read falls back to the entry.
+  const readsOrgAgent = !!entry && !isOwner && !isAdmin;
+  const [orgAgent, setOrgAgent] = useState<Agent | null>(null);
+  const [orgAgentTick, setOrgAgentTick] = useState(0);
+  useEffect(() => {
+    if (!readsOrgAgent) {
+      setOrgAgent(null);
+      return;
+    }
+    let alive = true;
+    api
+      .getOrgAgent(orgId, agentId)
+      .then((res) => {
+        if (alive) setOrgAgent(res.agent);
+      })
+      .catch(() => {
+        if (alive) setOrgAgent(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [readsOrgAgent, orgId, agentId, orgAgentTick]);
+  const base =
+    readsOrgAgent && orgAgent?.id === agentId
+      ? { tags: orgAgent.tags, messaging: orgAgent.messaging }
+      : { tags: entry?.agent.tags ?? [], messaging: entry?.agent.messaging ?? 'any' };
+
+  const liveKey = entry ? JSON.stringify([base.tags, base.messaging]) : '';
+  const live =
+    entry && patch && patch.agentId === entry.agent.id && patch.base === liveKey ? patch : null;
+  const tags = live ? live.tags : base.tags;
+  const messaging = live ? live.messaging : base.messaging;
+
+  const authority =
+    !!entry &&
+    hasAuthority({ isOwner, isAdmin, meId: auth.user?.id, agentTags: tags, grants });
+
   // Tabs are a `?tab=` VIEW PREFERENCE on the one agent route. A tab the caller
   // may not read (or a medium that is off) falls back to Overview rather than
   // rendering an "unavailable" placeholder.
   const requested = searchParams.get('tab');
   const tab: AgentTab =
-    requested === 'activity' && canReadActivity
-      ? 'activity'
-      : requested === 'email' && canReadActivity && caps.email
-        ? 'email'
-        : 'overview';
+    requested === 'access' && authority
+      ? 'access'
+      : requested === 'analytics' && authority
+        ? 'analytics'
+        : requested === 'activity' && canReadActivity
+          ? 'activity'
+          : requested === 'email' && canReadActivity && caps.email
+            ? 'email'
+            : 'overview';
+  const showTabs = canReadActivity || authority;
 
   // Trust pills come from the admin-only contacts route; a non-admin owner gets
   // no pill rather than a 404 (see `agent/contacts.ts`).
@@ -139,6 +219,8 @@ export function AgentProfile() {
             {agent.roleTitle}
           </span>
         ) : null}
+        {/* Tags are org-visible, like the role title. */}
+        <TagChips tags={tags} />
       </div>
 
       <p className="mt-1.5 text-sm text-[var(--sparrow-muted)]">
@@ -158,16 +240,40 @@ export function AgentProfile() {
 
       {caps.email && agent.emailAddress ? <AddressRow address={agent.emailAddress} /> : null}
 
-      {canReadActivity ? (
-        <TabBar orgId={orgId} agentId={agent.id} active={tab} email={caps.email} />
+      {showTabs ? (
+        <TabBar
+          orgId={orgId}
+          agentId={agent.id}
+          active={tab}
+          email={caps.email}
+          access={authority}
+          correspondence={canReadActivity}
+        />
       ) : null}
 
       <div
-        role={canReadActivity ? 'tabpanel' : undefined}
-        aria-labelledby={canReadActivity ? `agent-tab-${tab}` : undefined}
+        role={showTabs ? 'tabpanel' : undefined}
+        aria-labelledby={showTabs ? `agent-tab-${tab}` : undefined}
         className="mt-6"
       >
-        {tab === 'activity' ? (
+        {tab === 'access' ? (
+          <AccessTab
+            orgId={orgId}
+            agent={{ id: agent.id, name: agent.name, tags, messaging }}
+            owner={owner}
+            isAdmin={isAdmin}
+            grants={grants}
+            visibleAgents={ws.agents}
+            onAgentChanged={(next: Agent) => {
+              setPatch({ agentId: agent.id, base: liveKey, tags: next.tags, messaging: next.messaging });
+              void ws.reloadAgents();
+              if (readsOrgAgent) setOrgAgentTick((n) => n + 1);
+            }}
+            onGrantsChanged={reloadGrants}
+          />
+        ) : tab === 'analytics' ? (
+          <AnalyticsTab orgId={orgId} agentId={agent.id} />
+        ) : tab === 'activity' ? (
           <ActivityTab
             orgId={orgId}
             agentId={agent.id}
@@ -188,6 +294,7 @@ export function AgentProfile() {
           />
         ) : (
           <>
+            {authority ? <AnalyticsCard orgId={orgId} agentId={agent.id} /> : null}
             <MessageButton agentId={agent.id} orgId={orgId} />
             {isOwner ? (
               <OwnerControls
@@ -229,7 +336,7 @@ function AddressRow({ address }: { address: string }) {
 }
 
 /**
- * Overview / Activity / Email. Each tab is a LINK to the same route with a
+ * Overview / Access / Analytics / Activity / Email. Each tab is a LINK to the same route with a
  * different `?tab=`, so a tab is bookmarkable, back/forward works, and an email
  * card's "Open thread" can deep-link into `?tab=email&thread=…`.
  */
@@ -238,17 +345,29 @@ function TabBar({
   agentId,
   active,
   email,
+  access,
+  correspondence,
 }: {
   orgId: string;
   agentId: string;
   active: AgentTab;
   /** `capabilities.email`: no medium, no tab — never a disabled placeholder. */
   email: boolean;
+  /** The viewer has authority over the agent: Access + Analytics. */
+  access: boolean;
+  /** Owner or org owner/admin: Activity (+ Email). */
+  correspondence: boolean;
 }) {
   const tabs: { id: AgentTab; label: string }[] = [
     { id: 'overview', label: 'Overview' },
-    { id: 'activity', label: 'Activity' },
-    ...(email ? [{ id: 'email' as const, label: 'Email' }] : []),
+    ...(access
+      ? [
+          { id: 'access' as const, label: 'Access' },
+          { id: 'analytics' as const, label: 'Analytics' },
+        ]
+      : []),
+    ...(correspondence ? [{ id: 'activity' as const, label: 'Activity' }] : []),
+    ...(correspondence && email ? [{ id: 'email' as const, label: 'Email' }] : []),
   ];
   return (
     <div
@@ -303,7 +422,7 @@ function MessageButton({ agentId, orgId }: { agentId: string; orgId: string }) {
       const roomId = await ws.ensureDm(agentId);
       navigate(roomPath(orgId, roomId));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not open that conversation.');
+      setError(forbiddenMessage(err, 'Could not open that conversation.'));
       setBusy(false);
     }
   }

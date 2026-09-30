@@ -71,6 +71,7 @@ export function migrate(sqlite: Database.Database): void {
       role_title        TEXT,
       role_instructions TEXT,
       role_updated_at   TEXT,
+      messaging         TEXT NOT NULL DEFAULT 'any',
       last_seen_at      TEXT,
       created_at        TEXT NOT NULL
     );
@@ -87,6 +88,40 @@ export function migrate(sqlite: Database.Database): void {
       PRIMARY KEY (agent_id, human_id)
     );
     CREATE INDEX IF NOT EXISTS agent_visibility_human ON agent_visibility(human_id);
+
+    -- Agent visibility (SPEC "Agent visibility"). TAGS are org-visible labels on
+    -- an agent (org-scoped through the agent itself); GRANTS delegate authority
+    -- over tags + messaging to a human or agent; MESSAGE_STATS are the always-on
+    -- analytics counters, one row per (agent, UTC hour, direction, counterpart),
+    -- upsert-incremented in the same transaction that stores each message.
+    CREATE TABLE IF NOT EXISTS agent_tags (
+      agent_id TEXT NOT NULL,
+      tag      TEXT NOT NULL,
+      PRIMARY KEY (agent_id, tag)
+    );
+
+    CREATE TABLE IF NOT EXISTS grants (
+      id             TEXT PRIMARY KEY,
+      org_id         TEXT NOT NULL,
+      principal_id   TEXT NOT NULL,
+      principal_kind TEXT NOT NULL,
+      scope          TEXT NOT NULL,
+      granted_by     TEXT NOT NULL,
+      created_at     TEXT NOT NULL,
+      UNIQUE (org_id, principal_id, scope)
+    );
+    CREATE INDEX IF NOT EXISTS grants_principal ON grants(principal_id);
+
+    CREATE TABLE IF NOT EXISTS message_stats (
+      agent_id         TEXT NOT NULL,
+      hour_start       TEXT NOT NULL,
+      direction        TEXT NOT NULL,
+      counterpart_kind TEXT NOT NULL,
+      counterpart_id   TEXT NOT NULL,
+      messages         INTEGER NOT NULL DEFAULT 0,
+      tokens           INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (agent_id, hour_start, direction, counterpart_kind, counterpart_id)
+    );
 
     CREATE TABLE IF NOT EXISTS invites (
       id                TEXT PRIMARY KEY,
@@ -471,6 +506,9 @@ export function migrate(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, 'activity_entries', 'hint_delivery_id', 'TEXT');
   rebuildHintDeliveries(sqlite);
   addColumnIfMissing(sqlite, 'agents', 'last_client_version', 'TEXT');
+  // The per-agent messaging policy (SPEC "Agent visibility") postdates the
+  // agents table; every existing agent reads `any` — today's rule, unchanged.
+  addColumnIfMissing(sqlite, 'agents', 'messaging', "TEXT NOT NULL DEFAULT 'any'");
   // The email_quarantine split postdates databases whose pre-split build wrote
   // quarantined/rejected inbound rows into `emails`. Move them across — safe on
   // EVERY boot (INSERT OR IGNORE dedupes on the primary key, the DELETE matches

@@ -1,4 +1,4 @@
-import type { ErrorCode } from '@sparrow-land/sdk/types';
+import type { ErrorCode, ForbiddenReason } from '@sparrow-land/sdk/types';
 
 /** HTTP status for each SPEC error code. */
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
@@ -18,18 +18,27 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
 export class ApiError extends Error {
   readonly code: ErrorCode;
   readonly statusCode: number;
+  /**
+   * A machine-readable refinement of `code` (`error.reason` on the wire), e.g. a
+   * `ForbiddenReason` on a `403`. Absent on most errors.
+   */
+  readonly reason?: string;
 
-  constructor(code: ErrorCode, message: string, statusCode?: number) {
+  constructor(code: ErrorCode, message: string, statusCode?: number, reason?: string) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.statusCode = statusCode ?? STATUS_BY_CODE[code];
+    if (reason !== undefined) this.reason = reason;
   }
 }
 
 export const badRequest = (m = 'Bad request') => new ApiError('bad_request', m);
 export const unauthorized = (m = 'Unauthorized') => new ApiError('unauthorized', m);
 export const forbidden = (m = 'Forbidden') => new ApiError('forbidden', m);
+/** A `403` that names WHY (`error.reason`): the agent-visibility refusals. */
+export const forbiddenBecause = (reason: ForbiddenReason, m: string) =>
+  new ApiError('forbidden', m, undefined, reason);
 export const notFound = (m = 'Not found') => new ApiError('not_found', m);
 export const conflict = (m = 'Conflict') => new ApiError('conflict', m);
 export const gone = (m = 'Gone') => new ApiError('gone', m);

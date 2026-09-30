@@ -31,6 +31,8 @@ const agent = (
     lastSeenAt: null,
     sharing: 'selected',
     roleTitle,
+    tags: [],
+    messaging: 'any',
     createdAt: '2026-08-20T00:00:00Z',
   },
   owner: { id: owner, displayName: 'Owner' },

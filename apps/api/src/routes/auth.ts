@@ -10,6 +10,7 @@ import { eq } from 'drizzle-orm';
 import { UpdateMeRequestSchema, UpdateMeAgentRequestSchema } from '@sparrow-land/sdk/types';
 import type { AuthConfigResponse, AuthMeResponse, MeResponse } from '@sparrow-land/sdk/types';
 import type { AppContext } from '../context.js';
+import { agentTagsOf, messagingOf } from '../visibility.js';
 import { resolvePrincipal } from '../context.js';
 import { effectiveOrigin } from '../effective-origin.js';
 import { isAnonymousRequest, resolveTheme, toUser } from '../auth.js';
@@ -102,6 +103,8 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
         roleTitle: principal.agent.roleTitle ?? null,
         roleInstructions: principal.agent.roleInstructions ?? null,
         roleUpdatedAt: principal.agent.roleUpdatedAt ?? null,
+        tags: agentTagsOf(ctx.db, principal.agent.id),
+        messaging: messagingOf(principal.agent),
         presence: ctx.rooms.principalPresence('agent', principal.agent.id),
       },
     };
@@ -151,6 +154,8 @@ export function registerAuthRoutes(app: FastifyInstance, ctx: AppContext): void 
           roleTitle: updated.roleTitle ?? null,
           roleInstructions: updated.roleInstructions ?? null,
           roleUpdatedAt: updated.roleUpdatedAt ?? null,
+          tags: agentTagsOf(ctx.db, updated.id),
+          messaging: messagingOf(updated),
           // The response shape is shared with GET /me; send the caller's real
           // presence rather than letting the schema default it to "offline".
           presence: ctx.rooms.principalPresence('agent', updated.id),

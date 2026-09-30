@@ -36,6 +36,7 @@ import { deleteAgentEmailCascade } from '../email/store.js';
 import { emailMediumOn } from '../email/addresses.js';
 import { badRequest, conflict, forbidden, notFound } from '../errors.js';
 import { membershipOf } from '../org-helpers.js';
+import { agentTagsByAgent, deleteAgentVisibility } from '../visibility.js';
 import {
   toAgent,
   agentEmailAddress,
@@ -116,6 +117,7 @@ function visibilityList(ctx: AppContext, humanId: string, orgId?: string): Visib
   }
 
   const entries: VisibilityAgent[] = [];
+  const tagsByAgent = agentTagsByAgent(ctx.db, [...candidates.keys()]);
   for (const agent of candidates.values()) {
     if (orgId && agent.orgId !== orgId) continue;
     const vis = explicitByAgent.get(agent.id);
@@ -131,7 +133,7 @@ function visibilityList(ctx: AppContext, humanId: string, orgId?: string): Visib
       sharedBy = granter ? humanRef(granter) : null;
     }
     const entry: VisibilityAgent = {
-      agent: toAgent(ctx, agent),
+      agent: toAgent(ctx, agent, tagsByAgent.get(agent.id)),
       owner: owner ? humanRef(owner) : { id: agent.ownerHumanId, displayName: '' },
       sharedBy,
       // The AGENTS badge's email half. Mail is correspondence, not room data, so
@@ -304,6 +306,8 @@ export function registerAgentRoutes(app: FastifyInstance, ctx: AppContext): void
       // Layer 3: entries cascade-delete with their agent (SPEC "Unified attention
       // → Retention"), consistent with v3's hard-delete posture.
       tx.delete(activityEntries).where(eq(activityEntries.agentId, agent.id)).run();
+      // Agent visibility: its tags, the grants it holds, its analytics buckets.
+      deleteAgentVisibility(tx, [agent.id]);
       tx.delete(agents).where(eq(agents.id, agent.id)).run();
     });
     // The email medium's half of the cascade: threads, emails, and the
