@@ -1092,7 +1092,7 @@ owner-only unless noted; a non-owner addressing `/me/agents/:id` gets `404`
 | `GET /me/agents?org=` | **visibility list** (not just owned): every agent visible to the caller in that org (all orgs when `?org=` absent): `{ items: [{ agent: { id, name, orgId, emailAddress, online, lastSeenAt, sharing, roleTitle, tags, messaging, createdAt }, owner: { id, displayName }, sharedBy: { id, displayName } \| null, rooms: [{ id, name, memberId }] (owned agents only), sharedWith: [{ id, displayName, createdAt }] (owned agents only), roleInstructions: string \| null (owned agents only) }] }` — `sharing` is the mode (below); `emailAddress` is the derived address or `null`; `roleTitle` is the ORG-VISIBLE role label (or `null`) so everyone who can see the agent sees its title; `roleInstructions` is the PRIVATE body, present (string or `null`) for the caller's OWN agents only (`null` on an agent shared to them), mirroring the owner-only `rooms`/`sharedWith` extras; `memberId` enables detach via RemoveMember; `sharedWith` backs the owner's share management. Each entry also carries `emailUnreadCount: number \| null` — the agent's delivered inbound email with no `read_at`, for the caller's OWN agents only (`null` on an agent shared to them, and `null` for everyone when the medium is off), so a human can badge their agents' mail without walking every thread. Includes agents visible via the mode (not just explicit grants); dynamically-visible entries carry `sharedBy: null` |
 | `POST /me/agents/:id/rotate` | new key, old dead → `200 { agent, key }` |
 | `PATCH /me/agents/:id` | owner-only change of `{ sharing?: "selected" \| "room-members" \| "org", name?, roleTitle?, roleInstructions? }` (≥1 field) → `200 { agent }`; a non-owner → `403`; an agent credential → `401` (an agent sets its OWN role via `PATCH /me`). A `name` rename is validated against the agent name rule (malformed → `400`, reserved → `409`), is org-unique case-insensitive (collision → `409`, never auto-suffixed), **moves the agent's email address** (no alias), and propagates live (`member.updated` in every room the agent inhabits). A `sharing` change emits NO per-human events (dynamic access isn't a grant). `roleTitle` (≤60) / `roleInstructions` (≤16 KB) each SET with a string or CLEAR with `null`; a real role change nudges the agent — see **Roles** below |
-| `DELETE /me/agents/:id` | delete agent + all its members + visibility rows + its email threads/emails/attachments + its activity entries + its tags, the grants it holds and its analytics buckets (key dies) → `{ ok: true }` |
+| `DELETE /me/agents/:id` | delete agent + all its members + visibility rows + its email threads/emails/attachments + its activity entries + its tags, the grants it holds, the delegated grants it created (see *Agent visibility → Authority*) and its analytics buckets (key dies) → `{ ok: true }` |
 | `POST /me/agents/:id/share` | `{ human: "usr_... \| email" }` — target must be a member of the agent's org → `201 { ok: true }`; already shared → `200`. Emits `agent.shared` on the grantee's `/me/events` |
 | `DELETE /me/agents/:id/share/:humanId` | revoke (owner's own row → `400`) → `{ ok: true }` |
 
@@ -1202,24 +1202,46 @@ oracle: a pair that has not met still gets the one uninformative refusal.
 
 - **Implicit:** the agent's owner, and org owners/admins.
 - **Delegated grants** (a principal — human OR agent — holds a scope in the org):
-  - `tag:<slug>` — add/remove that tag on agents, and change the messaging policy of
-    agents carrying it;
-  - `tags:*` — the same for every tag, plus the right to grant `tag:<slug>` to
-    others (the chief-of-staff grant).
-- **Guard rails** (tags, messaging and grants alike):
+  - `tag:<slug>` — manage the agents that already carry that tag: remove the tag
+    from them, and change their messaging policy. It never recruits: a `tag:cubes`
+    holder cannot add `cubes` to an agent it has no standing over (and so cannot
+    tag its way into authority over it, or past its own messaging policy);
+  - `tags:*` — org-wide: any tag on any agent (tagged or not), plus the right to
+    grant `tag:<slug>` to others (the chief-of-staff grant).
+- **Standing.** Changing an agent's tags (adding OR removing) needs authority over
+  the agent AS IT IS BEFORE the change — its owner, an org owner/admin, a `tags:*`
+  holder, or a holder of `tag:x` for some `x` the agent already carries — IN
+  ADDITION to authority over each tag added or removed. Otherwise
+  `403 reason "grant_required"`.
+- **Guard rails** (tags, messaging, grants and analytics reads alike):
   - Nobody changes their own tags, policy or grants → `403 reason "self"` (an agent
     can never edit itself, whatever it holds). The one exception: anyone may REVOKE
     a grant they hold — giving up your own authority is always safe.
+  - Nobody widens their own reach: an AGENT whose own messaging policy is not `any`
+    may not ADD to another agent a tag it carries itself (that would change who it
+    may DM) → `403 reason "self"`. Removing such a tag, adding tags it does not
+    carry, and agents whose policy is `any` are unaffected; humans are unaffected.
   - A grant holder never acts on a principal holding a grant it does not also hold
     (`tags:*` counts as holding every `tag:<slug>`) → `403 reason "outranked"`. So a
     sub-agent can never edit its manager, and a `tag:cubes` manager can never touch
-    the chief of staff. Org owners/admins, and an agent's owner acting on that agent,
-    are exempt: humans with full authority over it.
+    the chief of staff. The same guard applies to READING an agent's analytics: a
+    sub-agent never reads its manager's. Org owners/admins, and an agent's owner
+    acting on that agent, are exempt: humans with full authority over it.
   - You can only grant what you hold: `tags:*` holders grant `tag:<slug>` only; only
     org owners/admins grant `tags:*`; `tag:<slug>` holders grant nothing →
     `403 reason "grant_required"`. The same reason covers any change the actor holds
     no grant for.
-- Agents start with no grants; granting one to an agent is an admin action.
+- **Delegated grants stand only while their creator can justify them** — by being
+  an org owner/admin or by holding `tags:*`. When a principal loses `tags:*` (the
+  grant is revoked by an admin or its creator, or given up), or an agent is
+  deleted, the grants it CREATED are deleted in the same transaction, and the same
+  check runs recursively on their holders. A human who leaves or is removed from
+  the org (or whose account is deleted) takes the grants they created with them
+  when they were a plain member; grants created by an org owner/admin are the
+  org's own decisions and stand (any owner/admin can revoke them).
+- Agents start with no grants. `tags:*` is granted only by org owners/admins; a
+  `tags:*` holder (human or agent) may grant `tag:<slug>` to others, agents
+  included.
 
 Refusals use the error envelope's `reason` (see *Error format*):
 `{ error: { code: "forbidden", message, reason: "self" | "outranked" | "grant_required" | "messaging_policy" } }`.
@@ -1231,16 +1253,17 @@ grant uses the same routes on the agents it manages). A caller outside the org g
 | Route | Behavior |
 |---|---|
 | `GET /orgs/:orgId/agents/:agentId` | any org member (human or agent) → `200 { agent, owner: { id, displayName } }` — the wire agent (role TITLE, tags, messaging…), never the private role instructions. Presence and address follow the sharing rules: a caller who is not the agent, its owner, an org owner/admin, or a human with access (`canAccessAgent`) reads `online: false`, `lastSeenAt: null`, `emailAddress: null` |
-| `PUT /orgs/:orgId/agents/:agentId/tags` | `{ tags: string[] }` REPLACES the set (`[]` clears; bad slug, duplicate or >10 → `400`) → `200 { agent }`. Every tag ADDED or REMOVED must be within the caller's authority (owner/admin/`tags:*`: any; `tag:x`: only `x`); unchanged tags need none, but the caller still needs standing over the agent |
+| `PUT /orgs/:orgId/agents/:agentId/tags` | `{ tags: string[] }` REPLACES the set (`[]` clears; bad slug, duplicate or >10 → `400`) → `200 { agent }`. The caller needs standing over the agent as it is BEFORE the change (owner, org owner/admin, `tags:*`, or `tag:x` for an `x` it already carries), and every tag ADDED or REMOVED must be within the caller's authority (owner/admin/`tags:*`: any; `tag:x`: only `x`); unchanged tags need none. An agent caller whose own messaging is not `any` may not add a tag it carries (`self`) |
 | `PUT /orgs/:orgId/agents/:agentId/messaging` | `{ messaging: "any" \| "tags" \| "none" }` → `200 { agent }`. Owner, org owners/admins, `tags:*` holders, or `tag:x` holders for an `x` the agent carries |
 | `GET /orgs/:orgId/grants` | any org member → `{ items: Grant[] }`, oldest first |
 | `POST /orgs/:orgId/grants` | `{ principalId: "usr_…" \| "agt_…", scope: "tags:*" \| "tag:<slug>" }` → `201 { grant }`; the same (principal, scope) again → `200` with the standing grant. A principal id of another shape → `400`; one outside the org → `404`. Creators: org owners/admins (any scope), `tags:*` holders (`tag:<slug>` only) |
-| `DELETE /orgs/:orgId/grants/:grantId` | the grant's holder (giving it up), org owners/admins, or the grant's creator (guard rails apply) → `{ ok: true }`; unknown → `404` |
-| `GET /orgs/:orgId/agents/:agentId/analytics?window=24h\|7d\|30d\|all` | the report below. Readable by the agent itself, its owner, org owners/admins, `tags:*` holders, and holders of `tag:x` for an `x` it carries; anyone else in the org → `403 grant_required`; a bad window → `400` |
+| `DELETE /orgs/:orgId/grants/:grantId` | the grant's holder (giving it up), org owners/admins, or the grant's creator (guard rails apply) → `{ ok: true }`; unknown → `404`. If the holder can no longer justify the grants it created (no `tags:*`, not an owner/admin), those go too, recursively |
+| `GET /orgs/:orgId/agents/:agentId/analytics?window=24h\|7d\|30d\|all` | the report below. Readable by the agent itself, its owner, org owners/admins, `tags:*` holders (org-wide: every agent, tagged or not), and holders of `tag:x` for an `x` it carries; anyone else in the org → `403 grant_required`. A grant-holding reader is refused `403 outranked` for an agent holding a grant the reader does not also hold; a bad window → `400` |
 
 `Grant = { id: "grt_…", orgId, principalId, principalKind: "human" | "agent", scope, grantedBy, createdAt }`
 (`grantedBy` is a principal id). A human's grants go when they leave or are removed
-from the org; an agent's go when it is deleted.
+from the org; an agent's go when it is deleted. Grants a principal CREATED follow
+the justification rule under *Authority* above.
 
 **Analytics** (always on, informational only — no caps, no alerts). Counters are
 updated in the same transaction that stores each message (DMs and rooms, human or

@@ -15,11 +15,11 @@ import type {
 } from '@sparrow-land/sdk/types';
 import type { AppContext, Principal } from './context.js';
 import type { DB } from './db/index.js';
-import { agents, agentTags, grants, humans, messageStats, rooms } from './db/schema.js';
+import { agents, agentTags, grants, humans, messageStats, orgMemberships, rooms } from './db/schema.js';
 import type { AgentRow, GrantRow } from './db/schema.js';
 import { membershipOf } from './org-helpers.js';
 import { notFound, badRequest } from './errors.js';
-import type { ActorFacts, TargetFacts } from './visibility-authority.js';
+import { ALL_TAGS_SCOPE, type ActorFacts, type TargetFacts } from './visibility-authority.js';
 
 /** Anything that can run a drizzle insert/delete: the db handle or a transaction. */
 type Writer = Pick<DB, 'insert' | 'delete'>;
@@ -141,22 +141,90 @@ export function grantsOfOrg(db: DB, orgId: string): GrantRow[] {
     .all();
 }
 
+/** A drizzle handle that can also read: the db or a transaction. */
+type Tx = Pick<DB, 'select' | 'selectDistinct' | 'insert' | 'delete'>;
+
+const isAdminRole = (role: string | null | undefined): boolean => role === 'owner' || role === 'admin';
+
+/**
+ * Whether a principal can still justify the grants it created in `orgId`: it is
+ * an org owner/admin, or it holds `tags:*` (the only delegated scope that may
+ * grant).
+ */
+function justifiesGrants(tx: Tx, orgId: string, principalId: string): boolean {
+  const m = tx
+    .select({ role: orgMemberships.role })
+    .from(orgMemberships)
+    .where(and(eq(orgMemberships.orgId, orgId), eq(orgMemberships.humanId, principalId)))
+    .get();
+  if (isAdminRole(m?.role)) return true;
+  return (
+    tx
+      .select({ id: grants.id })
+      .from(grants)
+      .where(and(eq(grants.orgId, orgId), eq(grants.principalId, principalId), eq(grants.scope, ALL_TAGS_SCOPE)))
+      .get() !== undefined
+  );
+}
+
+/**
+ * Delegated grants stand only while their creator can justify them. For each
+ * (org, principal) seed that can no longer justify its grants, delete the grants
+ * it CREATED in that org, then re-check each of their holders the same way
+ * (their authority just shrank), until nothing changes. Run inside the
+ * transaction that took the seed's authority away.
+ */
+export function revokeUnjustifiedGrants(
+  tx: Tx,
+  seeds: readonly { orgId: string; principalId: string }[],
+): void {
+  const queue = [...seeds];
+  // Terminates: a principal is only re-queued after at least one grant is deleted.
+  while (queue.length > 0) {
+    const { orgId, principalId } = queue.shift()!;
+    if (justifiesGrants(tx, orgId, principalId)) continue;
+    const created = tx
+      .select({ id: grants.id, principalId: grants.principalId })
+      .from(grants)
+      .where(and(eq(grants.orgId, orgId), eq(grants.grantedBy, principalId)))
+      .all();
+    if (created.length === 0) continue;
+    tx.delete(grants).where(inArray(grants.id, created.map((g) => g.id))).run();
+    for (const g of new Set(created.map((c) => c.principalId))) queue.push({ orgId, principalId: g });
+  }
+}
+
 /**
  * Remove every visibility row an AGENT leaves behind when it is destroyed: its
  * tags and the grants it holds. Its analytics buckets go too (nothing can read
- * them once the agent is gone). Grants it CREATED stay: they were delegated
- * authority, and an admin can revoke them.
+ * them once the agent is gone). Grants it CREATED go as well (recursively):
+ * they were delegated through its `tags:*`, and a deleted agent justifies
+ * nothing — the same rule as revoking its `tags:*`.
  */
-export function deleteAgentVisibility(tx: Writer, agentIds: readonly string[]): void {
+export function deleteAgentVisibility(tx: Tx, agentIds: readonly string[]): void {
   if (agentIds.length === 0) return;
-  tx.delete(agentTags).where(inArray(agentTags.agentId, [...agentIds])).run();
-  tx.delete(grants).where(inArray(grants.principalId, [...agentIds])).run();
-  tx.delete(messageStats).where(inArray(messageStats.agentId, [...agentIds])).run();
+  const ids = [...agentIds];
+  tx.delete(agentTags).where(inArray(agentTags.agentId, ids)).run();
+  tx.delete(grants).where(inArray(grants.principalId, ids)).run();
+  tx.delete(messageStats).where(inArray(messageStats.agentId, ids)).run();
+  const seeds = tx
+    .selectDistinct({ orgId: grants.orgId, principalId: grants.grantedBy })
+    .from(grants)
+    .where(inArray(grants.grantedBy, ids))
+    .all();
+  revokeUnjustifiedGrants(tx, seeds);
 }
 
-/** Remove the grants a human held in an org (they left, or were removed). */
-export function deleteHumanGrants(tx: Writer, orgId: string, humanId: string): void {
+/**
+ * Remove the grants a human held in an org (they left, or were removed). Grants
+ * they CREATED follow the justification rule, judged by the role they had: a
+ * plain member's were delegated through `tags:*` and go with them (recursively);
+ * an org owner/admin's were the org's own decisions and stand (any owner/admin
+ * can revoke them).
+ */
+export function deleteHumanGrants(tx: Tx, orgId: string, humanId: string, role: string): void {
   tx.delete(grants).where(and(eq(grants.orgId, orgId), eq(grants.principalId, humanId))).run();
+  if (!isAdminRole(role)) revokeUnjustifiedGrants(tx, [{ orgId, principalId: humanId }]);
 }
 
 /* ------------------------------------------------------------------ *
@@ -176,6 +244,8 @@ export function actorFacts(ctx: AppContext, orgId: string, principal: Principal)
       id: principal.agent.id,
       orgAdmin: false,
       scopes: scopesOf(ctx.db, orgId, principal.agent.id),
+      tags: agentTagsOf(ctx.db, principal.agent.id),
+      messaging: messagingOf(principal.agent),
     };
   }
   const m = membershipOf(ctx.db, orgId, principal.human.id);

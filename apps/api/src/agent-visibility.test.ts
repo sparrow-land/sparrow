@@ -398,17 +398,59 @@ describe('agent visibility', () => {
       expectForbidden(await putTags(bot.key, bot.id, ['a']), 'self');
     });
 
-    it('a tag:cubes agent may add/remove cubes on others but nothing else', async () => {
+    it('a tag:cubes agent manages agents already carrying cubes, but cannot recruit new ones', async () => {
       const mgr = await makeAgent(ts.app, owner.token, orgId, 'mgr');
       const bot = await makeAgent(ts.app, owner.token, orgId, 'bot');
+      const opsBot = await makeAgent(ts.app, owner.token, orgId, 'ops-bot');
       expect((await grant(owner.token, mgr.id, 'tag:cubes')).statusCode).toBe(201);
-      expect((await putTags(owner.token, bot.id, ['ops'])).statusCode).toBe(200);
-      // Adding cubes while keeping ops (unchanged) is fine.
-      const add = await putTags(mgr.key, bot.id, ['ops', 'cubes']);
-      expect(add.statusCode).toBe(200);
-      expect(add.json().agent.tags).toEqual(['cubes', 'ops']);
-      // Removing ops is not.
+      expect((await putTags(owner.token, bot.id, ['cubes', 'ops'])).statusCode).toBe(200);
+      expect((await putTags(owner.token, opsBot.id, ['ops'])).statusCode).toBe(200);
+      // Recruiting an agent that does not carry cubes is refused.
+      expectForbidden(await putTags(mgr.key, opsBot.id, ['ops', 'cubes']), 'grant_required');
+      // Removing ops from a cubes agent is outside the grant.
       expectForbidden(await putTags(mgr.key, bot.id, ['cubes']), 'grant_required');
+      // Removing cubes (keeping ops, unchanged) is fine.
+      const rm = await putTags(mgr.key, bot.id, ['ops']);
+      expect(rm.statusCode).toBe(200);
+      expect(rm.json().agent.tags).toEqual(['ops']);
+      // …and once it is gone the agent is out of reach again.
+      expectForbidden(await putTags(mgr.key, bot.id, ['cubes', 'ops']), 'grant_required');
+    });
+
+    it('tag capture: a tag:cubes agent cannot tag its way past its own policy', async () => {
+      const bob = await joinOrg(ts.app, owner.token, orgId, 'bob@ex.com', 'Bob');
+      const x = await makeAgent(ts.app, owner.token, orgId, 'x-agent');
+      const y = await makeAgent(ts.app, bob.token, orgId, 'y-agent');
+      await shareAgent(ts.app, bob.token, y.id, owner.userId);
+      await coRoom(x.id, y.id);
+      expect((await putTags(owner.token, x.id, ['cubes'])).statusCode).toBe(200);
+      expect((await putMessaging(owner.token, x.id, 'tags')).statusCode).toBe(200);
+      expect((await grant(owner.token, x.id, 'tag:cubes')).statusCode).toBe(201);
+      expectForbidden(await ensureDm(x.key, y.id), 'messaging_policy');
+      expectForbidden(await putTags(x.key, y.id, ['cubes']), 'grant_required');
+      expectForbidden(await ensureDm(x.key, y.id), 'messaging_policy');
+    });
+
+    it('an agent whose policy is not any never adds a tag it carries, even with tags:*', async () => {
+      const x = await makeAgent(ts.app, owner.token, orgId, 'x-agent');
+      const y = await makeAgent(ts.app, owner.token, orgId, 'y-agent');
+      expect((await putTags(owner.token, x.id, ['cubes'])).statusCode).toBe(200);
+      expect((await grant(owner.token, x.id, 'tags:*')).statusCode).toBe(201);
+      expect((await putMessaging(owner.token, x.id, 'tags')).statusCode).toBe(200);
+      expectForbidden(await putTags(x.key, y.id, ['cubes']), 'self');
+      // A tag it does not carry is fine; so is the same tag once its policy is any.
+      expect((await putTags(x.key, y.id, ['ops'])).statusCode).toBe(200);
+      expect((await putMessaging(owner.token, x.id, 'any')).statusCode).toBe(200);
+      expect((await putTags(x.key, y.id, ['cubes', 'ops'])).statusCode).toBe(200);
+    });
+
+    it('a tag:cubes human cannot tag an untagged agent to read its analytics', async () => {
+      const bob = await joinOrg(ts.app, owner.token, orgId, 'bob@ex.com', 'Bob');
+      const spy = await joinOrg(ts.app, owner.token, orgId, 'spy@ex.com', 'Spy');
+      const y = await makeAgent(ts.app, bob.token, orgId, 'y-agent');
+      expect((await grant(owner.token, spy.userId, 'tag:cubes')).statusCode).toBe(201);
+      expectForbidden(await putTags(spy.token, y.id, ['cubes']), 'grant_required');
+      expectForbidden(await analytics(spy.token, y.id), 'grant_required');
     });
 
     it('a manager with tag:cubes can never touch the chief of staff (outranked)', async () => {
@@ -526,6 +568,86 @@ describe('agent visibility', () => {
       const g2 = (await grant(cos.key, mgr.id, 'tag:cubes')).json().grant.id as string;
       expect((await deleteGrant(mgr.key, g2)).statusCode).toBe(200);
       expect((await listGrants(owner.token)).json().items.map((x: { id: string }) => x.id)).not.toContain(g2);
+    });
+
+    it('revoking a chief of staff removes the grants it created', async () => {
+      const cos = await makeAgent(ts.app, owner.token, orgId, 'cos');
+      const pal = await makeAgent(ts.app, owner.token, orgId, 'pal');
+      const bot = await makeAgent(ts.app, owner.token, orgId, 'bot');
+      await putTags(owner.token, bot.id, ['ops']);
+      const cosGrant = (await grant(owner.token, cos.id, 'tags:*')).json().grant.id as string;
+      const palGrant = await grant(cos.key, pal.id, 'tag:ops');
+      expect(palGrant.statusCode).toBe(201);
+      expect((await putTags(pal.key, bot.id, [])).statusCode).toBe(200);
+      await putTags(owner.token, bot.id, ['ops']);
+      // An admin-created grant to pal is untouched by the cascade.
+      const adminGrant = (await grant(owner.token, pal.id, 'tag:x')).json().grant.id as string;
+      expect((await deleteGrant(owner.token, cosGrant)).statusCode).toBe(200);
+      const ids = (await listGrants(owner.token)).json().items.map((g: { id: string }) => g.id);
+      expect(ids).toEqual([adminGrant]);
+      expectForbidden(await putTags(pal.key, bot.id, []), 'grant_required');
+    });
+
+    it('a chief of staff giving up tags:* also drops the grants it created', async () => {
+      const cos = await makeAgent(ts.app, owner.token, orgId, 'cos');
+      const pal = await makeAgent(ts.app, owner.token, orgId, 'pal');
+      const cosGrant = (await grant(owner.token, cos.id, 'tags:*')).json().grant.id as string;
+      await grant(cos.key, pal.id, 'tag:ops');
+      expect((await deleteGrant(cos.key, cosGrant)).statusCode).toBe(200);
+      expect((await listGrants(owner.token)).json().items).toEqual([]);
+    });
+
+    it('revoking a grant its holder does not need to justify its own grants leaves them', async () => {
+      const cos = await makeAgent(ts.app, owner.token, orgId, 'cos');
+      const pal = await makeAgent(ts.app, owner.token, orgId, 'pal');
+      await grant(owner.token, cos.id, 'tags:*');
+      const cosTag = (await grant(owner.token, cos.id, 'tag:x')).json().grant.id as string;
+      const palGrant = (await grant(cos.key, pal.id, 'tag:ops')).json().grant.id as string;
+      expect((await deleteGrant(owner.token, cosTag)).statusCode).toBe(200);
+      expect((await listGrants(owner.token)).json().items.map((g: { id: string }) => g.id)).toContain(palGrant);
+    });
+
+    it('deleting a chief-of-staff agent removes the grants it created', async () => {
+      const cos = await makeAgent(ts.app, owner.token, orgId, 'cos');
+      const pal = await makeAgent(ts.app, owner.token, orgId, 'pal');
+      await grant(owner.token, cos.id, 'tags:*');
+      await grant(cos.key, pal.id, 'tag:ops');
+      await ts.app.inject({ method: 'DELETE', url: `/api/v1/me/agents/${cos.id}`, headers: auth(owner.token) });
+      expect((await listGrants(owner.token)).json().items).toEqual([]);
+    });
+
+    it('a non-admin chief of staff leaving the org takes its delegated grants; an admin leaving does not', async () => {
+      const cosHuman = await joinOrg(ts.app, owner.token, orgId, 'cos@ex.com', 'Cos');
+      const adm = await joinOrg(ts.app, owner.token, orgId, 'adm@ex.com', 'Adm');
+      await promote(adm.userId);
+      const pal = await makeAgent(ts.app, owner.token, orgId, 'pal');
+      await grant(owner.token, cosHuman.userId, 'tags:*');
+      await grant(cosHuman.token, pal.id, 'tag:ops');
+      const admGrant = (await grant(adm.token, pal.id, 'tag:x')).json().grant.id as string;
+      for (const who of [cosHuman.userId, adm.userId]) {
+        const res = await ts.app.inject({
+          method: 'DELETE',
+          url: `/api/v1/orgs/${orgId}/humans/${who}`,
+          headers: auth(owner.token),
+        });
+        expect(res.statusCode).toBe(200);
+      }
+      // The delegated tag:ops grant went with its creator; the admin's is the org's decision.
+      expect((await listGrants(owner.token)).json().items.map((g: { id: string }) => g.id)).toEqual([admGrant]);
+    });
+
+    it('an operator-deleted non-admin chief of staff takes its delegated grants', async () => {
+      const cosHuman = await joinOrg(ts.app, owner.token, orgId, 'cos@ex.com', 'Cos');
+      const pal = await makeAgent(ts.app, owner.token, orgId, 'pal');
+      await grant(owner.token, cosHuman.userId, 'tags:*');
+      await grant(cosHuman.token, pal.id, 'tag:ops');
+      const del = await ts.app.inject({
+        method: 'DELETE',
+        url: `/api/v1/admin/humans/${cosHuman.userId}`,
+        headers: { 'x-admin-token': TEST_ADMIN_TOKEN },
+      });
+      expect(del.statusCode).toBe(200);
+      expect((await listGrants(owner.token)).json().items).toEqual([]);
     });
 
     it('a human removed from the org, or deleted by the operator, loses their grants', async () => {
@@ -719,6 +841,18 @@ describe('agent visibility', () => {
       expect((await analytics(mgr.key, a.id)).statusCode).toBe(200);
       await promote(bob.userId);
       expect((await analytics(bob.token, a.id)).statusCode).toBe(200);
+    });
+
+    it('reads use the outranked guard: a sub-agent never reads its manager', async () => {
+      const mgr = await makeAgent(ts.app, owner.token, orgId, 'mgr');
+      const sub = await makeAgent(ts.app, owner.token, orgId, 'sub');
+      await grant(owner.token, mgr.id, 'tags:*');
+      await putTags(owner.token, mgr.id, ['cubes']);
+      await grant(mgr.key, sub.id, 'tag:cubes');
+      expectForbidden(await analytics(sub.key, mgr.id), 'outranked');
+      // The manager reads the sub (untagged: tags:* is org-wide); the owner reads both.
+      expect((await analytics(mgr.key, sub.id)).statusCode).toBe(200);
+      expect((await analytics(owner.token, mgr.id)).statusCode).toBe(200);
     });
   });
 });

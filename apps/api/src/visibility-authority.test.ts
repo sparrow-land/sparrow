@@ -23,11 +23,14 @@ const human = (id: string, over: Partial<ActorFacts> = {}): ActorFacts => ({
   scopes: [],
   ...over,
 });
-const agentActor = (id: string, scopes: string[] = []): ActorFacts => ({
+const agentActor = (id: string, scopes: string[] = [], over: Partial<ActorFacts> = {}): ActorFacts => ({
   kind: 'agent',
   id,
   orgAdmin: false,
   scopes,
+  tags: [],
+  messaging: 'any',
+  ...over,
 });
 const agentTarget = (
   id: string,
@@ -52,7 +55,18 @@ describe('decideTags — per added/removed tag', () => {
     ['plain member, no-op PUT still needs authority', human('usr_m'), cubesBot, [], [], 'grant_required'],
     ['tags:* holder adds any tag', human('usr_cos', { scopes: ['tags:*'] }), cubesBot, ['ops'], ['cubes'], 'ok'],
     ['tag:cubes holder removes cubes', human('usr_m', { scopes: ['tag:cubes'] }), cubesBot, [], ['cubes'], 'ok'],
-    ['tag:cubes holder adds cubes', human('usr_m', { scopes: ['tag:cubes'] }), agentTarget('agt_t'), ['cubes'], [], 'ok'],
+    // Rule (a): a tag:x holder manages agents already carrying x, but cannot recruit new ones into x.
+    ['tag:cubes holder adds cubes to an untagged agent', human('usr_m', { scopes: ['tag:cubes'] }), agentTarget('agt_t'), ['cubes'], [], 'grant_required'],
+    ['tag:cubes holder adds cubes to an ops agent', human('usr_m', { scopes: ['tag:cubes'] }), agentTarget('agt_t', { tags: ['ops'] }), ['cubes'], [], 'grant_required'],
+    ['tag:cubes holder, no-op on an agent it has no standing over', human('usr_m', { scopes: ['tag:cubes'] }), agentTarget('agt_t', { tags: ['ops'] }), [], [], 'grant_required'],
+    ['tag:cubes + tag:ops holder adds ops to a cubes agent', human('usr_m', { scopes: ['tag:cubes', 'tag:ops'] }), cubesBot, ['ops'], [], 'ok'],
+    ['tags:* holder adds cubes to an untagged agent', human('usr_cos', { scopes: ['tags:*'] }), agentTarget('agt_t'), ['cubes'], [], 'ok'],
+    // Rule (b): an agent whose own policy is not `any` never widens its own reach.
+    ['agent (policy tags, carries cubes) adds cubes to another agent', agentActor('agt_x', ['tags:*'], { tags: ['cubes'], messaging: 'tags' }), agentTarget('agt_y'), ['cubes'], [], 'self'],
+    ['agent (policy none, carries cubes) adds cubes to another agent', agentActor('agt_x', ['tags:*'], { tags: ['cubes'], messaging: 'none' }), agentTarget('agt_y'), ['cubes'], [], 'self'],
+    ['agent (policy tags) adds a tag it does not carry', agentActor('agt_x', ['tags:*'], { tags: ['cubes'], messaging: 'tags' }), agentTarget('agt_y'), ['ops'], [], 'ok'],
+    ['agent (policy tags) removes a tag it carries', agentActor('agt_x', ['tags:*'], { tags: ['cubes'], messaging: 'tags' }), cubesBot, [], ['cubes'], 'ok'],
+    ['agent (policy any) adds a tag it carries', agentActor('agt_x', ['tags:*'], { tags: ['cubes'], messaging: 'any' }), agentTarget('agt_y'), ['cubes'], [], 'ok'],
     ['tag:cubes holder adds ops', human('usr_m', { scopes: ['tag:cubes'] }), cubesBot, ['ops'], [], 'grant_required'],
     ['tag:cubes holder, no-op', human('usr_m', { scopes: ['tag:cubes'] }), cubesBot, [], [], 'ok'],
     ['agent with tags:* acts on another agent', agentActor('agt_cos', ['tags:*']), cubesBot, ['ops'], [], 'ok'],
@@ -114,7 +128,7 @@ describe('decideTags — per added/removed tag', () => {
   }
 
   it('a refusal carries a human-readable message', () => {
-    const v = decideTags(human('usr_m', { scopes: ['tag:cubes'] }), agentTarget('agt_t'), ['ops'], []);
+    const v = decideTags(human('usr_m', { scopes: ['tag:cubes'] }), agentTarget('agt_t', { tags: ['cubes'] }), ['ops'], []);
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.message).toMatch(/ops/);
   });
@@ -207,8 +221,25 @@ describe('decideAnalyticsRead', () => {
     ['the agent itself', agentActor('agt_t'), agentTarget('agt_t'), 'ok'],
     ['tag:cubes holder, agent carries cubes', agentActor('agt_m', ['tag:cubes']), agentTarget('agt_t', { tags: ['cubes'] }), 'ok'],
     ['tag:cubes holder, agent lacks cubes', agentActor('agt_m', ['tag:cubes']), agentTarget('agt_t', { tags: ['ops'] }), 'grant_required'],
-    ['tags:* holder', human('usr_m', { scopes: ['tags:*'] }), agentTarget('agt_t'), 'ok'],
+    ['tags:* holder (org-wide, untagged agent too)', human('usr_m', { scopes: ['tags:*'] }), agentTarget('agt_t'), 'ok'],
     ['plain member', human('usr_m'), agentTarget('agt_t'), 'grant_required'],
+    // Reads use the same outranked guard as writes.
+    [
+      'sub-agent (tag:cubes) reads its manager (tags:*, tagged cubes)',
+      agentActor('agt_sub', ['tag:cubes']),
+      agentTarget('agt_mgr', { tags: ['cubes'], scopes: ['tags:*'] }),
+      'outranked',
+    ],
+    [
+      'tag:cubes reads a cubes agent holding tag:ops',
+      agentActor('agt_m', ['tag:cubes']),
+      agentTarget('agt_t', { tags: ['cubes'], scopes: ['tag:ops'] }),
+      'outranked',
+    ],
+    ['peer holding the same grant', agentActor('agt_a', ['tag:cubes']), agentTarget('agt_b', { tags: ['cubes'], scopes: ['tag:cubes'] }), 'ok'],
+    ['owner reads an agent holding tags:*', human('usr_owner'), agentTarget('agt_t', { scopes: ['tags:*'] }), 'ok'],
+    ['org admin reads an agent holding tags:*', human('usr_adm', { orgAdmin: true }), agentTarget('agt_t', { scopes: ['tags:*'] }), 'ok'],
+    ['an agent holding tags:* reads itself', agentActor('agt_t', ['tags:*']), agentTarget('agt_t', { scopes: ['tags:*'] }), 'ok'],
   ];
   for (const [label, actor, target, expected] of rows) {
     it(`${label} → ${expected}`, () => {

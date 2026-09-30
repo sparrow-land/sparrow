@@ -335,8 +335,9 @@ export function removeOrgMembership(
     tx.delete(orgMemberships)
       .where(and(eq(orgMemberships.orgId, orgId), eq(orgMemberships.humanId, targetId)))
       .run();
-    // Delegated authority is org membership's: a departing human's grants go.
-    deleteHumanGrants(tx, orgId, targetId);
+    // Delegated authority is org membership's: a departing human's grants go,
+    // and so do the grants a non-admin created through its `tags:*`.
+    deleteHumanGrants(tx, orgId, targetId, targetRole);
     for (const roomId of orgRoomIds) {
       tx.delete(members)
         .where(

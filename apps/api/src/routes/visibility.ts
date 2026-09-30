@@ -36,11 +36,11 @@ import {
 import {
   actorFacts,
   agentAnalytics,
-  agentTagsOf,
   agentTargetFacts,
   grantsOfOrg,
   orgAgentOr404,
   principalTargetFacts,
+  revokeUnjustifiedGrants,
   scopesOf,
   setAgentTags,
   toGrant,
@@ -179,7 +179,12 @@ export function registerVisibilityRoutes(app: FastifyInstance, ctx: AppContext):
               scopes: scopesOf(ctx.db, orgId, row.principalId),
             };
       enforce(decideGrantDelete(actor, holder, row.grantedBy));
-      ctx.db.delete(grants).where(eq(grants.id, row.id)).run();
+      // Grants the holder created stand only while it can justify them: losing
+      // its `tags:*` takes them (and, recursively, theirs) in the same transaction.
+      ctx.db.transaction((tx) => {
+        tx.delete(grants).where(eq(grants.id, row.id)).run();
+        revokeUnjustifiedGrants(tx, [{ orgId, principalId: row.principalId }]);
+      });
       return reply.send({ ok: true });
     },
   );
@@ -190,15 +195,8 @@ export function registerVisibilityRoutes(app: FastifyInstance, ctx: AppContext):
     const actor = actorFacts(ctx, orgId, resolvePrincipal(ctx, request));
     const agent = orgAgentOr404(ctx, orgId, agentId);
     const query = parse(AgentAnalyticsQuerySchema, request.query ?? {});
-    enforce(
-      decideAnalyticsRead(actor, {
-        kind: 'agent',
-        id: agent.id,
-        ownerHumanId: agent.ownerHumanId,
-        tags: agentTagsOf(ctx.db, agent.id),
-        scopes: [],
-      }),
-    );
+    // The target's real scopes: reads pass the same `outranked` guard as writes.
+    enforce(decideAnalyticsRead(actor, agentTargetFacts(ctx, agent)));
     return reply.send(agentAnalytics(ctx, agent, query.window));
   });
 }

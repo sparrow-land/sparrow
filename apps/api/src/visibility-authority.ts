@@ -12,14 +12,20 @@
  *    any tag and the messaging policy of the agent. They are exempt from the
  *    `outranked` guard (humans with full authority over it).
  *  - DELEGATED grants: `tag:<slug>` (that tag, and the policy of agents carrying
- *    it) and `tags:*` (every tag, plus granting `tag:<slug>` to others).
+ *    it) and `tags:*` (every tag on every agent, plus granting `tag:<slug>` to
+ *    others). A `tag:<slug>` holder has standing only over agents that ALREADY
+ *    carry a tag it holds: it manages them, it never recruits new agents into
+ *    its tag.
  *  - Guard rails: nobody acts on themselves (`self`) — except to give up a grant
  *    they hold; a grant holder never acts on
  *    a principal holding a grant it does not also hold (`outranked`; `tags:*`
  *    counts as holding every `tag:<slug>`); nobody grants a scope they do not hold,
- *    and only org owners/admins grant `tags:*` (`grant_required`).
+ *    and only org owners/admins grant `tags:*` (`grant_required`); an agent whose
+ *    own messaging policy is not `any` never adds a tag it carries to another
+ *    agent, since that would widen its own DM reach (`self`). Reads of an
+ *    agent's analytics pass the same `outranked` guard as writes.
  */
-import type { ForbiddenReason, PrincipalKind } from '@sparrow-land/sdk/types';
+import type { AgentMessagingPolicy, ForbiddenReason, PrincipalKind } from '@sparrow-land/sdk/types';
 
 /** Everything the rules need to know about the caller. */
 export interface ActorFacts {
@@ -29,6 +35,10 @@ export interface ActorFacts {
   orgAdmin: boolean;
   /** The grant scopes the actor holds in the org. */
   scopes: readonly string[];
+  /** For an agent actor: its own current tags (humans carry none). */
+  tags?: readonly string[];
+  /** For an agent actor: its own messaging policy (default `any`). */
+  messaging?: AgentMessagingPolicy;
 }
 
 /** Everything the rules need to know about the principal being acted on. */
@@ -90,9 +100,19 @@ function delegatedGuard(actor: ActorFacts, target: TargetFacts, noGrantMessage: 
 }
 
 /**
- * Replace an agent's tag set: every ADDED or REMOVED tag must be within the
- * actor's authority; unchanged tags need none (but the actor still needs SOME
- * standing over the agent, so a no-op is not an open door).
+ * Standing over an agent for a delegated actor: `tags:*` (org-wide), or a
+ * `tag:x` grant for some `x` the agent carries NOW.
+ */
+function standingOver(actor: ActorFacts, target: TargetFacts): boolean {
+  return actor.scopes.includes(ALL_TAGS_SCOPE) || target.tags.some((t) => coversTag(actor.scopes, t));
+}
+
+/**
+ * Replace an agent's tag set. The actor needs standing over the agent AS IT IS
+ * before the change (so a `tag:x` holder cannot recruit an agent into `x` and
+ * thereby gain authority over it), and every ADDED or REMOVED tag must be within
+ * its authority; unchanged tags need none. An agent actor whose own policy is
+ * not `any` may not add a tag it carries: that would widen its own DM reach.
  */
 export function decideTags(
   actor: ActorFacts,
@@ -102,14 +122,28 @@ export function decideTags(
 ): Verdict {
   if (actor.id === target.id) return refuse('self', SELF_MESSAGE);
   if (implicitOver(actor, target)) return OK;
-  const guard = delegatedGuard(actor, target, 'Changing this agent’s tags needs its owner, an org admin, or a tag grant');
+  const noGrant =
+    'Changing this agent’s tags needs its owner, an org admin, `tags:*`, or a grant for one of the tags it already carries';
+  const guard = delegatedGuard(actor, target, noGrant);
   if (guard) return guard;
+  if (!standingOver(actor, target)) return refuse('grant_required', noGrant);
   const outside = [...added, ...removed].filter((t) => !coversTag(actor.scopes, t));
   if (outside.length > 0) {
     return refuse(
       'grant_required',
       `You hold no grant for ${outside.map((t) => `\`tag:${t}\``).join(', ')}`,
     );
+  }
+  if (actor.kind === 'agent' && (actor.messaging ?? 'any') !== 'any') {
+    const own = added.filter((t) => (actor.tags ?? []).includes(t));
+    if (own.length > 0) {
+      return refuse(
+        'self',
+        `Your messaging setting is \`${actor.messaging}\`: adding a tag you carry (${own
+          .map((t) => `\`${t}\``)
+          .join(', ')}) to another agent would widen your own reach`,
+      );
+    }
   }
   return OK;
 }
@@ -121,8 +155,7 @@ export function decideMessaging(actor: ActorFacts, target: TargetFacts): Verdict
   const noGrant = 'Changing this agent’s messaging needs its owner, an org admin, `tags:*`, or a grant for one of its tags';
   const guard = delegatedGuard(actor, target, noGrant);
   if (guard) return guard;
-  if (actor.scopes.includes(ALL_TAGS_SCOPE)) return OK;
-  if (target.tags.some((t) => coversTag(actor.scopes, t))) return OK;
+  if (standingOver(actor, target)) return OK;
   return refuse('grant_required', noGrant);
 }
 
@@ -167,15 +200,17 @@ export function decideGrantDelete(actor: ActorFacts, holder: TargetFacts, grante
 
 /**
  * Read an agent's analytics: the agent itself, its owner, org owners/admins, and
- * holders of a grant covering one of its tags (`tags:*` covers every agent).
+ * holders of a grant covering one of its tags (`tags:*` covers every agent,
+ * tagged or not: the org-wide chief of staff). Delegated readers pass the same
+ * `outranked` guard as writes: nobody reads a principal holding a grant they do
+ * not also hold.
  */
 export function decideAnalyticsRead(actor: ActorFacts, target: TargetFacts): Verdict {
   if (actor.id === target.id) return OK;
   if (implicitOver(actor, target)) return OK;
-  if (actor.scopes.includes(ALL_TAGS_SCOPE)) return OK;
-  if (target.tags.some((t) => coversTag(actor.scopes, t))) return OK;
-  return refuse(
-    'grant_required',
-    'Reading this agent’s analytics needs its owner, an org admin, or a grant covering one of its tags',
-  );
+  const noGrant = 'Reading this agent’s analytics needs its owner, an org admin, or a grant covering one of its tags';
+  const guard = delegatedGuard(actor, target, noGrant);
+  if (guard) return guard;
+  if (standingOver(actor, target)) return OK;
+  return refuse('grant_required', noGrant);
 }

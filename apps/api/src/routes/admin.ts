@@ -58,7 +58,7 @@ import {
 } from '../org-helpers.js';
 import { parse } from '../validate.js';
 import { deleteAgentEmailCascade, deleteOrgEmailCascade } from '../email/store.js';
-import { deleteAgentVisibility } from '../visibility.js';
+import { deleteAgentVisibility, deleteHumanGrants } from '../visibility.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -402,13 +402,20 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     if (ownsAgent) {
       throw conflict('This account still owns agents — delete them first');
     }
+    const memberships = ctx.db
+      .select({ orgId: orgMemberships.orgId, role: orgMemberships.role })
+      .from(orgMemberships)
+      .where(eq(orgMemberships.humanId, human.id))
+      .all();
     ctx.db.transaction((tx) => {
+      // Delegated authority goes with the account, in every org: the grants it
+      // held, and (as a non-admin) the grants it created through `tags:*`.
+      for (const m of memberships) deleteHumanGrants(tx, m.orgId, human.id, m.role);
       tx.delete(orgMemberships).where(eq(orgMemberships.humanId, human.id)).run();
       tx.delete(members)
         .where(eq(members.principalId, human.id))
         .run();
       tx.delete(agentVisibility).where(eq(agentVisibility.humanId, human.id)).run();
-      // Delegated authority goes with the account, in every org.
       tx.delete(grants).where(eq(grants.principalId, human.id)).run();
       tx.delete(userSessions).where(eq(userSessions.humanId, human.id)).run();
       tx.delete(humans).where(eq(humans.id, human.id)).run();
