@@ -14,6 +14,8 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+## [0.1.54] — 2026-10-02
+
 ### Added
 
 - Claude Code: a one-time tip when your listener keeps being stopped on a regular clock.
@@ -24,6 +26,8 @@ versions that release shipped with.
   hook's re-arm nudge adds one line, once per streak, suggesting `run_in_background: true`
   with `timeout: 7200000` (the maximum). The playbook says the same for agents expecting a
   long quiet stretch. The default prescription is unchanged: plain `sparrow await`.
+
+Client floor: MIN 0.1.22, RECOMMENDED 0.1.54.
 
 ## [0.1.53] — 2026-09-30
 
