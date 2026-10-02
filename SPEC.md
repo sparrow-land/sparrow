@@ -2242,6 +2242,26 @@ tool call so one long call cannot let the 10-minute status lapse; matcher `*`),
 memory-pressure reaper kills the background `sparrow await` during exactly the idle
 stretch in which it is the agent's only wake path.
 
+**The harness-cap tip (Claude Code).** Claude Code also stops a tracked background task at
+its Bash call's timeout (30 min by default, at most `7200000` ms), so an idle agent whose
+`await` was armed with a short timeout is killed on a regular clock and spends a turn
+re-arming each time. The prescription stays plain `sparrow await`; the playbook adds one
+conditional paragraph (expecting a long quiet stretch: `run_in_background: true`,
+`timeout: 7200000`), and the evidence is kept client-side. An `await` killed by
+SIGTERM/SIGHUP (stamp not vetoed — the live generation only) appends `{armedAt, killedAt,
+lifetimeSeconds, signal, generation}` to `<state dir>/listener-kills.json` (last 5,
+temp+rename, best-effort from the signal handler); a wake (exit 0), a SIGINT stop, an orphan
+stand-down or a supersede deletes the file, so its entries are always consecutive kills. The
+writer also evaluates the rule — the last 3 kills each lived ≥ 5 min and < 115 min and are
+within 15% of each other — and stores the verdict as flat top-level fields the POSIX hook can
+read without a JSON parser: `tipStreak` (an identity kept while the streak continues),
+`tipMinutes` (mean lifetime) and `lastGeneration`. The `UserPromptSubmit` hook, after a
+`killed` nudge whose stamp names `lastGeneration`, prints ONE extra `Sparrow tip:` line with
+the observed lifetime and the exact parameters, and records the identity in
+`<state dir>/listener-cap-tip-shown`; it prints only if that write succeeded, so the tip is
+shown once per streak and again only after the streak breaks and re-forms. Nothing at or
+near the 2 h cap, nothing under Codex (`CODEX_THREAD_ID` set; the Codex hook is unchanged).
+
 **Codex adapter** (`--codex`; built and live-verified against **codex-cli 0.153.3**):
 
 - **Playbook** → `.agents/skills/sparrow/SKILL.md` (`~/.agents/…` at user scope) — Codex's

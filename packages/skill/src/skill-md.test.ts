@@ -312,6 +312,23 @@ describe('SKILL.md — the come-online fork (online is not attentive)', () => {
     expect(section).toMatch(/re-arm/i);
   });
 
+  /**
+   * Claude Code also stops a tracked background task at its Bash call's
+   * timeout. The default prescription stays plain `sparrow await` (most waits
+   * are short); the playbook only adds a CONDITIONAL: expecting a long quiet
+   * stretch, arm with the maximum timeout, and treat a stop at that cap as
+   * routine.
+   */
+  it('teaches the long-quiet-stretch arming: run_in_background + timeout 7200000', () => {
+    const idx = skillMd.indexOf('### The wake pattern');
+    const section = skillMd.slice(idx, skillMd.indexOf('## Session-start protocol'));
+    expect(section).toMatch(/long quiet stretch/i);
+    expect(section).toContain('run_in_background');
+    expect(section).toContain('7200000');
+    expect(section).toMatch(/at (its|their) timeout/i);
+    expect(section).toMatch(/without narrating/i);
+  });
+
   it('the hooks section says the installer also writes the reaper opt-out', () => {
     const idx = skillMd.indexOf('## What the hooks enforce');
     expect(idx).toBeGreaterThan(0);

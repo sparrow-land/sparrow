@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { awaitCommand } from './listener.js';
+import { recordListenerKill, resetListenerKills } from './listener-kills.js';
 
 const HOOKS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'hooks');
 const SCRIPT = path.join(HOOKS_DIR, 'sparrow-auto-status.sh');
@@ -672,6 +673,118 @@ describe('sparrow-auto-status.sh — prompt-mode re-arm nudge', () => {
     stubCurl();
     const r = runHook('', '{"hook_event_name":"UserPromptSubmit","prompt":"go"}');
     expect(r.stdout).toMatch(NUDGE);
+  });
+});
+
+/**
+ * THE HARNESS-CAP TIP. Claude Code stops a tracked background task at its Bash
+ * call's timeout, so an idle agent whose `await` was armed with a short timeout
+ * is killed on a regular clock and spends a turn re-arming each time. The CLI
+ * records each kill in `<state dir>/listener-kills.json` (written here through
+ * the CLI's own writer, so the two cannot drift); when the last three were
+ * stopped after a regular lifetime shorter than the 2 h maximum, the killed
+ * nudge gains ONE extra line with the exact arming parameters -- once per
+ * streak.
+ */
+describe('sparrow-auto-status.sh — the harness-cap tip', () => {
+  const MIN = 60_000;
+  let clock = Date.UTC(2026, 9, 1);
+  /** Record kills of the given lifetimes (minutes); the last carries `gen`. */
+  function recordKills(minutes: number[], gen = 'abc123'): void {
+    minutes.forEach((m, i) => {
+      const armedAt = clock;
+      const killedAt = clock + m * MIN;
+      clock = killedAt + 5_000;
+      recordListenerKill(stateDir, {
+        armedAt,
+        killedAt,
+        lifetimeSeconds: m * 60,
+        signal: 'SIGTERM',
+        generation: i === minutes.length - 1 ? gen : `old${i}`,
+      });
+    });
+  }
+  const prompt = (env: Record<string, string> = {}): string[] =>
+    runHook('prompt', '{"prompt":"go"}', env).stdout.trim().split('\n').filter((l) => l !== '');
+
+  beforeEach(() => {
+    writeLoopState('engaged');
+    stubCurl();
+  });
+
+  it('3 kills at ~10 min: the nudge gains ONE tip line with the exact params', () => {
+    recordKills([10, 10, 10]);
+    writeHeartbeat('killed:SIGTERM abc123');
+    const lines = prompt();
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^Sparrow: your listener was killed/);
+    expect(lines[1]).toMatch(/^Sparrow tip: /);
+    expect(lines[1]).toMatch(/last 3 listeners were each stopped after ~10 min/);
+    expect(lines[1]).toContain('run_in_background');
+    expect(lines[1]).toContain('7200000');
+    expect(lines[1]).toContain(`\`${awaitCommand()}\``);
+  });
+
+  it('is shown ONCE per streak, and again only after the streak breaks and re-forms', () => {
+    recordKills([10, 10, 10]);
+    writeHeartbeat('killed:SIGTERM abc123');
+    expect(prompt()).toHaveLength(2);
+    expect(prompt()).toHaveLength(1); // same streak: the nudge alone
+
+    recordKills([10], 'def456'); // the streak goes on: still silent
+    writeHeartbeat('killed:SIGTERM def456');
+    expect(prompt()).toHaveLength(1);
+
+    resetListenerKills(stateDir); // a wake breaks it…
+    recordKills([10, 10, 10], 'fed789'); // …and it re-forms
+    writeHeartbeat('killed:SIGTERM fed789');
+    const lines = prompt();
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/^Sparrow tip: /);
+  });
+
+  it('3 kills at the 2 h cap: no tip -- there is nothing better to suggest', () => {
+    recordKills([120, 120, 120]);
+    writeHeartbeat('killed:SIGTERM abc123');
+    expect(prompt()).toHaveLength(1);
+  });
+
+  it('mixed lifetimes (random interrupts): no tip', () => {
+    recordKills([10, 35, 10]);
+    writeHeartbeat('killed:SIGTERM abc123');
+    expect(prompt()).toHaveLength(1);
+  });
+
+  it('only rides a KILLED nudge: never for a live listener, a Ctrl-C or an orphan', () => {
+    recordKills([10, 10, 10]);
+    for (const hb of ['await abc123', 'stopped:SIGINT abc123', 'orphaned abc123']) {
+      writeHeartbeat(hb);
+      expect(prompt().filter((l) => l.startsWith('Sparrow tip:')), hb).toEqual([]);
+    }
+    // …and it was not used up by those: the real kill still gets it.
+    writeHeartbeat('killed:SIGTERM abc123');
+    expect(prompt()).toHaveLength(2);
+  });
+
+  it('says nothing when the history describes a different listener than the stamp', () => {
+    recordKills([10, 10, 10], 'abc123');
+    writeHeartbeat('killed:SIGTERM 999999'); // a kill the CLI did not record
+    expect(prompt()).toHaveLength(1);
+  });
+
+  it('is Claude-specific: silent under Codex', () => {
+    recordKills([10, 10, 10]);
+    writeHeartbeat('killed:SIGTERM abc123');
+    expect(prompt({ CODEX_THREAD_ID: 'thread-1' })).toHaveLength(1);
+  });
+
+  it('names SPARROW_PROFILE in the command, identically to awaitCommand()', () => {
+    recordKills([30, 30, 30]);
+    writeHeartbeat('killed:SIGTERM abc123');
+    const lines = prompt({ SPARROW_PROFILE: 'my-agent' });
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain(`\`${awaitCommand({ profile: 'my-agent' })}\``);
+    expect(lines[1]).toMatch(/~30 min/);
   });
 });
 

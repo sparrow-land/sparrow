@@ -133,6 +133,8 @@ import {
   markHeartbeatDead,
   markHeartbeatOrphaned,
   readLoopState,
+  recordListenerKill,
+  resetListenerKills,
   skillInstall,
 } from './loop-state.js';
 import {
@@ -484,6 +486,12 @@ function armListenerSignals(
    * (`watch`/`loop`) means "stamp as before". Exit codes are unchanged.
    */
   stampAs?: () => false | string | undefined,
+  /**
+   * Called after a `killed:` stamp was written (never when vetoed, never for a
+   * SIGINT) — `await` records its lifetime here for the harness-cap tip. Must
+   * be synchronous and must not throw; guarded anyway.
+   */
+  onKilled?: (signal: string) => void,
 ): () => void {
   let fired = false;
   const stamp = (reason: 'killed' | 'stopped', signal: string): boolean => {
@@ -491,7 +499,10 @@ function armListenerSignals(
     fired = true;
     try {
       const tag = stampAs?.();
-      if (tag !== false) markHeartbeatDead(env, reason, signal, typeof tag === 'string' ? tag : undefined);
+      if (tag !== false) {
+        markHeartbeatDead(env, reason, signal, typeof tag === 'string' ? tag : undefined);
+        if (reason === 'killed') onKilled?.(signal);
+      }
     } catch {
       /* best-effort: never throw on the way out */
     }
@@ -4465,6 +4476,13 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
    * finishes it (see `finishOrphaned`).
    */
   const awaitOrphanWatch: { stop?: () => void; standDown?: () => Promise<void> } = {};
+  /**
+   * How the run settles the listener-kill history once it has ended (see
+   * `@sparrow/skill`'s listener-kills.ts): set as soon as the generation
+   * exists, run by the same single `finally`. A killed listener never gets
+   * here — `process.exit` in the signal handler — and records itself there.
+   */
+  const awaitKillStreak: { settle?: () => void } = {};
   const runAwait = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
     try {
       /* ORPHANED IS A TERMINAL STATE (see `runIsOver`), finished at ONE point:
@@ -4497,6 +4515,12 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       awaitOrphanWatch.stop?.();
       awaitOrphanWatch.stop = undefined;
       awaitOrphanWatch.standDown = undefined;
+      try {
+        awaitKillStreak.settle?.();
+      } catch {
+        /* bookkeeping for a tip is not worth failing a run over */
+      }
+      awaitKillStreak.settle = undefined;
     }
   };
   const runAwaitArmed = async (opts: GlobalOpts & Record<string, unknown>): Promise<void> => {
@@ -4523,6 +4547,8 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
     const codexThread =
       explicitCodexThread || env.CODEX_THREAD_ID?.trim() || env.CODEX_SESSION_ID?.trim();
     const awaitHeartbeatKind = codexThread ? 'await:codex' : 'await';
+    /** When this listener started: a kill records how long it lived. */
+    const armedAt = Date.now();
 
     /* ---------------------- WHO CAN THIS LISTENER WAKE? ----------------------
      * Under Claude Code the wake is this process EXITING, and only a descendant
@@ -4626,6 +4652,15 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       err: (s) => io.err(s),
     });
     awaitCandidate.retire = () => generation.clearCandidate();
+    /* THE KILL STREAK IS BROKEN by anything but a kill: a wake (exit 0 with the
+     * line out), a deliberate Ctrl-C, an orphan stand-down, a supersede. Only a
+     * listener that ever OWNED the state dir speaks for it; a timeout (exit 2)
+     * or an error leaves the history as it was. */
+    awaitKillStreak.settle = () => {
+      if (!generation.published()) return;
+      const woke = emitted && (ctx.exitCode ?? 0) === 0;
+      if (woke || interrupted() || orphaned || supersededBy !== undefined) resetListenerKills(env);
+    };
     let supersededBy: string | undefined;
     /** Set once the stream exists: how a checkpoint ends the wait. */
     let standDown: () => void = () => {};
@@ -4955,6 +4990,19 @@ export async function runCli(argv: string[], env: Env = process.env, io: CliIO =
       },
       // An orphan already left the truer stamp; a later kill must not replace it.
       () => (!orphaned && generation.published() && owned() ? generation.nonce() : false),
+      (signal) => {
+        const killedAt = Date.now();
+        recordListenerKill(
+          {
+            armedAt,
+            killedAt,
+            lifetimeSeconds: Math.max(0, Math.round((killedAt - armedAt) / 1000)),
+            signal,
+            generation: generation.nonce(),
+          },
+          env,
+        );
+      },
     );
     let timedOut = false;
     /** The wall-clock deadline `--timeout` names, for waits the timer cannot reach. */

@@ -189,7 +189,8 @@
 # Contract: this hook is a pure side-effect with ONE exception. Every mode but
 # `prompt` writes NOTHING to stdout (a Stop hook's stdout is a decision channel,
 # and this script is also called from within sparrow-stop-check.sh); `prompt`
-# may write exactly one plain-text re-arm nudge line (never JSON), which Claude
+# may write one plain-text re-arm nudge line (never JSON) -- plus, after a
+# `killed` stamp, at most one harness-cap tip line (see cap_tip) -- which Claude
 # Code injects as context. It ALWAYS exits 0 — any failure is a silent no-op so
 # it can never wedge a session. It honors the loop switch: paused/absent = no
 # writes and no nudge.
@@ -890,7 +891,8 @@ fmt_age() {
   if [ "$1" -lt 60 ] 2>/dev/null; then printf '%ss' "$1"; else printf '%sm' "$(($1 / 60))"; fi
 }
 
-# Print ONE line telling the agent its listener is gone and how to re-arm — or
+# Print ONE line telling the agent its listener is gone and how to re-arm (plus,
+# after a `killed` stamp, at most one harness-cap tip line -- see cap_tip) — or
 # print nothing, which is the case whenever a fresh `sparrow await` is running.
 #
 # WHY IT EXISTS: the harness kills the tracked background `sparrow await` when a
@@ -927,6 +929,7 @@ sparrow_heartbeat_read() {
 
 listener_nudge() {
   cause=""
+  nudge_killed=""
   if [ ! -f "$HEARTBEAT_FILE" ]; then
     cause="is not running (no heartbeat at all)"
   else
@@ -946,6 +949,7 @@ listener_nudge() {
       # A terminal stamp beats freshness: the listener told us it is gone, and it
       # is at its FRESHEST the moment it died.
       killed | killed:*)
+        nudge_killed=1
         if [ -n "$signal" ]; then
           cause="was killed ($signal -- usually a session interrupt)"
         else
@@ -987,6 +991,48 @@ listener_nudge() {
     command='sparrow await'
   fi
   printf 'Sparrow: your listener %s. Before anything else, re-arm it: run `%s` as a tracked background task, then continue. (To step away on purpose: sparrow skill pause.)\n' "$cause" "$command"
+  [ "$nudge_killed" = 1 ] && cap_tip "$command"
+  return 0
+}
+
+# --- the harness-cap tip (rides a `killed` nudge only) ----------------------
+#
+# Claude Code stops a tracked background task at its Bash call's timeout (30 min
+# by default, at most 7200000 ms when passed explicitly). An idle agent whose
+# `await` was armed with a short timeout is therefore killed on a regular clock
+# and spends a turn re-arming every time. `sparrow await` records each kill in
+# <state dir>/listener-kills.json and decides there -- in TypeScript, where it is
+# unit-tested -- whether the last three look like such a cap (each lived 5-115
+# min, within 15% of each other). This hook only reads the verdict: `tipStreak`
+# (an identity that holds while the streak goes on) and `tipMinutes`.
+#
+# ONCE PER STREAK: the shown identity is remembered in
+# <state dir>/listener-cap-tip-shown, and the tip is printed only if that write
+# succeeded. A wake, Ctrl-C, orphan or supersede deletes the history, so a
+# streak that re-forms carries a new identity and is told again.
+#
+# Only for the kill the history describes (`lastGeneration` must be the
+# heartbeat stamp's generation), and never under Codex: the advice is about
+# Claude Code's Bash tool.
+LISTENER_KILLS_FILE="$STATE_DIR/listener-kills.json"
+CAP_TIP_SHOWN="$STATE_DIR/listener-cap-tip-shown"
+cap_tip() {
+  [ -z "${CODEX_THREAD_ID:-}" ] || return 0
+  [ -f "$LISTENER_KILLS_FILE" ] || return 0
+  _ct_streak=$(json_field "$LISTENER_KILLS_FILE" tipStreak | tr -cd 'A-Za-z0-9_-')
+  [ -n "$_ct_streak" ] || return 0
+  _ct_min=$(sed -n 's/.*"tipMinutes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    "$LISTENER_KILLS_FILE" 2>/dev/null | head -n 1)
+  [ -n "$_ct_min" ] || return 0
+  _ct_gen=$(json_field "$LISTENER_KILLS_FILE" lastGeneration | tr -cd 'A-Za-z0-9')
+  _ct_hb=$(head -c 96 "$HEARTBEAT_FILE" 2>/dev/null | tr '\t\r\n' '   ' |
+    sed -n 's/^ *[^ ][^ ]*  *\([A-Za-z0-9][A-Za-z0-9]*\).*$/\1/p')
+  [ "$_ct_gen" = "$_ct_hb" ] || return 0
+  _ct_seen=$(head -c 64 "$CAP_TIP_SHOWN" 2>/dev/null | tr -cd 'A-Za-z0-9_-')
+  [ "$_ct_seen" != "$_ct_streak" ] || return 0
+  printf '%s\n' "$_ct_streak" > "$CAP_TIP_SHOWN" 2>/dev/null || return 0
+  printf 'Sparrow tip: your last 3 listeners were each stopped after ~%s min with nothing waiting -- Claude Code stops a background task at its Bash timeout. Expecting a long quiet stretch? Arm `%s` with run_in_background: true and timeout: 7200000 (the maximum); a stop at that cap with nothing waiting is expected, so re-arm without narrating it.\n' \
+    "$_ct_min" "$1"
 }
 
 # The standing-by line: while a usage-limit marker stands, the re-arm nudge is

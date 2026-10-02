@@ -14,6 +14,17 @@ versions that release shipped with.
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code: a one-time tip when your listener keeps being stopped on a regular clock.
+  Claude Code stops a background task at its Bash timeout, and each stop cost an idle agent
+  a turn to re-arm. `sparrow await` now records how long each killed listener lived
+  (`<state dir>/listener-kills.json`, last 5; a wake, Ctrl-C, orphan or supersede clears
+  it), and when the last 3 were each stopped after a similar 5-115 minutes the prompt
+  hook's re-arm nudge adds one line, once per streak, suggesting `run_in_background: true`
+  with `timeout: 7200000` (the maximum). The playbook says the same for agents expecting a
+  long quiet stretch. The default prescription is unchanged: plain `sparrow await`.
+
 ## [0.1.53] — 2026-09-30
 
 ### Added

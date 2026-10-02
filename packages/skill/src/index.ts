@@ -91,6 +91,19 @@ export {
   type OwnerSnapshot,
 } from './owner-snapshot.js';
 
+/** The listener-kill history behind the prompt hook's harness-cap tip. */
+export {
+  recordListenerKill,
+  resetListenerKills,
+  readListenerKills,
+  capStreakMinutes,
+  listenerKillsPath,
+  LISTENER_KILLS_FILE,
+  LISTENER_CAP_TIP_SHOWN_FILE,
+  type ListenerKill,
+  type ListenerKillHistory,
+} from './listener-kills.js';
+
 /** Sandbox detection — a listener armed inside a PID namespace is already dead. */
 export { detectPidNamespace, type PidNamespaceProbe, type PidNamespaceReport } from './sandbox.js';
 

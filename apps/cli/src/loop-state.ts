@@ -21,7 +21,10 @@ import {
   markHeartbeatDead as markHeartbeatDeadAt,
   markHeartbeatBlocked as markHeartbeatBlockedAt,
   markHeartbeatOrphaned as markHeartbeatOrphanedAt,
+  recordListenerKill as recordListenerKillAt,
+  resetListenerKills as resetListenerKillsAt,
   runSkill,
+  type ListenerKill,
   type DeadReason,
   type ListenerKind,
   type LoopState,
@@ -99,6 +102,21 @@ export function markHeartbeatOrphaned(
   generation?: string,
 ): void {
   markHeartbeatOrphanedAt(resolveStateDir(env), generation);
+}
+
+/**
+ * Record that this `await` was KILLED (SIGTERM/SIGHUP) after living
+ * `lifetimeSeconds` — the evidence behind the prompt hook's harness-cap tip
+ * (see `@sparrow/skill`'s listener-kills.ts). Synchronous and best-effort:
+ * safe from a signal handler.
+ */
+export function recordListenerKill(kill: ListenerKill, env: Env = process.env): void {
+  recordListenerKillAt(resolveStateDir(env), kill);
+}
+
+/** A wake, a Ctrl-C, an orphan or a supersede: the kill streak is broken. */
+export function resetListenerKills(env: Env = process.env): void {
+  resetListenerKillsAt(resolveStateDir(env));
 }
 
 /** Read the loop switch (`engaged` | `paused` | `undefined`). */

@@ -136,6 +136,11 @@ describe('Codex SKILL.md — nothing Claude-specific leaks', () => {
     expect(codex).not.toMatch(/memory[- ]pressure/i);
   });
 
+  it('never teaches the Claude Code background-task timeout', () => {
+    expect(codex).not.toContain('run_in_background');
+    expect(codex).not.toContain('7200000');
+  });
+
   it('never points at Claude Code settings files or the .claude skill dir', () => {
     expect(codex).not.toContain('.claude/settings.local.json');
     expect(codex).not.toContain('.claude/settings.json');

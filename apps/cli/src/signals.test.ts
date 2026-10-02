@@ -540,6 +540,89 @@ describe('sparrow await — termination stamps the heartbeat', () => {
   }, 40_000);
 });
 
+/**
+ * THE KILL HISTORY behind the prompt hook's harness-cap tip. Claude Code stops a
+ * tracked background task at its Bash timeout; a listener killed that way
+ * records how long it lived in `<state dir>/listener-kills.json`, and anything
+ * that proves the pattern broken — a wake, a deliberate Ctrl-C, an orphan, a
+ * supersede — clears it.
+ */
+describe('sparrow await — the listener-kill history', () => {
+  afterEach(() => upstream.reset());
+
+  const killsFile = (stateDir: string): string => path.join(stateDir, 'listener-kills.json');
+  const readKills = (stateDir: string): { kills: { lifetimeSeconds: number; signal?: string; generation?: string }[] } =>
+    JSON.parse(fs.readFileSync(killsFile(stateDir), 'utf8'));
+  /** A history a previous kill left behind. */
+  const seed = (stateDir: string): void =>
+    fs.writeFileSync(
+      killsFile(stateDir),
+      `${JSON.stringify({ version: 1, kills: [{ armedAt: 1, killedAt: 600_001, lifetimeSeconds: 600, signal: 'SIGTERM' }] })}\n`,
+    );
+
+  it('SIGTERM records the kill: lifetime, signal and the generation it stamped', async () => {
+    const l = await startListener(['await', '--poll-seconds', '0', '--json']);
+    l.kill('SIGTERM');
+    expect((await l.ended).code).toBe(143);
+    const h = readKills(l.stateDir);
+    expect(h.kills).toHaveLength(1);
+    const owner = JSON.parse(fs.readFileSync(path.join(l.stateDir, 'await-owner.json'), 'utf8')) as { nonce: string };
+    expect(h.kills[0]!.signal).toBe('SIGTERM');
+    expect(h.kills[0]!.generation).toBe(owner.nonce);
+    expect(h.kills[0]!.lifetimeSeconds).toBeGreaterThanOrEqual(0);
+    expect(h.kills[0]!.lifetimeSeconds).toBeLessThan(60);
+  }, 40_000);
+
+  it('a second kill appends to the history', async () => {
+    const l = await startListener(['await', '--poll-seconds', '0', '--json']);
+    seed(l.stateDir);
+    l.kill('SIGHUP');
+    expect((await l.ended).code).toBe(129);
+    expect(readKills(l.stateDir).kills.map((k) => k.signal)).toEqual(['SIGTERM', 'SIGHUP']);
+  }, 40_000);
+
+  it('SIGINT (a deliberate stop) breaks the streak', async () => {
+    const l = await startListener(['await', '--poll-seconds', '0', '--json']);
+    seed(l.stateDir);
+    l.kill('SIGINT');
+    expect((await l.ended).code).toBe(0);
+    expect(fs.existsSync(killsFile(l.stateDir))).toBe(false);
+  }, 40_000);
+
+  it('a wake (exit 0) breaks the streak', async () => {
+    const stateDir = tmp('sparrow-sig-state-');
+    seed(stateDir);
+    upstream.setItem(true);
+    const l = spawnListener(['await', '--poll-seconds', '0', '--json'], { SPARROW_STATE_DIR: stateDir });
+    expect((await l.ended).code).toBe(0);
+    expect(l.stdout()).toContain('await.item');
+    expect(fs.existsSync(killsFile(stateDir))).toBe(false);
+  }, 40_000);
+
+  it('a superseded listener breaks the streak and records no kill', async () => {
+    const l = await startListener(['await', '--poll-seconds', '0', '--json']);
+    const ownerFile = path.join(l.stateDir, 'await-owner.json');
+    await until(() => fs.existsSync(ownerFile));
+    seed(l.stateDir);
+    fs.writeFileSync(
+      ownerFile,
+      `${JSON.stringify({ version: 1, nonce: 'cafebabecafebabe', pid: 999999, startedAt: new Date().toISOString(), kind: 'await' })}\n`,
+    );
+    // Wake the listener's checkpoint with a stream event so it notices.
+    upstream.deliver();
+    const { code } = await l.ended;
+    expect(code).toBe(4);
+    expect(fs.existsSync(killsFile(l.stateDir))).toBe(false);
+  }, 40_000);
+
+  it('watch records nothing — only await is a wake path', async () => {
+    const l = await startListener(['watch', '--poll-seconds', '0', '--json']);
+    l.kill('SIGTERM');
+    await l.ended;
+    expect(fs.existsSync(killsFile(l.stateDir))).toBe(false);
+  }, 40_000);
+});
+
 describe('sparrow watch/loop — the hold-only listeners stamp too', () => {
   it('watch: SIGTERM leaves `killed:SIGTERM` and exits 143', async () => {
     const l = await startListener(['watch', '--poll-seconds', '0', '--json']);
